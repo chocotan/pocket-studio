@@ -1,0 +1,35 @@
+{
+  "device": {
+    "id": "dev_local",
+    "name": "Local Machine"
+  },
+  "server": {
+    "url": "ws://localhost:18080/ws/daemon"
+  },
+  "claude": {
+    "command": "claude",
+    "args": [
+      "--output-format",
+      "stream-json",
+      "--verbose"
+    ]
+  },
+  "acpx": {
+    "enabled": true,
+    "command": "acpx",
+    "agent": "claude",
+    "session_name": "agentbridge",
+    "args": [
+      "--format",
+      "json",
+      "--approve-all"
+    ]
+  },
+  "workspaces": [
+    {
+      "id": "remote-agent",
+      "name": "remote-agent",
+      "path": "/home/choco/Downloads/remote-agent"
+    }
+  ]
+}
