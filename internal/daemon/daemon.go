@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -39,6 +40,8 @@ type runningTask struct {
 	done      chan struct{}
 	workspace string
 	acpx      bool
+	agent     string
+	session   string
 	mu        sync.Mutex
 	stopping  bool
 }
@@ -98,6 +101,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		DaemonVersion: "0.1.0",
 		Agent:         d.agentName(),
 		AgentLabel:    d.agentLabel(),
+		Agents:        d.agentCapabilities(),
 		Workspaces:    d.cfg.Workspaces,
 	})
 	d.sendSnapshot()
@@ -153,6 +157,96 @@ func (d *Daemon) agentLabel() string {
 	return agentDisplayName(d.agentName())
 }
 
+func (d *Daemon) agentCapabilities() []protocol.AgentCapability {
+	if !d.cfg.ACPX.Enabled {
+		if _, err := exec.LookPath(d.cfg.Claude.Command); err == nil {
+			return []protocol.AgentCapability{{Name: "claude_code", Label: "Claude Code"}}
+		}
+		return nil
+	}
+	names := []string{
+		"codex",
+		"claude",
+		"gemini",
+		"cursor",
+		"copilot",
+		"qwen",
+		"opencode",
+		"openclaw",
+		"pi",
+		"droid",
+		"iflow",
+		"kilocode",
+		"kimi",
+		"kiro",
+		"qoder",
+		"trae",
+	}
+	caps := make([]protocol.AgentCapability, 0, len(names))
+	preferred := strings.ToLower(strings.TrimSpace(d.cfg.ACPX.Agent))
+	if preferred != "" && installedAgentCommand(preferred) != "" {
+		caps = append(caps, protocol.AgentCapability{Name: preferred, Label: agentDisplayName(preferred)})
+	}
+	for _, name := range names {
+		if name == preferred {
+			continue
+		}
+		if installedAgentCommand(name) == "" {
+			continue
+		}
+		caps = append(caps, protocol.AgentCapability{Name: name, Label: agentDisplayName(name)})
+	}
+	return caps
+}
+
+func installedAgentCommand(agent string) string {
+	switch strings.ToLower(strings.TrimSpace(agent)) {
+	case "claude", "claude_code", "claude-code":
+		return lookPathAny("claude")
+	case "codex":
+		return lookPathAny("codex")
+	case "gemini":
+		return lookPathAny("gemini")
+	case "cursor":
+		return lookPathAny("cursor-agent", "cursor")
+	case "copilot":
+		return lookPathAny("copilot")
+	case "qwen":
+		return lookPathAny("qwen")
+	case "opencode":
+		return lookPathAny("opencode")
+	case "openclaw":
+		return lookPathAny("openclaw")
+	case "pi":
+		return lookPathAny("pi")
+	case "droid":
+		return lookPathAny("droid", "factory-droid")
+	case "iflow":
+		return lookPathAny("iflow")
+	case "kilocode":
+		return lookPathAny("kilocode")
+	case "kimi":
+		return lookPathAny("kimi")
+	case "kiro":
+		return lookPathAny("kiro")
+	case "qoder":
+		return lookPathAny("qoder")
+	case "trae":
+		return lookPathAny("trae")
+	default:
+		return ""
+	}
+}
+
+func lookPathAny(names ...string) string {
+	for _, name := range names {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
 func agentDisplayName(agent string) string {
 	switch strings.ToLower(strings.TrimSpace(agent)) {
 	case "claude", "claude_code", "claude-code":
@@ -175,6 +269,18 @@ func agentDisplayName(agent string) string {
 		return "Qwen Code"
 	case "opencode":
 		return "OpenCode"
+	case "iflow":
+		return "iFlow"
+	case "kilocode":
+		return "Kilo Code"
+	case "kimi":
+		return "Kimi"
+	case "kiro":
+		return "Kiro"
+	case "qoder":
+		return "Qoder"
+	case "trae":
+		return "Trae"
 	default:
 		if agent == "" {
 			return "Agent"
@@ -185,6 +291,13 @@ func agentDisplayName(agent string) string {
 
 func (d *Daemon) handleEnvelope(ctx context.Context, env protocol.Envelope) {
 	switch env.Type {
+	case protocol.TypeSessionCreate:
+		session, err := protocol.DecodePayload[protocol.SessionCreate](env)
+		if err != nil {
+			d.emitError("", "bad_payload", err.Error())
+			return
+		}
+		go d.createSession(ctx, session)
 	case protocol.TypeTaskDispatch:
 		task, err := protocol.DecodePayload[protocol.TaskDispatch](env)
 		if err != nil {
@@ -202,11 +315,63 @@ func (d *Daemon) handleEnvelope(ctx context.Context, env protocol.Envelope) {
 	}
 }
 
+func (d *Daemon) createSession(parent context.Context, session protocol.SessionCreate) {
+	if session.TaskID == "" {
+		session.TaskID = protocol.NewID("tsk")
+	}
+	workspace, err := d.resolveWorkspacePath(session.WorkspaceID, session.WorkspacePath)
+	if err != nil {
+		d.emitError(session.TaskID, "workspace_denied", err.Error())
+		return
+	}
+	if !d.supportsTaskAgent(session.Agent) {
+		d.emitError(session.TaskID, "unsupported_agent", "unsupported agent")
+		return
+	}
+	task := protocol.TaskDispatch{
+		TaskID:        session.TaskID,
+		WorkspaceID:   workspace.ID,
+		WorkspacePath: workspace.Path,
+		Agent:         session.Agent,
+		SessionName:   session.SessionName,
+		Options:       session.Options,
+	}
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	if d.cfg.ACPX.Enabled {
+		if err := d.ensureACPXSession(ctx, task, workspace.Path, session.TaskID); err != nil {
+			d.emitError(session.TaskID, "session_ensure_failed", err.Error())
+			return
+		}
+	}
+	now := time.Now().Unix()
+	d.mu.Lock()
+	record := d.history[session.TaskID]
+	if record.TaskID == "" {
+		record.TaskID = session.TaskID
+		record.StartedAt = now
+	}
+	record.WorkspaceID = workspace.ID
+	record.WorkspacePath = workspace.Path
+	record.DeviceID = d.cfg.Device.ID
+	record.Agent = taskAgentName(task, d.cfg.ACPX.Agent)
+	record.SessionName = taskSessionName(task, d.cfg.ACPX.SessionName)
+	record.Status = "created"
+	record.UpdatedAt = now
+	d.history[session.TaskID] = record
+	d.mu.Unlock()
+	d.emitTaskEvent(session.TaskID, "session.created", 0, map[string]any{
+		"workspace":    workspace.Path,
+		"agent":        record.Agent,
+		"session_name": record.SessionName,
+	}, nil)
+}
+
 func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	if task.TaskID == "" {
 		task.TaskID = protocol.NewID("tsk")
 	}
-	workspace, err := d.resolveWorkspace(task)
+	workspace, err := d.resolveWorkspacePath(task.WorkspaceID, task.WorkspacePath)
 	if err != nil {
 		d.emitError(task.TaskID, "workspace_denied", err.Error())
 		return
@@ -219,7 +384,7 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	ctx, cancel := context.WithCancel(parent)
 	command, args, source := d.buildAgentCommand(task, workspace.Path)
 	if d.cfg.ACPX.Enabled {
-		if err := d.ensureACPXSession(ctx, workspace.Path, task.TaskID); err != nil {
+		if err := d.ensureACPXSession(ctx, task, workspace.Path, task.TaskID); err != nil {
 			cancel()
 			d.emitError(task.TaskID, "session_ensure_failed", err.Error())
 			return
@@ -248,7 +413,16 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 		return
 	}
 
-	rt := &runningTask{id: task.TaskID, cmd: cmd, cancel: cancel, done: make(chan struct{}), workspace: workspace.Path, acpx: d.cfg.ACPX.Enabled}
+	rt := &runningTask{
+		id:        task.TaskID,
+		cmd:       cmd,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		workspace: workspace.Path,
+		acpx:      d.cfg.ACPX.Enabled,
+		agent:     taskAgentName(task, d.cfg.ACPX.Agent),
+		session:   taskSessionName(task, d.cfg.ACPX.SessionName),
+	}
 	d.mu.Lock()
 	d.tasks[task.TaskID] = rt
 	now := time.Now().Unix()
@@ -259,11 +433,14 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	}
 	record.WorkspaceID = workspace.ID
 	record.WorkspacePath = workspace.Path
+	record.DeviceID = d.cfg.Device.ID
 	record.Prompt = task.Prompt
 	record.ParentTaskID = task.ParentTaskID
 	if task.ResumeSessionID != "" {
 		record.SessionID = task.ResumeSessionID
 	}
+	record.Agent = taskAgentName(task, d.cfg.ACPX.Agent)
+	record.SessionName = taskSessionName(task, d.cfg.ACPX.SessionName)
 	record.Status = "running"
 	record.UpdatedAt = now
 	userEvent := protocol.TaskEvent{
@@ -272,6 +449,7 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 		EventType: "user.prompt",
 		Source:    "web",
 		Sequence:  int64(len(record.Events) + 1),
+		Timestamp: now,
 		Data:      mustJSON(map[string]string{"prompt": task.Prompt}),
 	}
 	record.Events = appendBounded(record.Events, userEvent, 1000)
@@ -323,13 +501,47 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 
 func (d *Daemon) supportsTaskAgent(agent string) bool {
 	agent = strings.ToLower(strings.TrimSpace(agent))
-	if agent == "" || agent == "claude_code" || agent == "acpx" {
+	if agent == "" || agent == "acpx" {
 		return true
 	}
 	if d.cfg.ACPX.Enabled {
-		return agent == strings.ToLower(strings.TrimSpace(d.cfg.ACPX.Agent))
+		return isKnownACPXAgent(agent) && installedAgentCommand(agent) != ""
 	}
-	return false
+	return agent == "claude_code" || agent == "claude" || agent == "claude-code"
+}
+
+func taskAgentName(task protocol.TaskDispatch, fallback string) string {
+	agent := strings.ToLower(strings.TrimSpace(task.Agent))
+	if agent == "" || agent == "acpx" {
+		agent = strings.ToLower(strings.TrimSpace(fallback))
+	}
+	if agent == "" {
+		return "claude"
+	}
+	if agent == "claude_code" || agent == "claude-code" {
+		return "claude"
+	}
+	return agent
+}
+
+func taskSessionName(task protocol.TaskDispatch, fallback string) string {
+	if sessionName := strings.TrimSpace(task.SessionName); sessionName != "" {
+		return sessionName
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func isKnownACPXAgent(agent string) bool {
+	switch agent {
+	case "claude_code", "claude-code":
+		agent = "claude"
+	}
+	switch agent {
+	case "codex", "claude", "gemini", "cursor", "copilot", "qwen", "opencode", "openclaw", "pi", "droid", "iflow", "kilocode", "kimi", "kiro", "qoder", "trae":
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Daemon) buildClaudeArgs(task protocol.TaskDispatch) []string {
@@ -353,35 +565,36 @@ func (d *Daemon) buildClaudeArgs(task protocol.TaskDispatch) []string {
 
 func (d *Daemon) buildAgentCommand(task protocol.TaskDispatch, workspacePath string) (string, []string, string) {
 	if d.cfg.ACPX.Enabled {
-		return d.cfg.ACPX.Command, d.buildACPXPromptArgs(task, workspacePath), d.cfg.ACPX.Agent
+		agent := taskAgentName(task, d.cfg.ACPX.Agent)
+		return d.cfg.ACPX.Command, d.buildACPXPromptArgs(task, workspacePath), agent
 	}
 	return d.cfg.Claude.Command, d.buildClaudeArgs(task), "claude_code"
 }
 
 func (d *Daemon) buildACPXPromptArgs(task protocol.TaskDispatch, workspacePath string) []string {
 	args := d.buildACPXPromptGlobalArgs(task, workspacePath)
-	args = append(args, d.cfg.ACPX.Agent)
-	if d.cfg.ACPX.SessionName != "" {
-		args = append(args, "-s", d.cfg.ACPX.SessionName)
+	args = append(args, taskAgentName(task, d.cfg.ACPX.Agent))
+	if sessionName := taskSessionName(task, d.cfg.ACPX.SessionName); sessionName != "" {
+		args = append(args, "-s", sessionName)
 	}
 	args = append(args, task.Prompt)
 	return args
 }
 
-func (d *Daemon) buildACPXSessionArgs(workspacePath string, command string) []string {
+func (d *Daemon) buildACPXSessionArgs(task protocol.TaskDispatch, workspacePath string, command string) []string {
 	args := d.buildACPXGlobalArgs(workspacePath)
-	args = append(args, d.cfg.ACPX.Agent, "sessions", command)
-	if d.cfg.ACPX.SessionName != "" {
-		args = append(args, "--name", d.cfg.ACPX.SessionName)
+	args = append(args, taskAgentName(task, d.cfg.ACPX.Agent), "sessions", command)
+	if sessionName := taskSessionName(task, d.cfg.ACPX.SessionName); sessionName != "" {
+		args = append(args, "--name", sessionName)
 	}
 	return args
 }
 
-func (d *Daemon) buildACPXCancelArgs(workspacePath string) []string {
+func (d *Daemon) buildACPXCancelArgs(workspacePath string, agent string, sessionName string) []string {
 	args := d.buildACPXGlobalArgs(workspacePath)
-	args = append(args, d.cfg.ACPX.Agent, "cancel")
-	if d.cfg.ACPX.SessionName != "" {
-		args = append(args, "-s", d.cfg.ACPX.SessionName)
+	args = append(args, agent, "cancel")
+	if sessionName != "" {
+		args = append(args, "-s", sessionName)
 	}
 	return args
 }
@@ -511,8 +724,8 @@ func (d *Daemon) scanOutput(r io.Reader, stream string, emitter *taskEmitter) {
 	}
 }
 
-func (d *Daemon) ensureACPXSession(ctx context.Context, workspacePath string, taskID string) error {
-	args := d.buildACPXSessionArgs(workspacePath, "ensure")
+func (d *Daemon) ensureACPXSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) error {
+	args := d.buildACPXSessionArgs(task, workspacePath, "ensure")
 	cmd := exec.CommandContext(ctx, d.cfg.ACPX.Command, args...)
 	cmd.Dir = workspacePath
 	var stdout bytes.Buffer
@@ -535,8 +748,8 @@ func (d *Daemon) ensureACPXSession(ctx context.Context, workspacePath string, ta
 	if json.Valid(output) {
 		raw = append(raw, output...)
 		data := map[string]any{
-			"agent":        d.cfg.ACPX.Agent,
-			"session_name": d.cfg.ACPX.SessionName,
+			"agent":        taskAgentName(task, d.cfg.ACPX.Agent),
+			"session_name": taskSessionName(task, d.cfg.ACPX.SessionName),
 		}
 		var session map[string]any
 		if err := json.Unmarshal(raw, &session); err == nil {
@@ -932,7 +1145,7 @@ func (d *Daemon) cancelACPXTask(rt *runningTask) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, d.cfg.ACPX.Command, d.buildACPXCancelArgs(rt.workspace)...)
+	cmd := exec.CommandContext(ctx, d.cfg.ACPX.Command, d.buildACPXCancelArgs(rt.workspace, rt.agent, rt.session)...)
 	cmd.Dir = rt.workspace
 	_ = cmd.Run()
 }
@@ -949,22 +1162,66 @@ func (rt *runningTask) isStopping() bool {
 	return rt.stopping
 }
 
-func (d *Daemon) resolveWorkspace(task protocol.TaskDispatch) (protocol.Workspace, error) {
-	for _, ws := range d.cfg.Workspaces {
-		if task.WorkspaceID != "" && ws.ID == task.WorkspaceID {
-			return ws, nil
-		}
-		if task.WorkspacePath != "" {
-			real, err := filepath.EvalSymlinks(task.WorkspacePath)
-			if err != nil {
-				return protocol.Workspace{}, err
-			}
-			if real == ws.Path {
+func (d *Daemon) resolveWorkspacePath(workspaceID string, requested string) (protocol.Workspace, error) {
+	path := strings.TrimSpace(requested)
+	if path == "" {
+		for _, ws := range d.cfg.Workspaces {
+			if workspaceID == "" || ws.ID == workspaceID {
 				return ws, nil
 			}
 		}
+		return protocol.Workspace{}, fmt.Errorf("workspace_path is required")
 	}
-	return protocol.Workspace{}, fmt.Errorf("workspace is not in daemon allowlist")
+	if strings.HasPrefix(path, "~"+string(filepath.Separator)) || path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return protocol.Workspace{}, err
+		}
+		if path == "~" {
+			path = home
+		} else {
+			path = filepath.Join(home, strings.TrimPrefix(path, "~"+string(filepath.Separator)))
+		}
+	}
+	if !filepath.IsAbs(path) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return protocol.Workspace{}, err
+		}
+		path = abs
+	}
+	absPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return protocol.Workspace{}, err
+	}
+	if err := os.MkdirAll(absPath, 0o755); err != nil {
+		return protocol.Workspace{}, err
+	}
+	real, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return protocol.Workspace{}, err
+	}
+	id := workspaceID
+	if id == "" {
+		id = workspaceIDForPath(real)
+	}
+	return protocol.Workspace{
+		ID:   id,
+		Name: filepath.Base(real),
+		Path: real,
+	}, nil
+}
+
+func workspaceIDForPath(path string) string {
+	clean := strings.Trim(filepath.ToSlash(filepath.Clean(path)), "/")
+	if clean == "" {
+		return "workspace"
+	}
+	id := strings.NewReplacer("/", "-", " ", "-").Replace(clean)
+	if len(id) > 80 {
+		return id[len(id)-80:]
+	}
+	return id
 }
 
 func (d *Daemon) runningTaskIDs() []string {
@@ -1009,6 +1266,7 @@ func (d *Daemon) emitTaskEvent(taskID, eventType string, sequence int64, data an
 		EventType: eventType,
 		Source:    "claude_code",
 		Sequence:  sequence,
+		Timestamp: time.Now().Unix(),
 		Data:      dataRaw,
 		Raw:       raw,
 	}

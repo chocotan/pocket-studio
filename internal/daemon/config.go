@@ -66,12 +66,23 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.ACPX.Agent == "" {
 		cfg.ACPX.Agent = "claude"
 	}
+	if len(cfg.Workspaces) == 0 {
+		home, _ := os.UserHomeDir()
+		cfg.Workspaces = []protocol.Workspace{{
+			ID:   "agent-root",
+			Name: "Agent",
+			Path: filepath.Join(home, "Agent"),
+		}}
+	}
 	for i := range cfg.Workspaces {
 		if cfg.Workspaces[i].ID == "" {
 			cfg.Workspaces[i].ID = cfg.Workspaces[i].Name
 		}
 		if cfg.Workspaces[i].Name == "" {
 			cfg.Workspaces[i].Name = filepath.Base(cfg.Workspaces[i].Path)
+		}
+		if err := os.MkdirAll(cfg.Workspaces[i].Path, 0o755); err != nil {
+			return cfg, fmt.Errorf("workspace %s: %w", cfg.Workspaces[i].Path, err)
 		}
 		real, err := filepath.EvalSymlinks(cfg.Workspaces[i].Path)
 		if err != nil {
@@ -104,9 +115,9 @@ func ExampleConfig() Config {
 		},
 		Workspaces: []protocol.Workspace{
 			{
-				ID:   "sample",
-				Name: "sample",
-				Path: filepath.Join(home, "Projects", "sample"),
+				ID:   "agent-root",
+				Name: "Agent",
+				Path: filepath.Join(home, "Agent"),
 			},
 		},
 	}

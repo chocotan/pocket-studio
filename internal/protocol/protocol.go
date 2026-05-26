@@ -14,6 +14,7 @@ const (
 	TypeTaskEvent       = "task.event"
 	TypeTaskSnapshot    = "task.snapshot"
 	TypeTaskStop        = "task.stop"
+	TypeSessionCreate   = "session.create"
 	TypeServerError     = "server.error"
 )
 
@@ -39,13 +40,19 @@ type Workspace struct {
 	Path string `json:"path"`
 }
 
+type AgentCapability struct {
+	Name  string `json:"name"`
+	Label string `json:"label"`
+}
+
 type DaemonHello struct {
-	DeviceID      string      `json:"device_id"`
-	DeviceName    string      `json:"device_name"`
-	DaemonVersion string      `json:"daemon_version"`
-	Agent         string      `json:"agent,omitempty"`
-	AgentLabel    string      `json:"agent_label,omitempty"`
-	Workspaces    []Workspace `json:"workspaces"`
+	DeviceID      string            `json:"device_id"`
+	DeviceName    string            `json:"device_name"`
+	DaemonVersion string            `json:"daemon_version"`
+	Agent         string            `json:"agent,omitempty"`
+	AgentLabel    string            `json:"agent_label,omitempty"`
+	Agents        []AgentCapability `json:"agents,omitempty"`
+	Workspaces    []Workspace       `json:"workspaces"`
 }
 
 type DaemonSnapshot struct {
@@ -65,10 +72,20 @@ type TaskDispatch struct {
 	WorkspaceID     string      `json:"workspace_id,omitempty"`
 	WorkspacePath   string      `json:"workspace_path"`
 	Agent           string      `json:"agent"`
+	SessionName     string      `json:"session_name,omitempty"`
 	Prompt          string      `json:"prompt"`
 	ParentTaskID    string      `json:"parent_task_id,omitempty"`
 	ResumeSessionID string      `json:"resume_session_id,omitempty"`
 	Options         TaskOptions `json:"options"`
+}
+
+type SessionCreate struct {
+	TaskID        string      `json:"task_id"`
+	WorkspaceID   string      `json:"workspace_id,omitempty"`
+	WorkspacePath string      `json:"workspace_path"`
+	Agent         string      `json:"agent"`
+	SessionName   string      `json:"session_name,omitempty"`
+	Options       TaskOptions `json:"options"`
 }
 
 type TaskOptions struct {
@@ -83,14 +100,18 @@ type TaskEvent struct {
 	EventType string          `json:"event_type"`
 	Source    string          `json:"source"`
 	Sequence  int64           `json:"sequence"`
+	Timestamp int64           `json:"timestamp,omitempty"`
 	Data      json.RawMessage `json:"data,omitempty"`
 	Raw       json.RawMessage `json:"raw,omitempty"`
 }
 
 type TaskRecord struct {
 	TaskID        string      `json:"task_id"`
+	DeviceID      string      `json:"device_id,omitempty"`
 	WorkspaceID   string      `json:"workspace_id,omitempty"`
 	WorkspacePath string      `json:"workspace_path"`
+	Agent         string      `json:"agent,omitempty"`
+	SessionName   string      `json:"session_name,omitempty"`
 	Prompt        string      `json:"prompt"`
 	Status        string      `json:"status"`
 	SessionID     string      `json:"session_id,omitempty"`

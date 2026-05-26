@@ -27,9 +27,9 @@
   },
   "workspaces": [
     {
-      "id": "remote-agent",
-      "name": "remote-agent",
-      "path": "/home/choco/Downloads/remote-agent"
+      "id": "agent-root",
+      "name": "Agent",
+      "path": "/home/choco/Agent"
     }
   ]
 }

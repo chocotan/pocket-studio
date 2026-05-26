@@ -27,6 +27,7 @@ type daemonConn struct {
 	deviceName string
 	agent      string
 	agentLabel string
+	agents     []protocol.AgentCapability
 	workspaces []protocol.Workspace
 	conn       *websocket.Conn
 	send       chan protocol.Envelope
@@ -39,13 +40,14 @@ type webConn struct {
 }
 
 type DeviceView struct {
-	ID         string               `json:"id"`
-	Name       string               `json:"name"`
-	Status     string               `json:"status"`
-	Agent      string               `json:"agent,omitempty"`
-	AgentLabel string               `json:"agent_label,omitempty"`
-	LastSeenAt int64                `json:"last_seen_at"`
-	Workspaces []protocol.Workspace `json:"workspaces"`
+	ID         string                     `json:"id"`
+	Name       string                     `json:"name"`
+	Status     string                     `json:"status"`
+	Agent      string                     `json:"agent,omitempty"`
+	AgentLabel string                     `json:"agent_label,omitempty"`
+	Agents     []protocol.AgentCapability `json:"agents,omitempty"`
+	LastSeenAt int64                      `json:"last_seen_at"`
+	Workspaces []protocol.Workspace       `json:"workspaces"`
 }
 
 type StateView struct {
@@ -110,6 +112,48 @@ func (h *Hub) readWebLoop(wc *webConn) {
 			return
 		}
 		switch env.Type {
+		case protocol.TypeSessionCreate:
+			session, err := protocol.DecodePayload[protocol.SessionCreate](env)
+			if err != nil {
+				wc.send <- serverError("bad_payload", err.Error())
+				continue
+			}
+			deviceID := env.To.DeviceID
+			if deviceID == "" {
+				wc.send <- serverError("missing_device", "session.create requires to.device_id")
+				continue
+			}
+			h.mu.Lock()
+			dc := h.daemons[deviceID]
+			if dc != nil {
+				h.taskDevices[session.TaskID] = deviceID
+				now := time.Now().Unix()
+				record := h.taskRecords[session.TaskID]
+				if record.TaskID == "" {
+					record.TaskID = session.TaskID
+					record.StartedAt = now
+				}
+				record.DeviceID = deviceID
+				record.WorkspaceID = session.WorkspaceID
+				record.WorkspacePath = session.WorkspacePath
+				record.Agent = session.Agent
+				record.SessionName = session.SessionName
+				record.Prompt = ""
+				record.Status = "created"
+				record.UpdatedAt = now
+				h.taskRecords[session.TaskID] = record
+			}
+			h.mu.Unlock()
+			if dc == nil {
+				wc.send <- serverError("device_offline", "target device is offline")
+				continue
+			}
+			forward := env
+			forward.From = "server"
+			if forward.ID == "" {
+				forward.ID = protocol.NewID("msg")
+			}
+			dc.send <- forward
 		case protocol.TypeTaskDispatch:
 			task, err := protocol.DecodePayload[protocol.TaskDispatch](env)
 			if err != nil {
@@ -131,8 +175,11 @@ func (h *Hub) readWebLoop(wc *webConn) {
 					record.TaskID = task.TaskID
 					record.StartedAt = now
 				}
+				record.DeviceID = deviceID
 				record.WorkspaceID = task.WorkspaceID
 				record.WorkspacePath = task.WorkspacePath
+				record.Agent = task.Agent
+				record.SessionName = task.SessionName
 				record.Prompt = task.Prompt
 				record.ParentTaskID = task.ParentTaskID
 				if task.ResumeSessionID != "" {
@@ -146,6 +193,7 @@ func (h *Hub) readWebLoop(wc *webConn) {
 					EventType: "user.prompt",
 					Source:    "web",
 					Sequence:  int64(len(record.Events) + 1),
+					Timestamp: now,
 					Data:      MarshalPayload(map[string]string{"prompt": task.Prompt}),
 				}
 				record.Events = appendBounded(record.Events, userEvent, 1000)
@@ -213,6 +261,7 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			dc.deviceName = hello.DeviceName
 			dc.agent = hello.Agent
 			dc.agentLabel = hello.AgentLabel
+			dc.agents = hello.Agents
 			dc.workspaces = hello.Workspaces
 			dc.lastSeen = time.Now()
 			h.mu.Lock()
@@ -234,6 +283,7 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			h.mu.Lock()
 			for _, record := range snapshot.Tasks {
 				h.taskDevices[record.TaskID] = snapshot.DeviceID
+				record.DeviceID = snapshot.DeviceID
 				h.taskRecords[record.TaskID] = record
 			}
 			h.mu.Unlock()
@@ -251,8 +301,14 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 				if sessionID := extractSessionID(taskEvent); sessionID != "" {
 					record.SessionID = sessionID
 				}
+				if dc.deviceID != "" {
+					record.DeviceID = dc.deviceID
+				}
 				record.Status = statusFromEvent(taskEvent.EventType, record.Status)
 				record.UpdatedAt = time.Now().Unix()
+				if taskEvent.Timestamp == 0 {
+					taskEvent.Timestamp = record.UpdatedAt
+				}
 				record.Events = appendBounded(record.Events, taskEvent, 1000)
 				h.taskRecords[taskEvent.TaskID] = record
 				h.mu.Unlock()
@@ -277,6 +333,7 @@ func (h *Hub) stateView() StateView {
 			Status:     "online",
 			Agent:      dc.agent,
 			AgentLabel: dc.agentLabel,
+			Agents:     dc.agents,
 			LastSeenAt: dc.lastSeen.Unix(),
 			Workspaces: dc.workspaces,
 		})
