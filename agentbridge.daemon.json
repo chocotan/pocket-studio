@@ -19,6 +19,7 @@
     "command": "acpx",
     "agent": "claude",
     "session_name": "agentbridge",
+    "ttl_seconds": 300,
     "args": [
       "--format",
       "json",

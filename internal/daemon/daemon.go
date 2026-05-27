@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -312,6 +313,48 @@ func (d *Daemon) handleEnvelope(ctx context.Context, env protocol.Envelope) {
 			return
 		}
 		d.stopTask(stop.TaskID)
+	case protocol.TypeTaskSetModel:
+		change, err := protocol.DecodePayload[protocol.TaskSetModel](env)
+		if err != nil {
+			d.emitError("", "bad_payload", err.Error())
+			return
+		}
+		go d.setTaskModel(ctx, change)
+	case protocol.TypeSessionDelete:
+		remove, err := protocol.DecodePayload[protocol.SessionDelete](env)
+		if err != nil {
+			d.emitError("", "bad_payload", err.Error())
+			return
+		}
+		go d.deleteSession(ctx, remove)
+	case protocol.TypeWorkspaceList:
+		request, err := protocol.DecodePayload[protocol.WorkspaceListRequest](env)
+		if err != nil {
+			d.sendWorkspaceError("", err.Error())
+			return
+		}
+		go d.listWorkspace(request)
+	case protocol.TypeWorkspaceRead:
+		request, err := protocol.DecodePayload[protocol.WorkspaceReadRequest](env)
+		if err != nil {
+			d.sendWorkspaceError("", err.Error())
+			return
+		}
+		go d.readWorkspaceFile(request)
+	case protocol.TypeWorkspaceWrite:
+		request, err := protocol.DecodePayload[protocol.WorkspaceWriteRequest](env)
+		if err != nil {
+			d.sendWorkspaceError("", err.Error())
+			return
+		}
+		go d.writeWorkspaceFile(request)
+	case protocol.TypeTerminalRun:
+		request, err := protocol.DecodePayload[protocol.TerminalRunRequest](env)
+		if err != nil {
+			d.sendTerminalError("", "", err.Error())
+			return
+		}
+		go d.runTerminalCommand(ctx, request)
 	}
 }
 
@@ -339,7 +382,7 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	if d.cfg.ACPX.Enabled {
-		if err := d.ensureACPXSession(ctx, task, workspace.Path, session.TaskID); err != nil {
+		if err := d.createACPXSession(ctx, task, workspace.Path, session.TaskID); err != nil {
 			d.emitError(session.TaskID, "session_ensure_failed", err.Error())
 			return
 		}
@@ -441,18 +484,11 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	}
 	record.Agent = taskAgentName(task, d.cfg.ACPX.Agent)
 	record.SessionName = taskSessionName(task, d.cfg.ACPX.SessionName)
+	if task.ModelID != "" {
+		record.ModelID = task.ModelID
+	}
 	record.Status = "running"
 	record.UpdatedAt = now
-	userEvent := protocol.TaskEvent{
-		TaskID:    task.TaskID,
-		EventID:   protocol.NewID("evt"),
-		EventType: "user.prompt",
-		Source:    "web",
-		Sequence:  int64(len(record.Events) + 1),
-		Timestamp: now,
-		Data:      mustJSON(map[string]string{"prompt": task.Prompt}),
-	}
-	record.Events = appendBounded(record.Events, userEvent, 1000)
 	d.history[task.TaskID] = record
 	d.mu.Unlock()
 
@@ -590,6 +626,12 @@ func (d *Daemon) buildACPXSessionArgs(task protocol.TaskDispatch, workspacePath 
 	return args
 }
 
+func (d *Daemon) buildACPXSessionListArgs(workspacePath string, agent string) []string {
+	args := d.buildACPXGlobalArgs(workspacePath)
+	args = append(args, agent, "sessions", "list", "--local")
+	return args
+}
+
 func (d *Daemon) buildACPXCancelArgs(workspacePath string, agent string, sessionName string) []string {
 	args := d.buildACPXGlobalArgs(workspacePath)
 	args = append(args, agent, "cancel")
@@ -599,20 +641,56 @@ func (d *Daemon) buildACPXCancelArgs(workspacePath string, agent string, session
 	return args
 }
 
+func (d *Daemon) buildACPXSessionCloseArgs(workspacePath string, agent string, sessionName string) []string {
+	args := d.buildACPXGlobalArgs(workspacePath)
+	args = append(args, agent, "sessions", "close")
+	if sessionName != "" {
+		args = append(args, sessionName)
+	}
+	return args
+}
+
+func (d *Daemon) buildACPXSetModelArgs(workspacePath string, agent string, sessionName string, modelID string) []string {
+	args := d.buildACPXGlobalArgs(workspacePath)
+	args = append(args, agent, "set", "model", modelID)
+	if sessionName != "" {
+		args = append(args, "-s", sessionName)
+	}
+	return args
+}
+
 func (d *Daemon) buildACPXGlobalArgs(workspacePath string) []string {
 	args := append([]string{}, d.cfg.ACPX.Args...)
+	args = ensureACPXApproveAll(args)
 	args = ensureACPXJSONFormat(args)
+	args = d.ensureACPXTtl(args)
 	args = append(args, "--cwd", workspacePath)
 	return args
 }
 
 func (d *Daemon) buildACPXPromptGlobalArgs(task protocol.TaskDispatch, workspacePath string) []string {
 	args := append([]string{}, d.cfg.ACPX.Args...)
-	args = withoutACPXPermissionMode(args)
-	args = append(args, "--approve-all")
+	args = ensureACPXApproveAll(args)
 	args = ensureACPXJSONFormat(args)
+	args = d.ensureACPXTtl(args)
+	args = ensureACPXModel(args, task.ModelID)
 	args = append(args, "--cwd", workspacePath)
 	return args
+}
+
+func (d *Daemon) ensureACPXTtl(args []string) []string {
+	if d.cfg.ACPX.TTLSeconds == 0 {
+		return args
+	}
+	for i, arg := range args {
+		if arg == "--ttl" && i+1 < len(args) {
+			return args
+		}
+		if strings.HasPrefix(arg, "--ttl=") {
+			return args
+		}
+	}
+	return append(args, "--ttl", fmt.Sprint(d.cfg.ACPX.TTLSeconds))
 }
 
 func ensureACPXJSONFormat(args []string) []string {
@@ -627,17 +705,44 @@ func ensureACPXJSONFormat(args []string) []string {
 	return append([]string{"--format", "json"}, args...)
 }
 
-func withoutACPXPermissionMode(args []string) []string {
+func ensureACPXModel(args []string, modelID string) []string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return args
+	}
+	for i, arg := range args {
+		if arg == "--model" && i+1 < len(args) {
+			return args
+		}
+		if strings.HasPrefix(arg, "--model=") {
+			return args
+		}
+	}
+	return append(args, "--model", modelID)
+}
+
+func ensureACPXApproveAll(args []string) []string {
 	next := args[:0]
+	skipNext := false
 	for _, arg := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
 		switch arg {
-		case "--approve-all", "--approve-reads", "--deny-all":
+		case "--approve-all", "--approve-reads", "--deny-all", "--permission-policy", "--policy":
+			if arg == "--permission-policy" || arg == "--policy" {
+				skipNext = true
+			}
 			continue
 		default:
+			if strings.HasPrefix(arg, "--permission-policy=") || strings.HasPrefix(arg, "--policy=") {
+				continue
+			}
 			next = append(next, arg)
 		}
 	}
-	return next
+	return append(next, "--approve-all")
 }
 
 func ensureClaudeStreamJSONVerbose(args []string) []string {
@@ -725,7 +830,15 @@ func (d *Daemon) scanOutput(r io.Reader, stream string, emitter *taskEmitter) {
 }
 
 func (d *Daemon) ensureACPXSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) error {
-	args := d.buildACPXSessionArgs(task, workspacePath, "ensure")
+	return d.syncACPXSession(ctx, task, workspacePath, taskID, "ensure")
+}
+
+func (d *Daemon) createACPXSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) error {
+	return d.syncACPXSession(ctx, task, workspacePath, taskID, "new")
+}
+
+func (d *Daemon) syncACPXSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string, command string) error {
+	args := d.buildACPXSessionArgs(task, workspacePath, command)
 	cmd := exec.CommandContext(ctx, d.cfg.ACPX.Command, args...)
 	cmd.Dir = workspacePath
 	var stdout bytes.Buffer
@@ -761,7 +874,51 @@ func (d *Daemon) ensureACPXSession(ctx context.Context, task protocol.TaskDispat
 		}
 		d.emitTaskEvent(taskID, "acpx.session", 0, data, raw)
 	}
+	d.emitACPXStatus(ctx, task, workspacePath, taskID)
 	return nil
+}
+
+func (d *Daemon) emitACPXStatus(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) {
+	args := d.buildACPXGlobalArgs(workspacePath)
+	args = append(args, taskAgentName(task, d.cfg.ACPX.Agent), "status")
+	if sessionName := taskSessionName(task, d.cfg.ACPX.SessionName); sessionName != "" {
+		args = append(args, "-s", sessionName)
+	}
+	statusCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(statusCtx, d.cfg.ACPX.Command, args...)
+	cmd.Dir = workspacePath
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		d.emitTaskEvent(taskID, "acpx.status_failed", 0, map[string]string{
+			"error": strings.TrimSpace(stderr.String()),
+		}, nil)
+		return
+	}
+	raw := bytes.TrimSpace(stdout.Bytes())
+	data := map[string]any{
+		"ttl_seconds": d.cfg.ACPX.TTLSeconds,
+		"agent":       taskAgentName(task, d.cfg.ACPX.Agent),
+		"session":     taskSessionName(task, d.cfg.ACPX.SessionName),
+	}
+	if json.Valid(raw) {
+		var status map[string]any
+		if err := json.Unmarshal(raw, &status); err == nil {
+			for key, value := range status {
+				data[key] = value
+			}
+		}
+		d.emitTaskEvent(taskID, "acpx.status", 0, data, append(json.RawMessage(nil), raw...))
+		return
+	}
+	text := strings.TrimSpace(stdout.String())
+	if text != "" {
+		data["text"] = text
+	}
+	d.emitTaskEvent(taskID, "acpx.status", 0, data, nil)
 }
 
 func (d *Daemon) scanTextOutput(r io.Reader, stream string, emitter *taskEmitter) {
@@ -796,6 +953,7 @@ type agentOutputAdapter struct {
 	toolRawByID     map[string]json.RawMessage
 	toolNameByID    map[string]string
 	toolInputByID   map[string]any
+	toolStatusByID  map[string]string
 	toolEmittedByID map[string]bool
 }
 
@@ -805,6 +963,7 @@ func newAgentOutputAdapter(emitter *taskEmitter) *agentOutputAdapter {
 		toolRawByID:     make(map[string]json.RawMessage),
 		toolNameByID:    make(map[string]string),
 		toolInputByID:   make(map[string]any),
+		toolStatusByID:  make(map[string]string),
 		toolEmittedByID: make(map[string]bool),
 	}
 }
@@ -856,11 +1015,20 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 	}
 	method, _ := msg["method"].(string)
 	if method != "session/update" {
+		if method == "session/request_permission" {
+			a.flush()
+			a.emitter.emit("permission.request", nil, raw)
+			return true
+		}
 		if _, ok := msg["result"]; ok {
 			if result, _ := msg["result"].(map[string]any); stringField(result, "stopReason") == "end_turn" {
 				a.emitter.markEndTurn()
 			}
 			a.flush()
+			if hasAvailableModels(msg) {
+				a.emitter.emit("model.list", nil, raw)
+				return true
+			}
 			a.emitter.emit("metric.updated", nil, raw)
 		}
 		return true
@@ -874,7 +1042,13 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 		a.appendAssistantChunk(update, raw)
 	case "agent_thought_chunk":
 		a.appendThinkingChunk(update, raw)
-	case "user_message_chunk", "available_commands_update", "current_mode_update", "config_option_update", "session_info_update":
+	case "available_commands_update":
+		a.flush()
+		a.emitter.emit("commands.updated", nil, raw)
+	case "current_mode_update":
+		a.flush()
+		a.emitter.emit("mode.updated", nil, raw)
+	case "user_message_chunk", "config_option_update", "session_info_update":
 		a.flush()
 		a.emitter.emit("acpx.raw", nil, raw)
 	case "usage_update":
@@ -916,27 +1090,14 @@ func (a *agentOutputAdapter) emitToolUpdate(update map[string]any, raw json.RawM
 	if name := stringField(update, "title", "kind", "name"); name != "" {
 		a.toolNameByID[id] = name
 	}
+	if status := stringField(update, "status"); status != "" {
+		a.toolStatusByID[id] = status
+	}
 	if input, ok := update["rawInput"]; ok {
 		a.toolInputByID[id] = input
 	}
-	if !a.toolEmittedByID[id] && (hasNonEmptyInput(update) || hasAnyKey(update, "rawOutput")) {
-		a.toolEmittedByID[id] = true
-		call := map[string]any{
-			"type":  "tool_use",
-			"id":    id,
-			"name":  valueOrDefault(a.toolNameByID[id], "tool_call"),
-			"input": valueOrDefaultAny(a.toolInputByID[id], map[string]any{}),
-		}
-		normalized := map[string]any{
-			"type": "assistant",
-			"message": map[string]any{
-				"role":    "assistant",
-				"content": []any{call},
-			},
-		}
-		callRaw := mustJSON(normalized)
-		a.toolRawByID[id] = callRaw
-		a.emitter.emit("tool.call", nil, callRaw)
+	if !a.toolEmittedByID[id] {
+		a.emitNormalizedToolCall(id)
 	}
 	if hasAnyKey(update, "rawOutput", "status") {
 		if !hasAnyKey(update, "rawOutput") && strings.EqualFold(stringField(update, "status"), "pending") {
@@ -960,6 +1121,27 @@ func (a *agentOutputAdapter) emitToolUpdate(update map[string]any, raw json.RawM
 		return
 	}
 	a.toolRawByID[id] = raw
+}
+
+func (a *agentOutputAdapter) emitNormalizedToolCall(id string) {
+	a.toolEmittedByID[id] = true
+	call := map[string]any{
+		"type":   "tool_use",
+		"id":     id,
+		"name":   valueOrDefault(a.toolNameByID[id], "tool_call"),
+		"status": valueOrDefault(a.toolStatusByID[id], "pending"),
+		"input":  valueOrDefaultAny(a.toolInputByID[id], map[string]any{}),
+	}
+	normalized := map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"role":    "assistant",
+			"content": []any{call},
+		},
+	}
+	callRaw := mustJSON(normalized)
+	a.toolRawByID[id] = callRaw
+	a.emitter.emit("tool.call", nil, callRaw)
 }
 
 func hasNonEmptyInput(update map[string]any) bool {
@@ -1034,6 +1216,13 @@ func hasAnyKey(source map[string]any, keys ...string) bool {
 		}
 	}
 	return false
+}
+
+func hasAvailableModels(msg map[string]any) bool {
+	result, _ := msg["result"].(map[string]any)
+	models, _ := result["models"].(map[string]any)
+	available, ok := models["availableModels"].([]any)
+	return ok && len(available) > 0
 }
 
 func valueOrDefault(value, fallback string) string {
@@ -1150,6 +1339,134 @@ func (d *Daemon) cancelACPXTask(rt *runningTask) {
 	_ = cmd.Run()
 }
 
+func (d *Daemon) setTaskModel(parent context.Context, change protocol.TaskSetModel) {
+	taskID := strings.TrimSpace(change.TaskID)
+	modelID := strings.TrimSpace(change.ModelID)
+	if taskID == "" || modelID == "" {
+		d.emitError(taskID, "bad_payload", "task.set_model requires task_id and model_id")
+		return
+	}
+	if !d.cfg.ACPX.Enabled {
+		d.emitTaskEvent(taskID, "model.update_failed", 0, map[string]string{
+			"model_id": modelID,
+			"error":    "model switching requires acpx",
+		}, nil)
+		return
+	}
+	d.mu.Lock()
+	record := d.history[taskID]
+	rt := d.tasks[taskID]
+	d.mu.Unlock()
+	workspacePath := record.WorkspacePath
+	agent := taskAgentName(protocol.TaskDispatch{Agent: record.Agent}, d.cfg.ACPX.Agent)
+	sessionName := strings.TrimSpace(record.SessionName)
+	if rt != nil {
+		if rt.workspace != "" {
+			workspacePath = rt.workspace
+		}
+		if rt.agent != "" {
+			agent = rt.agent
+		}
+		if rt.session != "" {
+			sessionName = rt.session
+		}
+	}
+	if workspacePath == "" {
+		d.emitTaskEvent(taskID, "model.update_failed", 0, map[string]string{
+			"model_id": modelID,
+			"error":    "task has no workspace",
+		}, nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, d.cfg.ACPX.Command, d.buildACPXSetModelArgs(workspacePath, agent, sessionName, modelID)...)
+	cmd.Dir = workspacePath
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		text := strings.TrimSpace(stderr.String())
+		if text == "" {
+			text = strings.TrimSpace(stdout.String())
+		}
+		if text == "" {
+			text = err.Error()
+		}
+		d.emitTaskEvent(taskID, "model.update_failed", 0, map[string]string{
+			"model_id": modelID,
+			"error":    text,
+		}, nil)
+		return
+	}
+	d.mu.Lock()
+	record = d.history[taskID]
+	record.ModelID = modelID
+	record.UpdatedAt = time.Now().Unix()
+	d.history[taskID] = record
+	d.mu.Unlock()
+	raw := bytes.TrimSpace(stdout.Bytes())
+	var rawJSON json.RawMessage
+	if json.Valid(raw) {
+		rawJSON = append(rawJSON, raw...)
+	}
+	d.emitTaskEvent(taskID, "model.updated", 0, map[string]string{
+		"model_id": modelID,
+	}, rawJSON)
+}
+
+func (d *Daemon) deleteSession(parent context.Context, remove protocol.SessionDelete) {
+	taskID := strings.TrimSpace(remove.TaskID)
+	if taskID == "" {
+		d.emitError("", "bad_payload", "session.delete requires task_id")
+		return
+	}
+	d.mu.Lock()
+	record := d.history[taskID]
+	rt := d.tasks[taskID]
+	d.mu.Unlock()
+	workspacePath := firstNonEmpty(remove.WorkspacePath, record.WorkspacePath, d.defaultACPXWorkspace())
+	agent := taskAgentName(protocol.TaskDispatch{Agent: firstNonEmpty(remove.Agent, record.Agent)}, d.cfg.ACPX.Agent)
+	sessionName := firstNonEmpty(remove.SessionName, record.SessionName)
+	if rt != nil {
+		rt.markStopping()
+		if rt.cancel != nil {
+			rt.cancel()
+		}
+	}
+	if d.cfg.ACPX.Enabled && workspacePath != "" {
+		ctx, cancel := context.WithTimeout(parent, 20*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, d.cfg.ACPX.Command, d.buildACPXSessionCloseArgs(workspacePath, agent, sessionName)...)
+		cmd.Dir = workspacePath
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			text := strings.TrimSpace(stderr.String())
+			if text == "" {
+				text = err.Error()
+			}
+			d.emitTaskEvent(taskID, "session.delete_failed", 0, map[string]string{"error": text}, nil)
+			return
+		}
+	}
+	d.mu.Lock()
+	delete(d.history, taskID)
+	delete(d.tasks, taskID)
+	d.mu.Unlock()
+	d.sendSnapshot()
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func (rt *runningTask) markStopping() {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -1212,6 +1529,177 @@ func (d *Daemon) resolveWorkspacePath(workspaceID string, requested string) (pro
 	}, nil
 }
 
+func (d *Daemon) resolveWorkspaceFile(workspaceID string, workspacePath string, requestedPath string) (protocol.Workspace, string, string, error) {
+	workspace, err := d.resolveWorkspacePath(workspaceID, workspacePath)
+	if err != nil {
+		return protocol.Workspace{}, "", "", err
+	}
+	relative := strings.TrimSpace(requestedPath)
+	var target string
+	if relative == "" || relative == "." {
+		target = workspace.Path
+		relative = "."
+	} else if filepath.IsAbs(relative) {
+		target = filepath.Clean(relative)
+	} else {
+		target = filepath.Join(workspace.Path, relative)
+	}
+	absTarget, err := filepath.Abs(filepath.Clean(target))
+	if err != nil {
+		return protocol.Workspace{}, "", "", err
+	}
+	relToRoot, err := filepath.Rel(workspace.Path, absTarget)
+	if err != nil {
+		return protocol.Workspace{}, "", "", err
+	}
+	if relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(filepath.Separator)) || filepath.IsAbs(relToRoot) {
+		return protocol.Workspace{}, "", "", fmt.Errorf("path is outside workspace")
+	}
+	if relToRoot == "." {
+		return workspace, absTarget, ".", nil
+	}
+	return workspace, absTarget, filepath.ToSlash(relToRoot), nil
+}
+
+func (d *Daemon) listWorkspace(request protocol.WorkspaceListRequest) {
+	workspace, target, relative, err := d.resolveWorkspaceFile(request.WorkspaceID, request.WorkspacePath, request.Path)
+	if err != nil {
+		d.sendWorkspaceError(request.RequestID, err.Error())
+		return
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: err.Error()})
+		return
+	}
+	items := make([]protocol.FileEntry, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == ".git" || name == "node_modules" || name == ".next" || name == "dist" || name == "build" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		childPath := name
+		if relative != "." {
+			childPath = filepath.ToSlash(filepath.Join(relative, name))
+		}
+		items = append(items, protocol.FileEntry{
+			Name:     name,
+			Path:     childPath,
+			IsDir:    entry.IsDir(),
+			Size:     info.Size(),
+			Modified: info.ModTime().Unix(),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].IsDir != items[j].IsDir {
+			return items[i].IsDir
+		}
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+	d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Entries: items})
+}
+
+func (d *Daemon) readWorkspaceFile(request protocol.WorkspaceReadRequest) {
+	workspace, target, relative, err := d.resolveWorkspaceFile(request.WorkspaceID, request.WorkspacePath, request.Path)
+	if err != nil {
+		d.sendWorkspaceError(request.RequestID, err.Error())
+		return
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: err.Error()})
+		return
+	}
+	if info.IsDir() {
+		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: "cannot read directory"})
+		return
+	}
+	if info.Size() > 1024*1024 {
+		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: "file is larger than 1MB"})
+		return
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: err.Error()})
+		return
+	}
+	d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Content: string(content)})
+}
+
+func (d *Daemon) writeWorkspaceFile(request protocol.WorkspaceWriteRequest) {
+	workspace, target, relative, err := d.resolveWorkspaceFile(request.WorkspaceID, request.WorkspacePath, request.Path)
+	if err != nil {
+		d.sendWorkspaceError(request.RequestID, err.Error())
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: err.Error()})
+		return
+	}
+	if err := os.WriteFile(target, []byte(request.Content), 0o644); err != nil {
+		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: err.Error()})
+		return
+	}
+	d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Content: request.Content})
+}
+
+func (d *Daemon) runTerminalCommand(parent context.Context, request protocol.TerminalRunRequest) {
+	command := strings.TrimSpace(request.Command)
+	if command == "" {
+		d.sendTerminalError(request.RequestID, command, "command is required")
+		return
+	}
+	workspace, err := d.resolveWorkspacePath(request.WorkspaceID, request.WorkspacePath)
+	if err != nil {
+		d.sendTerminalError(request.RequestID, command, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
+	defer cancel()
+	started := time.Now()
+	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	cmd.Dir = workspace.Path
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	output := strings.TrimRight(stdout.String()+stderr.String(), "\n")
+	result := protocol.TerminalResult{
+		RequestID: request.RequestID,
+		Command:   command,
+		Output:    output,
+		ExitCode:  0,
+		Duration:  time.Since(started).Milliseconds(),
+	}
+	if err != nil {
+		result.ExitCode = exitCodeFromError(err)
+		result.Error = err.Error()
+	}
+	d.send <- protocol.NewEnvelope(protocol.TypeTerminalResult, "daemon", result)
+}
+
+func (d *Daemon) sendWorkspaceResult(result protocol.WorkspaceResult) {
+	d.send <- protocol.NewEnvelope(protocol.TypeWorkspaceResult, "daemon", result)
+}
+
+func (d *Daemon) sendWorkspaceError(requestID string, message string) {
+	d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: requestID, Error: message})
+}
+
+func (d *Daemon) sendTerminalError(requestID string, command string, message string) {
+	d.send <- protocol.NewEnvelope(protocol.TypeTerminalResult, "daemon", protocol.TerminalResult{
+		RequestID: requestID,
+		Command:   command,
+		Error:     message,
+		ExitCode:  -1,
+	})
+}
+
 func workspaceIDForPath(path string) string {
 	clean := strings.Trim(filepath.ToSlash(filepath.Clean(path)), "/")
 	if clean == "" {
@@ -1235,6 +1723,40 @@ func (d *Daemon) runningTaskIDs() []string {
 }
 
 func (d *Daemon) sendSnapshot() {
+	if d.cfg.ACPX.Enabled {
+		if tasks, err := d.acpxSessionRecords(context.Background()); err == nil {
+			d.mu.Lock()
+			for _, record := range tasks {
+				if existing := d.history[record.TaskID]; len(existing.Events) > 0 {
+					record.Events = mergeTaskEvents(record.Events, existing.Events)
+					if existing.Status == "running" || existing.Status == "stopping" {
+						record.Status = existing.Status
+					}
+					if existing.UpdatedAt > record.UpdatedAt {
+						record.UpdatedAt = existing.UpdatedAt
+					}
+				}
+				d.history[record.TaskID] = record
+			}
+			for taskID := range d.history {
+				if strings.HasPrefix(taskID, "acpx_") {
+					found := false
+					for _, record := range tasks {
+						if record.TaskID == taskID {
+							found = true
+							break
+						}
+					}
+					if !found {
+						delete(d.history, taskID)
+					}
+				}
+			}
+			d.mu.Unlock()
+		} else {
+			log.Printf("acpx sessions list failed: %v", err)
+		}
+	}
 	d.mu.Lock()
 	tasks := make([]protocol.TaskRecord, 0, len(d.history))
 	for _, record := range d.history {
@@ -1245,6 +1767,406 @@ func (d *Daemon) sendSnapshot() {
 		DeviceID: d.cfg.Device.ID,
 		Tasks:    tasks,
 	})
+}
+
+func (d *Daemon) acpxSessionRecords(ctx context.Context) ([]protocol.TaskRecord, error) {
+	workspace := d.defaultACPXWorkspace()
+	agent := strings.TrimSpace(d.cfg.ACPX.Agent)
+	if agent == "" {
+		agent = "claude"
+	}
+	listCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(listCtx, d.cfg.ACPX.Command, d.buildACPXSessionListArgs(workspace, agent)...)
+	cmd.Dir = workspace
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		text := strings.TrimSpace(stderr.String())
+		if text == "" {
+			text = strings.TrimSpace(stdout.String())
+		}
+		if text == "" {
+			text = err.Error()
+		}
+		return nil, fmt.Errorf("%s: %s", err, text)
+	}
+	var records []map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &records); err != nil {
+		return nil, err
+	}
+	tasks := make([]protocol.TaskRecord, 0, len(records))
+	for _, item := range records {
+		recordID := stringField(item, "acpxRecordId")
+		if recordID == "" {
+			continue
+		}
+		if closed, _ := item["closed"].(bool); closed {
+			continue
+		}
+		taskID := "acpx_" + recordID
+		sessionName := stringField(item, "name")
+		cwd := stringField(item, "cwd")
+		modelID := ""
+		if acpx, _ := item["acpx"].(map[string]any); acpx != nil {
+			modelID = stringField(acpx, "current_model_id")
+		}
+		status := "created"
+		createdAt := parseACPXTime(stringField(item, "createdAt"))
+		updatedAt := parseACPXTime(stringField(item, "lastUsedAt"))
+		if updatedAt == 0 {
+			updatedAt = parseACPXTime(stringField(item, "updated_at"))
+		}
+		if updatedAt == 0 {
+			updatedAt = createdAt
+		}
+		events := acpxSessionHistoryEvents(taskID, item, createdAt, updatedAt)
+		prompt := latestPromptFromEvents(events)
+		tasks = append(tasks, protocol.TaskRecord{
+			TaskID:        taskID,
+			DeviceID:      d.cfg.Device.ID,
+			WorkspaceID:   workspaceIDForPath(cwd),
+			WorkspacePath: cwd,
+			Agent:         agent,
+			SessionName:   sessionName,
+			ModelID:       modelID,
+			Prompt:        prompt,
+			Status:        status,
+			SessionID:     recordID,
+			StartedAt:     createdAt,
+			UpdatedAt:     updatedAt,
+			Events:        events,
+		})
+	}
+	return tasks, nil
+}
+
+func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt int64, updatedAt int64) []protocol.TaskEvent {
+	events := make([]protocol.TaskEvent, 0)
+	seq := int64(1)
+	add := func(eventType string, data any, raw any) {
+		timestamp := createdAt
+		if timestamp == 0 {
+			timestamp = updatedAt
+		}
+		if timestamp != 0 {
+			timestamp += seq - 1
+			if updatedAt != 0 && timestamp > updatedAt {
+				timestamp = updatedAt
+			}
+		}
+		event := protocol.TaskEvent{
+			TaskID:    taskID,
+			EventID:   fmt.Sprintf("%s_%d", taskID, seq),
+			EventType: eventType,
+			Source:    "acpx",
+			Sequence:  seq,
+			Timestamp: timestamp,
+			Data:      mustJSON(data),
+			Raw:       mustJSON(raw),
+		}
+		events = append(events, event)
+		seq++
+	}
+
+	if acpx, _ := record["acpx"].(map[string]any); acpx != nil {
+		if raw := acpxModelListRaw(record, acpx); raw != nil {
+			add("model.list", raw, raw)
+		}
+		if raw := acpxCommandsRaw(record, acpx); raw != nil {
+			add("commands.updated", raw, raw)
+		}
+	}
+
+	messages, _ := record["messages"].([]any)
+	for _, item := range messages {
+		message, _ := item.(map[string]any)
+		if message == nil {
+			continue
+		}
+		if user, _ := message["User"].(map[string]any); user != nil {
+			prompt := acpxContentText(user["content"])
+			if strings.TrimSpace(prompt) != "" {
+				raw := map[string]any{
+					"type": "user",
+					"message": map[string]any{
+						"role":    "user",
+						"content": []any{map[string]any{"type": "text", "text": prompt}},
+					},
+				}
+				add("user.prompt", map[string]any{"prompt": prompt}, raw)
+			}
+			continue
+		}
+		agent, _ := message["Agent"].(map[string]any)
+		if agent == nil {
+			continue
+		}
+		content, _ := agent["content"].([]any)
+		for _, partValue := range content {
+			part, _ := partValue.(map[string]any)
+			if part == nil {
+				continue
+			}
+			if thinking, ok := part["Thinking"]; ok {
+				text := acpxThinkingText(thinking)
+				if strings.TrimSpace(text) != "" {
+					add("assistant.thinking", map[string]any{"text": text}, map[string]any{"type": "thinking", "text": text})
+				}
+				continue
+			}
+			if text := acpxTextPart(part["Text"]); strings.TrimSpace(text) != "" {
+				raw := map[string]any{
+					"type": "assistant",
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": []any{map[string]any{"type": "text", "text": text}},
+					},
+				}
+				add("assistant.message", map[string]any{"text": text}, raw)
+				continue
+			}
+			if toolUse, _ := part["ToolUse"].(map[string]any); toolUse != nil {
+				id := stringField(toolUse, "id", "tool_use_id", "toolCallId")
+				name := stringField(toolUse, "name", "title")
+				input := acpxToolInput(toolUse)
+				raw := map[string]any{
+					"type": "assistant",
+					"message": map[string]any{
+						"role": "assistant",
+						"content": []any{map[string]any{
+							"type":  "tool_use",
+							"id":    id,
+							"name":  name,
+							"input": input,
+						}},
+					},
+				}
+				add("tool.call", map[string]any{"tool_use_id": id, "name": name, "input": input}, raw)
+			}
+		}
+		results, _ := agent["tool_results"].(map[string]any)
+		for id, resultValue := range results {
+			result, _ := resultValue.(map[string]any)
+			if result == nil {
+				continue
+			}
+			toolUseID := firstNonEmpty(stringField(result, "tool_use_id", "toolUseId", "id"), id)
+			text := acpxToolResultText(result)
+			isError, _ := result["is_error"].(bool)
+			raw := map[string]any{
+				"type": "user",
+				"message": map[string]any{
+					"role": "user",
+					"content": []any{map[string]any{
+						"type":        "tool_result",
+						"tool_use_id": toolUseID,
+						"content":     text,
+						"is_error":    isError,
+					}},
+				},
+				"tool_use_result": map[string]any{
+					"stdout":   text,
+					"stderr":   "",
+					"is_error": isError,
+				},
+			}
+			add("tool.output", map[string]any{"tool_use_id": toolUseID, "text": text, "is_error": isError}, raw)
+		}
+	}
+	return events
+}
+
+func acpxModelListRaw(record map[string]any, acpx map[string]any) map[string]any {
+	available, ok := acpx["available_models"].([]any)
+	if !ok || len(available) == 0 {
+		return nil
+	}
+	models := make([]any, 0, len(available))
+	for _, value := range available {
+		id := strings.TrimSpace(fmt.Sprint(value))
+		if id == "" {
+			continue
+		}
+		models = append(models, map[string]any{"modelId": id, "name": id})
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	return map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"result": map[string]any{
+			"sessionId": stringField(record, "acpSessionId", "acpxRecordId"),
+			"models": map[string]any{
+				"currentModelId":  stringField(acpx, "current_model_id", "currentModelId"),
+				"availableModels": models,
+			},
+		},
+	}
+}
+
+func acpxCommandsRaw(record map[string]any, acpx map[string]any) map[string]any {
+	available, ok := acpx["available_commands"].([]any)
+	if !ok || len(available) == 0 {
+		return nil
+	}
+	commands := make([]any, 0, len(available))
+	for _, value := range available {
+		name := strings.TrimSpace(fmt.Sprint(value))
+		if name == "" {
+			continue
+		}
+		commands = append(commands, map[string]any{"name": name})
+	}
+	if len(commands) == 0 {
+		return nil
+	}
+	return map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "session/update",
+		"params": map[string]any{
+			"sessionId": stringField(record, "acpSessionId", "acpxRecordId"),
+			"update": map[string]any{
+				"sessionUpdate":     "available_commands_update",
+				"availableCommands": commands,
+			},
+		},
+	}
+}
+
+func acpxContentText(value any) string {
+	items, ok := value.([]any)
+	if !ok {
+		return acpxTextPart(value)
+	}
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		text := acpxTextPart(item)
+		if strings.TrimSpace(text) != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func acpxTextPart(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	case map[string]any:
+		if text := stringField(typed, "Text", "text", "content"); text != "" {
+			return text
+		}
+		if nested, ok := typed["Text"]; ok {
+			return acpxTextPart(nested)
+		}
+	}
+	return stringifyValue(value)
+}
+
+func acpxThinkingText(value any) string {
+	if thinking, _ := value.(map[string]any); thinking != nil {
+		return stringField(thinking, "text", "Text", "content")
+	}
+	return acpxTextPart(value)
+}
+
+func acpxToolInput(toolUse map[string]any) map[string]any {
+	if input, _ := toolUse["input"].(map[string]any); input != nil {
+		return input
+	}
+	rawInput := strings.TrimSpace(stringField(toolUse, "raw_input", "rawInput"))
+	if rawInput == "" {
+		return map[string]any{}
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(rawInput), &parsed); err == nil && parsed != nil {
+		return parsed
+	}
+	return map[string]any{"input": rawInput}
+}
+
+func acpxToolResultText(result map[string]any) string {
+	if content, _ := result["content"].(map[string]any); content != nil {
+		if text := acpxTextPart(content); strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	if output, ok := result["output"]; ok {
+		return stringifyValue(output)
+	}
+	return stringifyValue(result)
+}
+
+func latestPromptFromEvents(events []protocol.TaskEvent) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].EventType != "user.prompt" || len(events[i].Data) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(events[i].Data, &data); err == nil {
+			if prompt := stringField(data, "prompt"); prompt != "" {
+				return prompt
+			}
+		}
+	}
+	return ""
+}
+
+func mergeTaskEvents(base []protocol.TaskEvent, extra []protocol.TaskEvent) []protocol.TaskEvent {
+	if len(base) == 0 {
+		return append([]protocol.TaskEvent(nil), extra...)
+	}
+	merged := append([]protocol.TaskEvent(nil), base...)
+	seen := make(map[string]struct{}, len(merged))
+	for _, event := range merged {
+		seen[taskEventSignature(event)] = struct{}{}
+	}
+	for _, event := range extra {
+		signature := taskEventSignature(event)
+		if _, ok := seen[signature]; ok {
+			continue
+		}
+		merged = append(merged, event)
+		seen[signature] = struct{}{}
+	}
+	return merged
+}
+
+func taskEventSignature(event protocol.TaskEvent) string {
+	if len(event.Raw) > 0 {
+		return event.EventType + ":" + string(event.Raw)
+	}
+	if len(event.Data) > 0 {
+		return event.EventType + ":" + string(event.Data)
+	}
+	return fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID)
+}
+
+func (d *Daemon) defaultACPXWorkspace() string {
+	if len(d.cfg.Workspaces) > 0 && d.cfg.Workspaces[0].Path != "" {
+		return d.cfg.Workspaces[0].Path
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
+		return home
+	}
+	return "."
+}
+
+func parseACPXTime(value string) int64 {
+	if value == "" {
+		return 0
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed.Unix()
+	}
+	return 0
 }
 
 func (d *Daemon) emitError(taskID, code, message string) {

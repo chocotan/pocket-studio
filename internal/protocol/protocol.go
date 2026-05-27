@@ -14,7 +14,15 @@ const (
 	TypeTaskEvent       = "task.event"
 	TypeTaskSnapshot    = "task.snapshot"
 	TypeTaskStop        = "task.stop"
+	TypeTaskSetModel    = "task.set_model"
+	TypeSessionDelete   = "session.delete"
 	TypeSessionCreate   = "session.create"
+	TypeWorkspaceList   = "workspace.list"
+	TypeWorkspaceRead   = "workspace.read"
+	TypeWorkspaceWrite  = "workspace.write"
+	TypeWorkspaceResult = "workspace.result"
+	TypeTerminalRun     = "terminal.run"
+	TypeTerminalResult  = "terminal.result"
 	TypeServerError     = "server.error"
 )
 
@@ -73,6 +81,7 @@ type TaskDispatch struct {
 	WorkspacePath   string      `json:"workspace_path"`
 	Agent           string      `json:"agent"`
 	SessionName     string      `json:"session_name,omitempty"`
+	ModelID         string      `json:"model_id,omitempty"`
 	Prompt          string      `json:"prompt"`
 	ParentTaskID    string      `json:"parent_task_id,omitempty"`
 	ResumeSessionID string      `json:"resume_session_id,omitempty"`
@@ -112,6 +121,7 @@ type TaskRecord struct {
 	WorkspacePath string      `json:"workspace_path"`
 	Agent         string      `json:"agent,omitempty"`
 	SessionName   string      `json:"session_name,omitempty"`
+	ModelID       string      `json:"model_id,omitempty"`
 	Prompt        string      `json:"prompt"`
 	Status        string      `json:"status"`
 	SessionID     string      `json:"session_id,omitempty"`
@@ -129,6 +139,76 @@ type TaskSnapshot struct {
 type TaskStop struct {
 	TaskID string `json:"task_id"`
 	Reason string `json:"reason"`
+}
+
+type TaskSetModel struct {
+	TaskID  string `json:"task_id"`
+	ModelID string `json:"model_id"`
+}
+
+type SessionDelete struct {
+	TaskID        string `json:"task_id"`
+	Agent         string `json:"agent,omitempty"`
+	SessionName   string `json:"session_name,omitempty"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	WorkspacePath string `json:"workspace_path,omitempty"`
+}
+
+type WorkspaceListRequest struct {
+	RequestID     string `json:"request_id"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	WorkspacePath string `json:"workspace_path"`
+	Path          string `json:"path,omitempty"`
+}
+
+type WorkspaceReadRequest struct {
+	RequestID     string `json:"request_id"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	WorkspacePath string `json:"workspace_path"`
+	Path          string `json:"path"`
+}
+
+type WorkspaceWriteRequest struct {
+	RequestID     string `json:"request_id"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	WorkspacePath string `json:"workspace_path"`
+	Path          string `json:"path"`
+	Content       string `json:"content"`
+}
+
+type WorkspaceResult struct {
+	RequestID     string          `json:"request_id"`
+	WorkspaceID   string          `json:"workspace_id,omitempty"`
+	WorkspacePath string          `json:"workspace_path,omitempty"`
+	Path          string          `json:"path,omitempty"`
+	Entries       []FileEntry     `json:"entries,omitempty"`
+	Content       string          `json:"content,omitempty"`
+	Error         string          `json:"error,omitempty"`
+	Raw           json.RawMessage `json:"raw,omitempty"`
+}
+
+type FileEntry struct {
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	IsDir    bool   `json:"is_dir"`
+	Size     int64  `json:"size,omitempty"`
+	Modified int64  `json:"modified,omitempty"`
+}
+
+type TerminalRunRequest struct {
+	RequestID     string `json:"request_id"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	WorkspacePath string `json:"workspace_path"`
+	Command       string `json:"command"`
+}
+
+type TerminalResult struct {
+	RequestID string `json:"request_id"`
+	Command   string `json:"command,omitempty"`
+	Output    string `json:"output,omitempty"`
+	Error     string `json:"error,omitempty"`
+	ExitCode  int    `json:"exit_code"`
+	Duration  int64  `json:"duration_ms,omitempty"`
 }
 
 type ServerError struct {

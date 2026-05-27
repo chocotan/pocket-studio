@@ -36,6 +36,7 @@ type ACPXConfig struct {
 	Command     string   `json:"command"`
 	Agent       string   `json:"agent"`
 	SessionName string   `json:"session_name"`
+	TTLSeconds  int      `json:"ttl_seconds"`
 	Args        []string `json:"args"`
 }
 
@@ -65,6 +66,9 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if cfg.ACPX.Agent == "" {
 		cfg.ACPX.Agent = "claude"
+	}
+	if cfg.ACPX.TTLSeconds < 0 {
+		return cfg, fmt.Errorf("acpx.ttl_seconds must be >= 0")
 	}
 	if len(cfg.Workspaces) == 0 {
 		home, _ := os.UserHomeDir()
@@ -108,10 +112,11 @@ func ExampleConfig() Config {
 			Args:    []string{"--output-format", "stream-json", "--verbose"},
 		},
 		ACPX: ACPXConfig{
-			Enabled: true,
-			Command: "acpx",
-			Agent:   "claude",
-			Args:    []string{"--format", "json", "--approve-all"},
+			Enabled:    true,
+			Command:    "acpx",
+			Agent:      "claude",
+			TTLSeconds: 300,
+			Args:       []string{"--format", "json", "--approve-all"},
 		},
 		Workspaces: []protocol.Workspace{
 			{

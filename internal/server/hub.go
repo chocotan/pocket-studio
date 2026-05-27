@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"sort"
@@ -20,6 +21,7 @@ type Hub struct {
 	taskDevices map[string]string
 	taskEvents  map[string][]protocol.Envelope
 	taskRecords map[string]protocol.TaskRecord
+	pending     map[string]chan protocol.Envelope
 }
 
 type daemonConn struct {
@@ -62,6 +64,7 @@ func NewHub() *Hub {
 		taskDevices: make(map[string]string),
 		taskEvents:  make(map[string][]protocol.Envelope),
 		taskRecords: make(map[string]protocol.TaskRecord),
+		pending:     make(map[string]chan protocol.Envelope),
 	}
 }
 
@@ -95,6 +98,50 @@ func (h *Hub) ServeDaemonSocket(w http.ResponseWriter, r *http.Request) {
 	dc := &daemonConn{conn: conn, send: make(chan protocol.Envelope, 64), lastSeen: time.Now()}
 	go writeLoop(conn, dc.send)
 	h.readDaemonLoop(dc)
+}
+
+func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/api/state" && r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, h.stateView())
+		return
+	}
+	if r.URL.Path == "/api/workspace/list" && r.Method == http.MethodPost {
+		var req protocol.WorkspaceListRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		env, err := h.requestDaemon(r, protocol.TypeWorkspaceList, req.WorkspacePath, req.RequestID, req)
+		writeAPIEnvelope(w, env, err)
+		return
+	}
+	if r.URL.Path == "/api/workspace/read" && r.Method == http.MethodPost {
+		var req protocol.WorkspaceReadRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		env, err := h.requestDaemon(r, protocol.TypeWorkspaceRead, req.WorkspacePath, req.RequestID, req)
+		writeAPIEnvelope(w, env, err)
+		return
+	}
+	if r.URL.Path == "/api/workspace/write" && r.Method == http.MethodPost {
+		var req protocol.WorkspaceWriteRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		env, err := h.requestDaemon(r, protocol.TypeWorkspaceWrite, req.WorkspacePath, req.RequestID, req)
+		writeAPIEnvelope(w, env, err)
+		return
+	}
+	if r.URL.Path == "/api/terminal/run" && r.Method == http.MethodPost {
+		var req protocol.TerminalRunRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		env, err := h.requestDaemon(r, protocol.TypeTerminalRun, req.WorkspacePath, req.RequestID, req)
+		writeAPIEnvelope(w, env, err)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func (h *Hub) readWebLoop(wc *webConn) {
@@ -180,6 +227,7 @@ func (h *Hub) readWebLoop(wc *webConn) {
 				record.WorkspacePath = task.WorkspacePath
 				record.Agent = task.Agent
 				record.SessionName = task.SessionName
+				record.ModelID = task.ModelID
 				record.Prompt = task.Prompt
 				record.ParentTaskID = task.ParentTaskID
 				if task.ResumeSessionID != "" {
@@ -187,16 +235,18 @@ func (h *Hub) readWebLoop(wc *webConn) {
 				}
 				record.Status = "queued"
 				record.UpdatedAt = now
-				userEvent := protocol.TaskEvent{
-					TaskID:    task.TaskID,
-					EventID:   protocol.NewID("evt"),
-					EventType: "user.prompt",
-					Source:    "web",
-					Sequence:  int64(len(record.Events) + 1),
-					Timestamp: now,
-					Data:      MarshalPayload(map[string]string{"prompt": task.Prompt}),
+				if !hasLatestUserPrompt(record.Events, task.Prompt) {
+					userEvent := protocol.TaskEvent{
+						TaskID:    task.TaskID,
+						EventID:   protocol.NewID("evt"),
+						EventType: "user.prompt",
+						Source:    "web",
+						Sequence:  int64(len(record.Events) + 1),
+						Timestamp: now,
+						Data:      MarshalPayload(map[string]string{"prompt": task.Prompt}),
+					}
+					record.Events = appendBounded(record.Events, userEvent, 1000)
 				}
-				record.Events = appendBounded(record.Events, userEvent, 1000)
 				h.taskRecords[task.TaskID] = record
 			}
 			h.mu.Unlock()
@@ -226,6 +276,70 @@ func (h *Hub) readWebLoop(wc *webConn) {
 			}
 			forward := env
 			forward.From = "server"
+			dc.send <- forward
+		case protocol.TypeTaskSetModel:
+			change, err := protocol.DecodePayload[protocol.TaskSetModel](env)
+			if err != nil {
+				wc.send <- serverError("bad_payload", err.Error())
+				continue
+			}
+			if change.TaskID == "" || change.ModelID == "" {
+				wc.send <- serverError("bad_payload", "task.set_model requires task_id and model_id")
+				continue
+			}
+			h.mu.RLock()
+			deviceID := h.taskDevices[change.TaskID]
+			dc := h.daemons[deviceID]
+			h.mu.RUnlock()
+			if dc == nil {
+				wc.send <- serverError("task_not_routable", "task has no connected daemon")
+				continue
+			}
+			forward := env
+			forward.From = "server"
+			dc.send <- forward
+		case protocol.TypeSessionDelete:
+			remove, err := protocol.DecodePayload[protocol.SessionDelete](env)
+			if err != nil {
+				wc.send <- serverError("bad_payload", err.Error())
+				continue
+			}
+			if remove.TaskID == "" {
+				wc.send <- serverError("bad_payload", "session.delete requires task_id")
+				continue
+			}
+			h.mu.RLock()
+			deviceID := env.To.DeviceID
+			if deviceID == "" {
+				deviceID = h.taskDevices[remove.TaskID]
+			}
+			dc := h.daemons[deviceID]
+			h.mu.RUnlock()
+			if dc == nil {
+				wc.send <- serverError("task_not_routable", "session has no connected daemon")
+				continue
+			}
+			forward := env
+			forward.From = "server"
+			dc.send <- forward
+		case protocol.TypeWorkspaceList, protocol.TypeWorkspaceRead, protocol.TypeWorkspaceWrite, protocol.TypeTerminalRun:
+			deviceID := env.To.DeviceID
+			if deviceID == "" {
+				wc.send <- serverError("missing_device", env.Type+" requires to.device_id")
+				continue
+			}
+			h.mu.RLock()
+			dc := h.daemons[deviceID]
+			h.mu.RUnlock()
+			if dc == nil {
+				wc.send <- serverError("device_offline", "target device is offline")
+				continue
+			}
+			forward := env
+			forward.From = "server"
+			if forward.ID == "" {
+				forward.ID = protocol.NewID("msg")
+			}
 			dc.send <- forward
 		default:
 			wc.send <- serverError("unsupported_type", "unsupported web message type")
@@ -281,10 +395,23 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 				continue
 			}
 			h.mu.Lock()
+			seen := make(map[string]struct{}, len(snapshot.Tasks))
 			for _, record := range snapshot.Tasks {
+				seen[record.TaskID] = struct{}{}
 				h.taskDevices[record.TaskID] = snapshot.DeviceID
 				record.DeviceID = snapshot.DeviceID
 				h.taskRecords[record.TaskID] = record
+			}
+			for taskID, deviceID := range h.taskDevices {
+				if deviceID != snapshot.DeviceID {
+					continue
+				}
+				if _, ok := seen[taskID]; ok {
+					continue
+				}
+				delete(h.taskDevices, taskID)
+				delete(h.taskRecords, taskID)
+				delete(h.taskEvents, taskID)
 			}
 			h.mu.Unlock()
 			h.broadcast(protocol.NewEnvelope("server.state", "server", h.stateView()))
@@ -304,6 +431,9 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 				if dc.deviceID != "" {
 					record.DeviceID = dc.deviceID
 				}
+				if modelID := extractModelID(taskEvent); modelID != "" {
+					record.ModelID = modelID
+				}
 				record.Status = statusFromEvent(taskEvent.EventType, record.Status)
 				record.UpdatedAt = time.Now().Unix()
 				if taskEvent.Timestamp == 0 {
@@ -312,6 +442,13 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 				record.Events = appendBounded(record.Events, taskEvent, 1000)
 				h.taskRecords[taskEvent.TaskID] = record
 				h.mu.Unlock()
+			}
+			forward := env
+			forward.From = "server"
+			h.broadcast(forward)
+		case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult:
+			if h.resolvePending(env) {
+				continue
 			}
 			forward := env
 			forward.From = "server"
@@ -346,6 +483,97 @@ func (h *Hub) stateView() StateView {
 		return tasks[i].UpdatedAt > tasks[j].UpdatedAt
 	})
 	return StateView{Devices: devices, Tasks: tasks}
+}
+
+func (h *Hub) requestDaemon(r *http.Request, messageType string, workspacePath string, requestID string, payload any) (protocol.Envelope, error) {
+	if requestID == "" {
+		requestID = protocol.NewID("req")
+		switch typed := payload.(type) {
+		case protocol.WorkspaceListRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.WorkspaceReadRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.WorkspaceWriteRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.TerminalRunRequest:
+			typed.RequestID = requestID
+			payload = typed
+		}
+	}
+	deviceID := r.URL.Query().Get("device_id")
+	h.mu.RLock()
+	if deviceID == "" {
+		for _, dc := range h.daemons {
+			if workspacePath == "" || daemonHasWorkspace(dc, workspacePath) {
+				deviceID = dc.deviceID
+				break
+			}
+		}
+	}
+	dc := h.daemons[deviceID]
+	h.mu.RUnlock()
+	if dc == nil {
+		return protocol.Envelope{}, errors.New("target device is offline")
+	}
+	response := make(chan protocol.Envelope, 1)
+	h.mu.Lock()
+	h.pending[requestID] = response
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		delete(h.pending, requestID)
+		h.mu.Unlock()
+	}()
+	env := protocol.NewEnvelope(messageType, "server", payload)
+	env.To.DeviceID = deviceID
+	dc.send <- env
+	select {
+	case result := <-response:
+		return result, nil
+	case <-r.Context().Done():
+		return protocol.Envelope{}, r.Context().Err()
+	case <-time.After(30 * time.Second):
+		return protocol.Envelope{}, errors.New("daemon request timed out")
+	}
+}
+
+func (h *Hub) resolvePending(env protocol.Envelope) bool {
+	requestID := requestIDFromEnvelope(env)
+	if requestID == "" {
+		return false
+	}
+	h.mu.RLock()
+	ch := h.pending[requestID]
+	h.mu.RUnlock()
+	if ch == nil {
+		return false
+	}
+	select {
+	case ch <- env:
+	default:
+	}
+	return true
+}
+
+func requestIDFromEnvelope(env protocol.Envelope) string {
+	var obj map[string]any
+	if err := json.Unmarshal(env.Payload, &obj); err != nil {
+		return ""
+	}
+	requestID, _ := obj["request_id"].(string)
+	return requestID
+}
+
+func daemonHasWorkspace(dc *daemonConn, workspacePath string) bool {
+	for _, workspace := range dc.workspaces {
+		if workspace.Path == workspacePath {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Hub) broadcast(env protocol.Envelope) {
@@ -384,12 +612,56 @@ func serverError(code, message string) protocol.Envelope {
 	return protocol.NewEnvelope(protocol.TypeServerError, "server", protocol.ServerError{Code: code, Message: message})
 }
 
+func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
+	defer r.Body.Close()
+	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
+		writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_payload", Message: err.Error()})
+		return false
+	}
+	return true
+}
+
+func writeAPIEnvelope(w http.ResponseWriter, env protocol.Envelope, err error) {
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "daemon_request_failed", Message: err.Error()})
+		return
+	}
+	if len(env.Payload) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(env.Payload)
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
 func appendBounded[T any](items []T, item T, max int) []T {
 	items = append(items, item)
 	if len(items) <= max {
 		return items
 	}
 	return append([]T(nil), items[len(items)-max:]...)
+}
+
+func hasLatestUserPrompt(events []protocol.TaskEvent, prompt string) bool {
+	for index := len(events) - 1; index >= 0; index-- {
+		event := events[index]
+		if event.EventType != "user.prompt" {
+			continue
+		}
+		var payload map[string]string
+		if err := json.Unmarshal(event.Data, &payload); err != nil {
+			return false
+		}
+		return payload["prompt"] == prompt
+	}
+	return false
 }
 
 func statusFromEvent(eventType, fallback string) string {
@@ -432,6 +704,24 @@ func extractSessionID(event protocol.TaskEvent) string {
 		if message, ok := obj["message"].(map[string]any); ok {
 			if sessionID, _ := message["session_id"].(string); sessionID != "" {
 				return sessionID
+			}
+		}
+	}
+	return ""
+}
+
+func extractModelID(event protocol.TaskEvent) string {
+	for _, raw := range []json.RawMessage{event.Raw, event.Data} {
+		if len(raw) == 0 {
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			continue
+		}
+		for _, key := range []string{"model_id", "modelId"} {
+			if modelID, _ := obj[key].(string); modelID != "" {
+				return modelID
 			}
 		}
 	}
