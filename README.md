@@ -1,4 +1,4 @@
-# AgentBridge MVP
+# PocketStudio MVP
 
 Go + React 版远程 Claude Code 控制台原型。
 

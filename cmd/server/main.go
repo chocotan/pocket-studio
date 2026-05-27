@@ -25,7 +25,7 @@ func main() {
 	mux.HandleFunc("/ws/daemon", hub.ServeDaemonSocket)
 	mux.HandleFunc("/api/", hub.ServeAPI)
 
-	log.Printf("AgentBridge server listening on http://localhost%s", *addr)
+	log.Printf("PocketStudio server listening on http://localhost%s", *addr)
 	if err := http.ListenAndServe(*addr, mux); err != nil {
 		log.Fatal(err)
 	}

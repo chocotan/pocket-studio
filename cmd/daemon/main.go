@@ -34,7 +34,7 @@ func main() {
 	defer stop()
 
 	d := daemon.New(cfg)
-	log.Printf("AgentBridge daemon %s connecting to %s", cfg.Device.ID, cfg.Server.URL)
+	log.Printf("PocketStudio daemon %s connecting to %s", cfg.Device.ID, cfg.Server.URL)
 	if err := d.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatal(err)
 	}

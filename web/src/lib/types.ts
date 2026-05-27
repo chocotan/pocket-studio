@@ -1,4 +1,4 @@
-import type { AgentModel, TaskEvent, TimedTimelineItem } from "@/lib/agent-events";
+import type { TaskEvent } from "@/lib/agent-events";
 
 export type Workspace = {
   id: string;
@@ -35,6 +35,15 @@ export type TaskRecord = {
   started_at?: number;
   updated_at?: number;
   events?: TaskEvent[];
+  ui_state?: {
+    openFiles: OpenFile[];
+    activeFilePath: string;
+    fileTree: FileEntry[];
+    expandedPaths: string[];
+    terminalLines: string[];
+    terminalVisible: boolean;
+    explorerVisible: boolean;
+  };
 };
 
 export type FileEntry = {
@@ -43,6 +52,13 @@ export type FileEntry = {
   path: string;
   is_dir: boolean;
   children?: FileEntry[];
+};
+
+export type OpenFile = {
+  path: string;
+  content: string;
+  savedContent: string;
+  status?: string;
 };
 
 export type WorkspaceResult = {
@@ -69,28 +85,4 @@ export type SearchResult = {
   title: string;
   subtitle: string;
   preview: string;
-};
-
-export type SessionWorkspaceProps = {
-  activeAgent: string;
-  agentLabel: string;
-  availableAgents: AgentCapability[];
-  currentModelID: string;
-  devices: Device[];
-  effectiveWorkspacePath: string;
-  explorerVisible: boolean;
-  expandedToolResults: Set<string>;
-  fileContent: string;
-  fileDirty: boolean;
-  fileStatus: string;
-  fileTree: FileEntry[];
-  openFilePath: string;
-  prompt: string;
-  selectedDevice: Device | undefined;
-  selectedDeviceId: string;
-  sessionModels: AgentModel[];
-  terminalLines: string[];
-  terminalRunning: boolean;
-  timelineItems: TimedTimelineItem[];
-  waitingForAgent: boolean;
 };

@@ -1,8 +1,8 @@
-# AgentBridge 产品与系统设计
+# PocketStudio 产品与系统设计
 
 ## 1. 产品定位
 
-AgentBridge 是一个面向开发者的远程 Coding Agent 控制台。它让用户可以在 Web 端选择自己的本地机器和代码仓库，向本地已安装的 Claude Code 下发任务，并实时查看 Agent 的对话、工具调用、终端输出、文件变更和资源消耗。
+PocketStudio 是一个面向开发者的远程 Coding Agent 控制台。它让用户可以在 Web 端选择自己的本地机器和代码仓库，向本地已安装的 Claude Code 下发任务，并实时查看 Agent 的对话、工具调用、终端输出、文件变更和资源消耗。
 
 产品采用“重本地，轻云端”的架构：
 
@@ -32,7 +32,7 @@ AgentBridge 是一个面向开发者的远程 Coding Agent 控制台。它让用
 
 ### 3.1 远程触发代码任务
 
-用户在外出时通过 Web 打开 AgentBridge，选择“家里台式机”和 `~/Projects/my-app`，输入“帮我重构登录逻辑并补充测试”并发送。任务通过本地 Claude Code 运行，用户在 Web 端查看实时执行过程。
+用户在外出时通过 Web 打开 PocketStudio，选择“家里台式机”和 `~/Projects/my-app`，输入“帮我重构登录逻辑并补充测试”并发送。任务通过本地 Claude Code 运行，用户在 Web 端查看实时执行过程。
 
 ### 3.2 观察 Agent 执行细节
 
@@ -222,7 +222,7 @@ Daemon 收到后必须执行：
 
 设计原则：
 
-- `data` 是 AgentBridge 标准化后的结构，供 UI 渲染。
+- `data` 是 PocketStudio 标准化后的结构，供 UI 渲染。
 - `raw` 保留 CLI 原始 JSON，便于调试和未来兼容。
 - `sequence` 由 Daemon 递增生成，Web 端按任务内序号排序。
 

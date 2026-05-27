@@ -12,7 +12,7 @@ const indexHTML = `<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AgentBridge</title>
+  <title>PocketStudio</title>
   <style>
     :root {
       color-scheme: light;
@@ -735,9 +735,9 @@ const indexHTML = `<!doctype html>
   <div class="app">
     <aside id="sidebar" class="sidebar">
       <div class="brand">
-        <div class="brand-mark">AB</div>
+        <div class="brand-mark">PS</div>
         <div>
-          <div class="brand-title">AgentBridge</div>
+          <div class="brand-title">PocketStudio</div>
           <div id="conn" class="brand-subtitle">Connecting...</div>
         </div>
       </div>
