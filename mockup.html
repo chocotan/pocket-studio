@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pocket Studio - Full-Screen Terminal Multiplexer</title>
+  <!-- Outfit & JetBrains Mono Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Tailwind CSS v3 CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    body {
+      font-family: 'Outfit', sans-serif;
+    }
+    .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    /* Custom scrollbars */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #94a3b8;
+    }
+    /* Terminal blinking cursor */
+    @keyframes blink {
+      50% { opacity: 0; }
+    }
+    .terminal-cursor {
+      animation: blink 1s step-end infinite;
+    }
+    /* Ambient neon mesh glow behind the white canvas */
+    .ambient-mesh {
+      position: absolute;
+      width: 600px;
+      height: 600px;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.05) 0%, rgba(139, 92, 246, 0.02) 65%, transparent 100%);
+      top: 5%;
+      left: 15%;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .ambient-mesh-2 {
+      position: absolute;
+      width: 700px;
+      height: 700px;
+      background: radial-gradient(circle, rgba(139, 92, 246, 0.04) 0%, rgba(99, 102, 241, 0.01) 70%, transparent 100%);
+      bottom: 2%;
+      right: 5%;
+      pointer-events: none;
+      z-index: 1;
+    }
+    
+    /* Premium Resizer handle styling */
+    .resize-handle-horizontal {
+      width: 6px;
+      cursor: col-resize;
+      margin: 0 -3px;
+      z-index: 40;
+      position: relative;
+      background: transparent;
+    }
+    .resize-handle-horizontal::after {
+      content: '';
+      position: absolute;
+      left: 2px;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background-color: #e2e8f0; /* Harmonized slate border */
+      transition: background-color 0.15s ease, width 0.15s ease, left 0.15s ease;
+    }
+    .resize-handle-horizontal:hover::after, .resize-handle-horizontal.dragging::after {
+      background-color: #6366f1;
+      width: 2px;
+      left: 2px;
+    }
+    .resize-handle-vertical {
+      height: 6px;
+      cursor: row-resize;
+      margin: -3px 0;
+      z-index: 40;
+      position: relative;
+      background: transparent;
+    }
+    .resize-handle-vertical::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background-color: #e2e8f0; /* Harmonized slate border */
+      transition: background-color 0.15s ease, height 0.15s ease, top 0.15s ease;
+    }
+    .resize-handle-vertical:hover::after, .resize-handle-vertical.dragging::after {
+      background-color: #6366f1;
+      height: 2px;
+      top: 2px;
+    }
+  </style>
+</head>
+<body class="bg-[#fafbfc] text-slate-800 antialiased h-screen overflow-hidden flex flex-col relative">
+
+  <!-- Glow effects in background -->
+  <div class="ambient-mesh"></div>
+  <div class="ambient-mesh-2"></div>
+
+  <!-- ================= TOP HEADER NAVIGATION ================= -->
+  <header class="bg-white/80 backdrop-blur-xl border-b border-slate-200/60 h-14 shrink-0 flex items-center justify-between px-6 z-30 select-none shadow-sm">
+    <div class="flex items-center space-x-3">
+      <div class="h-8 w-8 rounded-lg bg-gradient-to-tr from-indigo-600 to-indigo-400 flex items-center justify-center shadow-lg shadow-indigo-500/25">
+        <span class="text-white font-bold text-sm">P</span>
+      </div>
+      <span class="font-bold text-lg text-slate-800 tracking-tight">Pocket Studio</span>
+      <span class="px-2 py-0.5 text-[9px] uppercase font-bold tracking-widest bg-indigo-50 text-indigo-600 rounded border border-indigo-100">PRO</span>
+    </div>
+
+    <div class="flex items-center space-x-6 text-sm">
+      <!-- Active Workspace indicator -->
+      <div id="workspace-context-badge" class="hidden flex items-center space-x-2.5 text-slate-500 bg-slate-100/80 px-3.5 py-1 rounded-full border border-slate-200/60 shadow-inner select-none">
+        <span class="text-slate-700 font-semibold text-xs">Local Machine</span>
+        <span class="text-slate-300">/</span>
+        <span class="text-indigo-600 font-semibold text-xs truncate max-w-[150px]" id="active-project-breadcrumb">test-project</span>
+      </div>
+
+      <div class="flex items-center space-x-2 select-none">
+        <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+        <span class="text-slate-500 text-xs font-mono uppercase font-bold tracking-wider">Connected</span>
+      </div>
+
+      <button id="nav-btn-home" onclick="showDashboard()" class="hidden flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 shadow-sm font-semibold text-xs transition-all active:scale-95 duration-150">
+        <i data-lucide="arrow-left" class="h-3.5 w-3.5 text-slate-400"></i>
+        <span>返回项目大厅</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ================= MAIN CORE VIEWS ================= -->
+  <main class="grow relative flex overflow-hidden z-10">
+
+    <!-- ================= VIEW 1: STUDIO DASHBOARD (Lobby & Project Grid) ================= -->
+    <div id="dashboard-view" class="absolute inset-0 overflow-y-auto p-8 flex flex-col items-center">
+      
+      <!-- Welcome Header Banner -->
+      <div class="mb-10 text-center max-w-4xl mx-auto select-none mt-4">
+        <h1 class="text-4xl font-extrabold tracking-tight text-slate-900 sm:text-5xl bg-clip-text text-transparent bg-gradient-to-r from-indigo-750 via-indigo-600 to-purple-650">
+          轻量化远程/本地开发控制台
+        </h1>
+        <p class="mt-4 text-sm text-slate-500 font-light max-w-lg mx-auto leading-relaxed">
+          选择物理开发机并绑定项目路径，瞬间打开高度可配置、多视窗任意切分的分裂终端工作区。
+        </p>
+      </div>
+
+      <!-- Frictionless Two-Column Layout -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 max-w-7xl mx-auto w-full grow">
+        
+        <!-- Left: Machines List (4 columns) -->
+        <div class="lg:col-span-4 flex flex-col space-y-6">
+          <div class="bg-white/70 backdrop-blur-xl border border-slate-200/50 rounded-2xl p-6 shadow-md flex flex-col space-y-4">
+            <div class="flex items-center justify-between pb-3.5 border-b border-slate-100">
+              <h2 class="text-sm font-bold text-slate-800 flex items-center space-x-2">
+                <i data-lucide="cpu" class="h-4.5 w-4.5 text-indigo-500"></i>
+                <span class="font-bold">机器大厅 (Machines)</span>
+              </h2>
+              <span class="text-[10px] bg-indigo-50 text-indigo-600 border border-indigo-100 px-2.5 py-0.5 rounded-full font-mono font-bold">2 台在线</span>
+            </div>
+
+            <!-- Machine selector cards -->
+            <div class="space-y-3">
+              <!-- Machine 1 (Local) -->
+              <div onclick="selectMachine('local')" id="mcard-local" class="p-4 rounded-xl border cursor-pointer transition-all duration-200 flex items-center justify-between bg-indigo-50/50 border-indigo-200 shadow-[0_0_15px_rgba(99,102,241,0.03)] group">
+                <div class="flex items-center space-x-3.5">
+                  <div class="h-9 w-9 rounded-lg flex items-center justify-center border transition bg-indigo-600 border-indigo-700 text-white">
+                    <i data-lucide="server" class="h-4.5 w-4.5"></i>
+                  </div>
+                  <div>
+                    <h4 class="text-xs font-bold text-indigo-750">Local Machine</h4>
+                    <p class="text-[9px] text-slate-400 font-mono mt-0.5">本地开发物理主机</p>
+                  </div>
+                </div>
+                <div class="flex items-center space-x-1.5 shrink-0">
+                  <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span class="text-[10px] font-bold text-slate-500">在线</span>
+                </div>
+              </div>
+
+              <!-- Machine 2 (Remote AWS) -->
+              <div onclick="selectMachine('aws')" id="mcard-aws" class="p-4 rounded-xl border border-slate-100 bg-slate-55/30 hover:bg-slate-50 hover:border-slate-200 cursor-pointer transition-all duration-200 flex items-center justify-between group">
+                <div class="flex items-center space-x-3.5">
+                  <div class="h-9 w-9 rounded-lg flex items-center justify-center border border-slate-200 text-slate-400 group-hover:border-indigo-300 group-hover:text-indigo-600 transition bg-white">
+                    <i data-lucide="server" class="h-4.5 w-4.5"></i>
+                  </div>
+                  <div>
+                    <h4 class="text-xs font-bold text-slate-700 group-hover:text-indigo-600 transition">AWS Production VM</h4>
+                    <p class="text-[9px] text-slate-400 font-mono mt-0.5">EC2 远程 Linux 云主机</p>
+                  </div>
+                </div>
+                <div class="flex items-center space-x-1.5 shrink-0">
+                  <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  <span class="text-[10px] font-bold text-slate-500">在线</span>
+                </div>
+              </div>
+
+              <!-- Machine 3 (Offline Edge Node) -->
+              <div class="p-4 rounded-xl border border-slate-100 bg-slate-100/30 opacity-60 flex items-center justify-between">
+                <div class="flex items-center space-x-3.5">
+                  <div class="h-9 w-9 rounded-lg flex items-center justify-center border border-slate-200 bg-slate-100 text-slate-400">
+                    <i data-lucide="server" class="h-4.5 w-4.5"></i>
+                  </div>
+                  <div>
+                    <h4 class="text-xs font-bold text-slate-500">Edge Gateway</h4>
+                    <p class="text-[9px] text-slate-400 font-mono mt-0.5">IoT 局域网边缘网关</p>
+                  </div>
+                </div>
+                <div class="flex items-center space-x-1.5 shrink-0">
+                  <span class="h-2 w-2 rounded-full bg-slate-350"></span>
+                  <span class="text-[10px] font-bold text-slate-400">离线</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Projects Grid Directly (8 columns) -->
+        <div class="lg:col-span-8 flex flex-col space-y-6">
+          
+          <div class="flex items-center justify-between pb-3.5 border-b border-slate-200/50 select-none">
+            <h2 class="text-sm font-bold text-slate-800 flex items-center space-x-2.5">
+              <i data-lucide="folder-git2" class="h-5 w-5 text-indigo-500"></i>
+              <span id="projects-lobby-title" class="tracking-tight">Local Machine 的项目空间</span>
+            </h2>
+            
+            <button onclick="openCreateProjectModal()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 transition-all shadow-md shadow-indigo-500/20 active:scale-95 duration-150">
+              <i data-lucide="plus" class="h-4 w-4"></i>
+              <span>创建项目</span>
+            </button>
+          </div>
+
+          <!-- Projects Grid -->
+          <div id="projects-grid" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            
+            <!-- Project 1 (Active test-project) -->
+            <div onclick="enterWorkspace('proj-99856689')" class="relative bg-white/70 backdrop-blur-xl border border-slate-200/50 rounded-2xl p-6 shadow-sm hover:border-indigo-400 hover:shadow-[0_10px_30px_rgba(99,102,241,0.06)] transition-all duration-300 transform hover:-translate-y-1 cursor-pointer flex flex-col justify-between h-44 group overflow-hidden animate-in fade-in duration-300">
+              <div class="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-indigo-500 to-purple-500 rounded-l-2xl"></div>
+              
+              <div>
+                <div class="flex items-center justify-between select-none">
+                  <span class="px-2.5 py-0.5 text-[9px] uppercase font-bold tracking-widest bg-indigo-50 text-indigo-600 border border-indigo-100 rounded-md font-bold">Local Host</span>
+                  <span class="px-2 py-0.5 text-[10px] bg-slate-50 text-slate-500 border border-slate-200 rounded-md font-mono font-bold">2 终端</span>
+                </div>
+                <h3 class="text-sm font-bold text-slate-800 mt-4 group-hover:text-indigo-650 transition-colors duration-200">test-project</h3>
+                <div class="flex items-center space-x-1.5 text-[10.5px] text-slate-400 mt-2 font-mono select-none">
+                  <i data-lucide="folder" class="h-3.5 w-3.5 text-slate-300"></i>
+                  <span class="truncate">/home/choco/Agent</span>
+                </div>
+              </div>
+              
+              <div class="flex items-center justify-between text-xs text-indigo-650 font-bold pt-3 border-t border-slate-100">
+                <span>进入工作区</span>
+                <i data-lucide="chevron-right" class="h-4 w-4 transform group-hover:translate-x-1.5 transition-transform duration-300 text-indigo-500"></i>
+              </div>
+            </div>
+
+            <!-- Project 2 (nextjs-blog-app) -->
+            <div onclick="enterWorkspace('proj-48492020')" class="relative bg-white/70 backdrop-blur-xl border border-slate-200/50 rounded-2xl p-6 shadow-sm hover:border-indigo-400 hover:shadow-[0_10px_30px_rgba(99,102,241,0.06)] transition-all duration-300 transform hover:-translate-y-1 cursor-pointer flex flex-col justify-between h-44 group overflow-hidden animate-in fade-in duration-300">
+              <div class="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-indigo-500 to-purple-500 rounded-l-2xl"></div>
+              
+              <div>
+                <div class="flex items-center justify-between select-none">
+                  <span class="px-2.5 py-0.5 text-[9px] uppercase font-bold tracking-widest bg-indigo-50 text-indigo-600 border border-indigo-100 rounded-md font-bold">Local Host</span>
+                  <span class="px-2 py-0.5 text-[10px] bg-slate-50 text-slate-500 border border-slate-200 rounded-md font-mono font-bold">1 终端</span>
+                </div>
+                <h3 class="text-sm font-bold text-slate-800 mt-4 group-hover:text-indigo-650 transition-colors duration-200">nextjs-blog-app</h3>
+                <div class="flex items-center space-x-1.5 text-[10.5px] text-slate-400 mt-2 font-mono select-none">
+                  <i data-lucide="folder" class="h-3.5 w-3.5 text-slate-300"></i>
+                  <span class="truncate">/home/choco/Downloads/pocket-studio</span>
+                </div>
+              </div>
+              
+              <div class="flex items-center justify-between text-xs text-indigo-655 font-bold pt-3 border-t border-slate-100">
+                <span>进入工作区</span>
+                <i data-lucide="chevron-right" class="h-4 w-4 transform group-hover:translate-x-1.5 transition-transform duration-300 text-indigo-500"></i>
+              </div>
+            </div>
+
+            <!-- Create project dashed card -->
+            <div onclick="openCreateProjectModal()" class="border-2 border-dashed border-slate-200 hover:border-indigo-400 hover:bg-white/50 cursor-pointer rounded-2xl p-6 flex flex-col items-center justify-center h-44 text-slate-400 hover:text-indigo-600 transition-all duration-300 group shadow-sm">
+              <div class="h-10 w-10 rounded-full bg-slate-50 text-slate-400 group-hover:bg-indigo-50 group-hover:text-indigo-600 transition-colors flex items-center justify-center mb-3 border border-slate-200 shadow-inner">
+                <i data-lucide="folder-plus" class="h-5 w-5 transform group-hover:scale-110 transition-transform"></i>
+              </div>
+              <span class="text-xs font-bold text-slate-750 group-hover:text-indigo-600 transition-colors duration-200">创建新项目</span>
+              <span class="text-[9px] text-slate-400 mt-1 select-none">支持开发机上任意位置的绝对路径</span>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= VIEW 2: MULTIPLEXED SPLIT TERMINAL CANVAS (Workspace View) ================= -->
+    <div id="workspace-view" class="hidden absolute inset-0 bg-[#f1f5f9] p-4 flex flex-col">
+      <!-- Dynamic splits canvas mount point -->
+      <div id="terminal-grid-root" class="grow w-full h-full relative overflow-hidden flex flex-col gap-3">
+        <!-- Spawned dynamically in JS, default is a full-screen single PTY block -->
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ================= OVERLAYS & MODALS ================= -->
+
+  <!-- Modal 1: Create Project Modal Overlay (Allows ANY Absolute Directory Path) -->
+  <div id="modal-create-project" class="hidden fixed inset-0 bg-slate-950/20 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+    <div class="bg-white w-full max-w-sm rounded-2xl overflow-hidden shadow-2xl border border-slate-200/80">
+      <div class="px-6 py-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center select-none">
+        <h3 class="font-bold text-slate-800 flex items-center space-x-2 text-sm">
+          <i data-lucide="folder-plus" class="h-4.5 w-4.5 text-indigo-500"></i>
+          <span>创建项目</span>
+        </h3>
+        <button onclick="closeCreateProjectModal()" class="text-slate-400 hover:text-slate-600 rounded-lg p-1 hover:bg-slate-100 transition">
+          <i data-lucide="x" class="h-4 w-4"></i>
+        </button>
+      </div>
+      <form onsubmit="handleCreateProject(event)" class="p-6 space-y-4 text-xs">
+        <div>
+          <label class="block text-[10px] font-bold text-slate-405 uppercase tracking-widest mb-1.5">项目名称</label>
+          <input id="input-proj-name" type="text" required placeholder="例如 my-server-app" class="w-full bg-slate-50 border border-slate-200 hover:border-slate-350 focus:border-indigo-500 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition font-sans" />
+        </div>
+        <div>
+          <label class="block text-[10px] font-bold text-slate-405 uppercase tracking-widest mb-1.5">项目路径（绝对路径）</label>
+          <input id="input-proj-path" type="text" required placeholder="例如 /home/choco/projects/my-app" class="w-full bg-slate-50 border border-slate-200 hover:border-slate-350 focus:border-indigo-500 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition font-mono" />
+        </div>
+        <div class="pt-2 flex justify-end space-x-2">
+          <button type="button" onclick="closeCreateProjectModal()" class="px-3.5 py-1.5 border border-slate-200 rounded-lg font-semibold text-slate-550 hover:text-slate-800 hover:bg-slate-50 transition">取消</button>
+          <button type="submit" class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg font-semibold text-white shadow shadow-indigo-500/20 transition">确认创建</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ================= SCRIPTS & HIGH-FIDELITY LAYOUT SPLITTING ENGINE ================= -->
+  <script>
+    // Initialize Lucide icons
+    lucide.createIcons();
+
+    // App state
+    let selectedMachineId = 'local';
+    let focusedTerminalId = null;
+
+    // Initial project grid data
+    const projectList = [
+      { id: 'proj-99856689', name: 'test-project', path: '/home/choco/Agent', host: 'Local Host', terms: '2 终端' },
+      { id: 'proj-48492020', name: 'nextjs-blog-app', path: '/home/choco/Downloads/pocket-studio', host: 'Local Host', terms: '1 终端' }
+    ];
+
+    // 1. Machine Selection
+    function selectMachine(machineId) {
+      selectedMachineId = machineId;
+      const localCard = document.getElementById('mcard-local');
+      const awsCard = document.getElementById('mcard-aws');
+      const lobbyTitle = document.getElementById('projects-lobby-title');
+
+      if (machineId === 'local') {
+        localCard.className = "p-4 rounded-xl border cursor-pointer transition-all duration-200 flex items-center justify-between bg-indigo-50/50 border-indigo-200 shadow-[0_0_15px_rgba(99,102,241,0.03)] group";
+        awsCard.className = "p-4 rounded-xl border border-slate-100 bg-slate-55/30 hover:bg-slate-50 hover:border-slate-200 cursor-pointer transition-all duration-200 flex items-center justify-between group";
+        lobbyTitle.innerText = "Local Machine 的项目空间";
+        renderProjects(projectList);
+      } else {
+        awsCard.className = "p-4 rounded-xl border cursor-pointer transition-all duration-200 flex items-center justify-between bg-indigo-50/50 border-indigo-200 shadow-[0_0_15px_rgba(99,102,241,0.03)] group";
+        localCard.className = "p-4 rounded-xl border border-slate-100 bg-slate-55/30 hover:bg-slate-50 hover:border-slate-200 cursor-pointer transition-all duration-200 flex items-center justify-between group";
+        lobbyTitle.innerText = "AWS Production VM 的项目空间";
+        
+        const remoteList = [
+          { id: 'proj-remote-1', name: 'cloud-docker-stack', path: '/var/lib/docker/volumes/stack', host: 'AWS Cloud', terms: '3 终端' }
+        ];
+        renderProjects(remoteList);
+      }
+    }
+
+    function renderProjects(list) {
+      const grid = document.getElementById('projects-grid');
+      let html = '';
+      list.forEach(p => {
+        html += `
+          <div onclick="enterWorkspace('${p.id}')" class="relative bg-white/70 backdrop-blur-xl border border-slate-200/50 rounded-2xl p-6 shadow-sm hover:border-indigo-400 hover:shadow-[0_10px_30px_rgba(99,102,241,0.06)] transition-all duration-300 transform hover:-translate-y-1 cursor-pointer flex flex-col justify-between h-44 group overflow-hidden animate-in fade-in duration-300">
+            <div class="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-indigo-500 to-purple-500 rounded-l-2xl"></div>
+            <div>
+              <div class="flex items-center justify-between select-none">
+                <span class="px-2.5 py-0.5 text-[9px] uppercase font-bold tracking-widest bg-indigo-50 text-indigo-600 border border-indigo-100 rounded-md font-bold">${p.host}</span>
+                <span class="px-2 py-0.5 text-[10px] bg-slate-50 text-slate-500 border border-slate-200 rounded-md font-mono font-bold">${p.terms}</span>
+              </div>
+              <h3 class="text-sm font-bold text-slate-800 mt-4 group-hover:text-indigo-650 transition-colors duration-200">${p.name}</h3>
+              <div class="flex items-center space-x-1.5 text-[10.5px] text-slate-400 mt-2 font-mono select-none">
+                <i data-lucide="folder" class="h-3.5 w-3.5 text-slate-300"></i>
+                <span class="truncate">${p.path}</span>
+              </div>
+            </div>
+            <div class="flex items-center justify-between text-xs text-indigo-655 font-bold pt-3 border-t border-slate-100">
+              <span>进入工作区</span>
+              <i data-lucide="chevron-right" class="h-4 w-4 transform group-hover:translate-x-1.5 transition-transform duration-300 text-indigo-500"></i>
+            </div>
+          </div>
+        `;
+      });
+
+      html += `
+        <div onclick="openCreateProjectModal()" class="border-2 border-dashed border-slate-200 hover:border-indigo-400 hover:bg-white/50 cursor-pointer rounded-2xl p-6 flex flex-col items-center justify-center h-44 text-slate-400 hover:text-indigo-600 transition-all duration-300 group shadow-sm animate-in fade-in duration-300">
+          <div class="h-10 w-10 rounded-full bg-slate-50 text-slate-400 group-hover:bg-indigo-50 group-hover:text-indigo-600 transition-colors flex items-center justify-center mb-3 border border-slate-200 shadow-inner">
+            <i data-lucide="folder-plus" class="h-5 w-5 transform group-hover:scale-110 transition-transform"></i>
+          </div>
+          <span class="text-xs font-bold text-slate-750 group-hover:text-indigo-600 transition-colors duration-200">创建新项目</span>
+          <span class="text-[9px] text-slate-400 mt-1 select-none">支持开发机上任意位置的绝对路径</span>
+        </div>
+      `;
+      grid.innerHTML = html;
+      lucide.createIcons();
+    }
+
+    // 2. Project Creation Modal
+    function openCreateProjectModal() {
+      document.getElementById('input-proj-path').value = '';
+      document.getElementById('input-proj-name').value = '';
+      document.getElementById('modal-create-project').classList.remove('hidden');
+    }
+
+    function closeCreateProjectModal() {
+      document.getElementById('modal-create-project').classList.add('hidden');
+    }
+
+    function handleCreateProject(event) {
+      event.preventDefault();
+      const name = document.getElementById('input-proj-name').value.trim();
+      const path = document.getElementById('input-proj-path').value.trim();
+      
+      if (!name || !path) return;
+
+      const hostLabel = selectedMachineId === 'local' ? 'Local Host' : 'AWS Cloud';
+      projectList.unshift({
+        id: 'proj-' + Math.floor(Math.random() * 90000000 + 10000000),
+        name,
+        path,
+        host: hostLabel,
+        terms: '1 终端'
+      });
+
+      renderProjects(selectedMachineId === 'local' ? projectList : [{ id: 'proj-remote-1', name: 'cloud-docker-stack', path: '/var/lib/docker/volumes/stack', host: 'AWS Cloud', terms: '3 终端' }]);
+      closeCreateProjectModal();
+    }
+
+    // 3. TREE-BASED LAYOUT MULTIPLEXER ENGINE WITH RESIZABLE Divs
+    let layoutTree = {
+      type: 'pane',
+      id: 'pane-1',
+      title: 'Bash Terminal',
+      termType: 'bash',
+      focus: true
+    };
+
+    function enterWorkspace(projId) {
+      document.getElementById('dashboard-view').classList.add('hidden');
+      document.getElementById('workspace-view').classList.remove('hidden');
+      document.getElementById('nav-btn-home').classList.remove('hidden');
+      document.getElementById('workspace-context-badge').classList.remove('hidden');
+
+      const proj = projectList.find(p => p.id === projId) || { name: 'test-project', path: '/home/choco/Agent' };
+      document.getElementById('active-project-breadcrumb').innerText = proj.name;
+
+      // Reset layout with one full-screen terminal pane
+      layoutTree = {
+        type: 'pane',
+        id: 'pane-1',
+        title: 'Bash Terminal',
+        termType: 'bash',
+        focus: true
+      };
+      focusedTerminalId = 'pane-1';
+      renderTerminalGrid();
+    }
+
+    function showDashboard() {
+      document.getElementById('workspace-view').classList.add('hidden');
+      document.getElementById('dashboard-view').classList.remove('hidden');
+      document.getElementById('nav-btn-home').classList.add('hidden');
+      document.getElementById('workspace-context-badge').classList.add('hidden');
+    }
+
+    // Traverses tree to set active focus to a specific pane
+    function setFocusInTree(node, focusId) {
+      if (node.type === 'pane') {
+        node.focus = (node.id === focusId);
+      } else if (node.type === 'split') {
+        node.children.forEach(child => setFocusInTree(child, focusId));
+      }
+    }
+
+    function focusTerminal(paneId) {
+      focusedTerminalId = paneId;
+      setFocusInTree(layoutTree, paneId);
+      renderTerminalGrid();
+    }
+
+    // Main layout rendering engine
+    function renderTerminalGrid() {
+      const gridRoot = document.getElementById('terminal-grid-root');
+      gridRoot.innerHTML = ''; // Reset grid
+
+      // Recursively build HTML/Elements from the layoutTree
+      const rootElement = buildLayoutDOM(layoutTree);
+      rootElement.classList.add('w-full', 'h-full');
+      gridRoot.appendChild(rootElement);
+      
+      lucide.createIcons();
+    }
+
+    // Recursively generates Flex containers and Drag handles from split tree
+    function buildLayoutDOM(node) {
+      if (node.type === 'pane') {
+        return createTerminalPaneElement(node);
+      }
+
+      // Split container node
+      const container = document.createElement('div');
+      const isHorizontal = node.orientation === 'horizontal';
+      container.className = `flex-1 w-full h-full flex relative ${isHorizontal ? 'flex-row' : 'flex-col'}`;
+      
+      node.children.forEach((child, index) => {
+        // Render split handle between child panels
+        if (index > 0) {
+          const handle = document.createElement('div');
+          handle.className = isHorizontal ? 'resize-handle-horizontal' : 'resize-handle-vertical';
+          
+          // Implement fully functional drag-to-resize interaction
+          handle.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            handle.classList.add('dragging');
+            
+            const prev = handle.previousElementSibling;
+            const next = handle.nextElementSibling;
+            const isHoriz = isHorizontal;
+            
+            const rectPrev = prev.getBoundingClientRect();
+            const rectNext = next.getBoundingClientRect();
+            
+            const startX = e.clientX;
+            const startY = e.clientY;
+            const startW1 = rectPrev.width;
+            const startW2 = rectNext.width;
+            const startH1 = rectPrev.height;
+            const startH2 = rectNext.height;
+            
+            // Adjust styles to make resize feel perfectly smooth
+            prev.style.flexGrow = '0';
+            prev.style.flexShrink = '0';
+            prev.style.flexBasis = 'auto';
+            next.style.flexGrow = '0';
+            next.style.flexShrink = '0';
+            next.style.flexBasis = 'auto';
+            
+            const onMouseMove = (moveEvent) => {
+              if (isHoriz) {
+                const deltaX = moveEvent.clientX - startX;
+                prev.style.width = `${startW1 + deltaX}px`;
+                next.style.width = `${startW2 - deltaX}px`;
+              } else {
+                const deltaY = moveEvent.clientY - startY;
+                prev.style.height = `${startH1 + deltaY}px`;
+                next.style.height = `${startH2 - deltaY}px`;
+              }
+            };
+            
+            const onMouseUp = () => {
+              handle.classList.remove('dragging');
+              document.removeEventListener('mousemove', onMouseMove);
+              document.removeEventListener('mouseup', onMouseUp);
+            };
+            
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+          });
+          
+          container.appendChild(handle);
+        }
+
+        const childDOM = buildLayoutDOM(child);
+        childDOM.classList.add('flex-1');
+        container.appendChild(childDOM);
+      });
+
+      return container;
+    }
+
+    // Creates the high-fidelity light-themed PTY pane block
+    function createTerminalPaneElement(pane) {
+      const container = document.createElement('div');
+      container.onclick = (e) => {
+        e.stopPropagation();
+        focusTerminal(pane.id);
+      };
+      
+      const isFocused = pane.focus;
+      const isClaude = pane.termType === 'claude';
+      
+      // Gorgeous Glowing active border matching the premium Light Theme
+      container.className = `bg-[#fafafa] border rounded-2xl flex flex-col overflow-hidden transition-all duration-300 relative ${
+        isFocused 
+          ? isClaude 
+            ? 'border-purple-400 ring-2 ring-purple-500/10 shadow-[0_10px_25px_rgba(168,85,247,0.06)] z-25' 
+            : 'border-indigo-400 ring-2 ring-indigo-500/10 shadow-[0_10px_25px_rgba(99,102,241,0.06)] z-25' 
+          : 'border-slate-200/80 hover:border-slate-355 z-10'
+      }`;
+
+      // Terminal Header
+      const header = document.createElement('div');
+      header.className = `h-10 border-b border-slate-200/60 px-4 shrink-0 flex items-center justify-between select-none ${
+        isFocused ? 'bg-slate-50' : 'bg-white'
+      }`;
+      
+      // Left Title with active badges
+      const titleArea = document.createElement('div');
+      titleArea.className = "flex items-center space-x-2";
+      const icon = isClaude ? 'bot' : 'terminal';
+      const iconColor = isClaude ? 'text-purple-500 animate-pulse' : 'text-slate-500';
+      titleArea.innerHTML = `<i data-lucide="${icon}" class="h-3.5 w-3.5 ${iconColor}"></i><span class="text-xs font-mono font-bold text-slate-700">${pane.title}</span>`;
+      
+      if (isFocused) {
+        titleArea.innerHTML += `<span class="h-1.5 w-1.5 rounded-full ${isClaude ? 'bg-purple-500' : 'bg-indigo-500'} animate-pulse shadow shadow-indigo-500/50"></span>`;
+      }
+      header.appendChild(titleArea);
+
+      // Right Split / Action controls: 4 distinct split buttons
+      const controls = document.createElement('div');
+      controls.className = "flex items-center space-x-2 text-slate-400 shrink-0";
+      controls.innerHTML = `
+        <!-- Split Left -->
+        <button onclick="event.stopPropagation(); directSplitTerminal('${pane.id}', 'left')" class="hover:text-slate-800 hover:bg-slate-100 rounded p-1 transition flex items-center justify-center animate-in" title="在左侧水平分割">
+          <svg class="h-3.5 w-3.5 text-indigo-500 hover:text-indigo-650" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <line x1="12" y1="3" x2="12" y2="21" />
+            <path d="M8 10l-2 2 2 2" />
+            <line x1="6" y1="12" x2="10" y2="12" />
+          </svg>
+        </button>
+
+        <!-- Split Right -->
+        <button onclick="event.stopPropagation(); directSplitTerminal('${pane.id}', 'right')" class="hover:text-slate-800 hover:bg-slate-100 rounded p-1 transition flex items-center justify-center animate-in" title="在右侧水平分割">
+          <svg class="h-3.5 w-3.5 text-indigo-500 hover:text-indigo-650" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <line x1="12" y1="3" x2="12" y2="21" />
+            <path d="M16 10l2 2-2 2" />
+            <line x1="18" y1="12" x2="14" y2="12" />
+          </svg>
+        </button>
+
+        <!-- Split Top -->
+        <button onclick="event.stopPropagation(); directSplitTerminal('${pane.id}', 'top')" class="hover:text-slate-800 hover:bg-slate-100 rounded p-1 transition flex items-center justify-center animate-in" title="在上方垂直分割">
+          <svg class="h-3.5 w-3.5 text-indigo-500 hover:text-indigo-650" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <path d="M10 8l2-2 2 2" />
+            <line x1="12" y1="6" x2="12" y2="10" />
+          </svg>
+        </button>
+
+        <!-- Split Bottom -->
+        <button onclick="event.stopPropagation(); directSplitTerminal('${pane.id}', 'bottom')" class="hover:text-slate-800 hover:bg-slate-100 rounded p-1 transition flex items-center justify-center animate-in" title="在下方垂直分割">
+          <svg class="h-3.5 w-3.5 text-indigo-500 hover:text-indigo-650" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <path d="M10 16l2 2 2-2" />
+            <line x1="12" y1="18" x2="12" y2="14" />
+          </svg>
+        </button>
+
+        <!-- Close split pane button (Only render if there are other nodes) -->
+        <button id="close-btn-${pane.id}" onclick="event.stopPropagation(); closeTerminalPane('${pane.id}')" class="hover:text-rose-600 hover:bg-rose-50 rounded p-1 transition flex items-center justify-center" title="关闭当前终端">
+          <i data-lucide="x" class="h-3.5 w-3.5"></i>
+        </button>
+      `;
+      header.appendChild(controls);
+      container.appendChild(header);
+
+      // Interactive terminal shell stdout canvas
+      const stdout = document.createElement('div');
+      stdout.className = `grow p-4 overflow-y-auto font-mono text-[11px] leading-relaxed text-slate-700 relative bg-[#fafafa]`;
+      
+      if (isClaude) {
+        // High fidelity Claude Code mockup output (Light background)
+        stdout.className += " border-t border-purple-100 bg-purple-50/20";
+        stdout.innerHTML = `
+          <div class="text-purple-600 font-bold flex items-center space-x-2 select-none">
+            <i data-lucide="bot" class="h-4 w-4"></i>
+            <span>Claude Code Session (Active PTY Stream)</span>
+          </div>
+          <div class="text-slate-400 mt-1 select-none">Loaded anthropic.claude-3-5-sonnet. PID: 96881. Session: pocket-studio-claude</div>
+          
+          <div class="text-slate-800 mt-3 font-bold font-sans"><span class="text-purple-600 font-mono">choco@local-host$</span> 请帮我重构一下 ServeTerminalWebSocket 中的 resize 事件处理。</div>
+          
+          <div class="text-purple-600 mt-2 font-bold font-sans">Claude:</div>
+          <div class="text-slate-750 font-normal font-sans bg-white p-3 rounded-lg border border-purple-100 leading-relaxed max-w-xl shadow-sm mt-1 animate-in fade-in duration-200">
+            我已经完成了重构方案。我们在 \`internal/server/hub.go\` 中加入了一个事件解析块，用来捕捉客户端发送的 resize 事件。
+            <br/><br/>
+            重构要点：
+            <ul class="list-disc pl-5 space-y-1 mt-1 text-[11px] text-slate-600">
+              <li>引入 \`TypeTerminalStreamResize\` 协议。</li>
+              <li>使用 \`pty.Setsize\` 动态通知本地底层 tmux 修改行列视窗大小。</li>
+              <li>通过 websocket 管道同步数据。</li>
+            </ul>
+          </div>
+          
+          <div class="flex items-center space-x-1.5 mt-4 text-[10px] text-slate-400 select-none animate-pulse">
+            <i data-lucide="terminal" class="h-3 w-3"></i>
+            <span>正在监听 tmux PTY 管道输入...</span>
+            <span class="bg-purple-600 text-purple-600 w-1.5 h-3.5 terminal-cursor">|</span>
+          </div>
+        `;
+      } else {
+        // Standard interactive shell bash output (Light background)
+        stdout.innerHTML = `
+          <div class="text-slate-450 select-none">Last login: Fri May 29 00:29:45 2026 from 127.0.0.1</div>
+          <div>[pocket-studio-bash] choco@local-host:~$ cd /home/choco/Agent</div>
+          <div>[pocket-studio-bash] choco@local-host:/home/choco/Agent$ npm run dev</div>
+          <div class="text-indigo-600 mt-1 select-none font-bold">➜  Local:   http://localhost:5173/</div>
+          <div class="text-indigo-650 select-none font-bold">➜  Network: http://192.168.1.100:5173/</div>
+          <div class="text-slate-400 select-none mt-1">✓ Compiled successfully in 128ms</div>
+          <div class="flex items-center space-x-1 mt-2">
+            <span>[pocket-studio-bash] choco@local-host:/home/choco/Agent$ </span>
+            <span class="bg-indigo-600 text-indigo-600 w-1.5 h-3.5 terminal-cursor">|</span>
+          </div>
+        `;
+      }
+
+      container.appendChild(stdout);
+      
+      // We also hide/show the Close button depending on whether we have more than 1 pane in total
+      setTimeout(() => {
+        const count = countPanes(layoutTree);
+        const closeBtn = container.querySelector(`#close-btn-${pane.id}`);
+        if (closeBtn) {
+          if (count <= 1) {
+            closeBtn.classList.add('hidden');
+          } else {
+            closeBtn.classList.remove('hidden');
+          }
+        }
+      }, 0);
+
+      return container;
+    }
+
+    // Helper: Counts total terminal panes in the layout tree
+    function countPanes(node) {
+      if (node.type === 'pane') return 1;
+      return node.children.reduce((acc, child) => acc + countPanes(child), 0);
+    }
+
+    // Helper: Find a pane and replace it in the layout tree with a split container
+    function performSplitInTree(node, targetId, direction, newPane) {
+      if (node.type === 'pane') {
+        if (node.id === targetId) {
+          const isHorizontal = (direction === 'left' || direction === 'right');
+          const orientation = isHorizontal ? 'horizontal' : 'vertical';
+          const isNewFirst = (direction === 'left' || direction === 'top');
+          
+          return {
+            type: 'split',
+            orientation,
+            children: isNewFirst ? [newPane, node] : [node, newPane]
+          };
+        }
+        return node;
+      }
+
+      for (let i = 0; i < node.children.length; i++) {
+        const child = node.children[i];
+        if (child.type === 'pane' && child.id === targetId) {
+          node.children[i] = performSplitInTree(child, targetId, direction, newPane);
+          return node;
+        } else if (child.type === 'split') {
+          node.children[i] = performSplitInTree(child, targetId, direction, newPane);
+        }
+      }
+      return node;
+    }
+
+    // Handles direct split actions
+    function directSplitTerminal(paneId, direction) {
+      // Create new pane structure
+      const newPaneId = 'pane-' + Math.floor(Math.random() * 900000 + 100000);
+      const newPane = {
+        type: 'pane',
+        id: newPaneId,
+        title: 'Bash Terminal',
+        termType: 'bash',
+        focus: true
+      };
+
+      // Unfocus existing nodes
+      setFocusInTree(layoutTree, null);
+      
+      // Perform tree injection
+      layoutTree = performSplitInTree(layoutTree, paneId, direction, newPane);
+      focusedTerminalId = newPaneId;
+
+      renderTerminalGrid();
+    }
+
+    // Helper: Remove a pane from the layout tree and simplify layout structure
+    function removePaneFromTree(node, targetId) {
+      if (node.type === 'pane') return node;
+
+      const targetIndex = node.children.findIndex(c => c.type === 'pane' && c.id === targetId);
+      if (targetIndex !== -1) {
+        node.children.splice(targetIndex, 1);
+        if (node.children.length === 1) {
+          return node.children[0];
+        }
+        return node;
+      }
+
+      for (let i = 0; i < node.children.length; i++) {
+        const child = node.children[i];
+        if (child.type === 'split') {
+          const result = removePaneFromTree(child, targetId);
+          node.children[i] = result;
+          if (node.children.length === 1) {
+            return node.children[0];
+          }
+        }
+      }
+      return node;
+    }
+
+    // Helper: Find first pane in the tree
+    function findFirstPane(node) {
+      if (node.type === 'pane') return node;
+      return findFirstPane(node.children[0]);
+    }
+
+    // Handles closing split terminal pane
+    function closeTerminalPane(paneId) {
+      const total = countPanes(layoutTree);
+      if (total <= 1) return;
+
+      layoutTree = removePaneFromTree(layoutTree, paneId);
+      
+      if (focusedTerminalId === paneId) {
+        const firstPane = findFirstPane(layoutTree);
+        firstPane.focus = true;
+        focusedTerminalId = firstPane.id;
+      }
+
+      renderTerminalGrid();
+    }
+
+    // Check hash on load to boot directly into workspace
+    if (window.location.hash === '#workspace') {
+      setTimeout(() => {
+        enterWorkspace('proj-99856689');
+        // Auto-split with Claude Code for stunning split preview!
+        const newPane = { type: 'pane', id: 'pane-2', title: 'Claude Code', termType: 'claude', focus: true };
+        layoutTree = performSplitInTree(layoutTree, 'pane-1', 'right', newPane);
+        setFocusInTree(layoutTree, 'pane-2');
+        focusedTerminalId = 'pane-2';
+        renderTerminalGrid();
+      }, 50);
+    }
+  </script>
+</body>
+</html>

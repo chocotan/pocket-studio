@@ -1,23 +1,16 @@
-export async function postJSON<T>(url: string, payload: unknown): Promise<T> {
-  const response = await fetch(url, {
+export async function postJSON<T>(url: string, body: any): Promise<T> {
+  // Resolve host properly for API connection (relative to window location or port 18080)
+  const host = window.location.host ? "" : "http://localhost:18080";
+  const res = await fetch(`${host}${url}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const message = typeof data?.message === "string" ? data.message : response.statusText;
-    throw new Error(message);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Request failed with status ${res.status}`);
   }
-  return data as T;
-}
-
-export async function getJSON<T>(url: string): Promise<T> {
-  const response = await fetch(url);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const message = typeof data?.message === "string" ? data.message : response.statusText;
-    throw new Error(message);
-  }
-  return data as T;
+  return res.json() as Promise<T>;
 }

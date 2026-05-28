@@ -5,7 +5,9 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -36,6 +38,8 @@ type Hub struct {
 	pending       map[string]chan protocol.Envelope
 	projects      map[string]Project
 	projectStates map[string]string // projectId -> JSON string
+	termMu        sync.RWMutex
+	terminalConns map[string]*websocket.Conn
 }
 
 type daemonConn struct {
@@ -81,6 +85,7 @@ func NewHub() *Hub {
 		pending:       make(map[string]chan protocol.Envelope),
 		projects:      make(map[string]Project),
 		projectStates: make(map[string]string),
+		terminalConns: make(map[string]*websocket.Conn),
 	}
 }
 
@@ -253,6 +258,12 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
+		deviceID := r.URL.Query().Get("device_id")
+		if deviceID == "dev_local" {
+			res, _ := h.handleLocalWorkspaceList(req)
+			writeJSON(w, http.StatusOK, res)
+			return
+		}
 		env, err := h.requestDaemon(r, protocol.TypeWorkspaceList, req.WorkspacePath, req.RequestID, req)
 		writeAPIEnvelope(w, env, err)
 		return
@@ -262,6 +273,12 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
+		deviceID := r.URL.Query().Get("device_id")
+		if deviceID == "dev_local" {
+			res, _ := h.handleLocalWorkspaceRead(req)
+			writeJSON(w, http.StatusOK, res)
+			return
+		}
 		env, err := h.requestDaemon(r, protocol.TypeWorkspaceRead, req.WorkspacePath, req.RequestID, req)
 		writeAPIEnvelope(w, env, err)
 		return
@@ -269,6 +286,12 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/workspace/write" && r.Method == http.MethodPost {
 		var req protocol.WorkspaceWriteRequest
 		if !decodeJSON(w, r, &req) {
+			return
+		}
+		deviceID := r.URL.Query().Get("device_id")
+		if deviceID == "dev_local" {
+			res, _ := h.handleLocalWorkspaceWrite(req)
+			writeJSON(w, http.StatusOK, res)
 			return
 		}
 		env, err := h.requestDaemon(r, protocol.TypeWorkspaceWrite, req.WorkspacePath, req.RequestID, req)
@@ -589,6 +612,29 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			forward := env
 			forward.From = "server"
 			h.broadcast(forward)
+		case protocol.TypeTerminalStreamData:
+			streamData, err := protocol.DecodePayload[protocol.TerminalStreamData](env)
+			if err == nil {
+				key := streamData.ProjectID + "::" + streamData.TerminalID
+				h.termMu.RLock()
+				wc := h.terminalConns[key]
+				h.termMu.RUnlock()
+				if wc != nil {
+					_ = wc.WriteMessage(websocket.BinaryMessage, streamData.Data)
+				}
+			}
+		case protocol.TypeTerminalStreamExit:
+			streamExit, err := protocol.DecodePayload[protocol.TerminalStreamExit](env)
+			if err == nil {
+				key := streamExit.ProjectID + "::" + streamExit.TerminalID
+				h.termMu.Lock()
+				wc := h.terminalConns[key]
+				delete(h.terminalConns, key)
+				h.termMu.Unlock()
+				if wc != nil {
+					_ = wc.Close()
+				}
+			}
 		case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult:
 			if h.resolvePending(env) {
 				continue
@@ -605,7 +651,7 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 func (h *Hub) stateView() StateView {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	devices := make([]DeviceView, 0, len(h.daemons))
+	devices := make([]DeviceView, 0, len(h.daemons)+1)
 	for _, dc := range h.daemons {
 		devices = append(devices, DeviceView{
 			ID:         dc.deviceID,
@@ -618,6 +664,44 @@ func (h *Hub) stateView() StateView {
 			Workspaces: dc.workspaces,
 		})
 	}
+
+	localWorkspaces := []protocol.Workspace{}
+	localWorkspacesSeen := make(map[string]bool)
+	for _, proj := range h.projects {
+		if proj.DeviceID == "dev_local" && proj.WorkspacePath != "" {
+			if !localWorkspacesSeen[proj.WorkspacePath] {
+				localWorkspacesSeen[proj.WorkspacePath] = true
+				localWorkspaces = append(localWorkspaces, protocol.Workspace{
+					ID:   "ws-" + proj.ID,
+					Name: proj.Name,
+					Path: proj.WorkspacePath,
+				})
+			}
+		}
+	}
+	if len(localWorkspaces) == 0 {
+		localWorkspaces = append(localWorkspaces, protocol.Workspace{
+			ID:   "local-agent",
+			Name: "Agent",
+			Path: "/home/choco/Agent",
+		})
+	}
+
+	devices = append(devices, DeviceView{
+		ID:         "dev_local",
+		Name:       "Local Machine",
+		Status:     "online",
+		Agent:      "claude",
+		AgentLabel: "Claude Code",
+		Agents: []protocol.AgentCapability{
+			{Name: "claude", Label: "Claude Code"},
+			{Name: "bash", Label: "Standard Bash"},
+			{Name: "gemini", Label: "Gemini CLI"},
+		},
+		LastSeenAt: time.Now().Unix(),
+		Workspaces: localWorkspaces,
+	})
+
 	tasks := make([]protocol.TaskRecord, 0, len(h.taskRecords))
 	for _, record := range h.taskRecords {
 		tasks = append(tasks, record)
@@ -882,14 +966,25 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project_id is required", http.StatusBadRequest)
 		return
 	}
+	terminalID := r.URL.Query().Get("terminal_id")
+	if terminalID == "" {
+		terminalID = "default"
+	}
+	command := r.URL.Query().Get("command")
 
 	h.mu.RLock()
 	proj, ok := h.projects[projID]
 	h.mu.RUnlock()
 
-	workspacePath := "/home/choco/Downloads/remote-agent"
-	if ok && proj.WorkspacePath != "" {
-		workspacePath = proj.WorkspacePath
+	workspacePath := "/home/choco/Agent"
+	deviceID := "dev_local"
+	if ok {
+		if proj.WorkspacePath != "" {
+			workspacePath = proj.WorkspacePath
+		}
+		if proj.DeviceID != "" {
+			deviceID = proj.DeviceID
+		}
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -899,14 +994,84 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	sessionName := "pocket-studio-" + projID
-	cmd := exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-c", workspacePath)
+	h.mu.RLock()
+	dc := h.daemons[deviceID]
+	h.mu.RUnlock()
+
+	if dc != nil {
+		key := projID + "::" + terminalID
+		h.termMu.Lock()
+		h.terminalConns[key] = conn
+		h.termMu.Unlock()
+
+		defer func() {
+			h.termMu.Lock()
+			delete(h.terminalConns, key)
+			h.termMu.Unlock()
+
+			exitPayload := protocol.TerminalStreamExit{
+				ProjectID:  projID,
+				TerminalID: terminalID,
+			}
+			dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", exitPayload)
+		}()
+
+		startPayload := protocol.TerminalStreamStart{
+			ProjectID:     projID,
+			TerminalID:    terminalID,
+			WorkspacePath: workspacePath,
+			Command:       command,
+		}
+		dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamStart, "server", startPayload)
+
+		for {
+			msgType, payload, err := conn.ReadMessage()
+			if err != nil {
+				break
+			}
+			if msgType == websocket.BinaryMessage || msgType == websocket.TextMessage {
+				var resizeMsg struct {
+					Type string `json:"type"`
+					Cols uint16 `json:"cols"`
+					Rows uint16 `json:"rows"`
+				}
+				if err := json.Unmarshal(payload, &resizeMsg); err == nil && resizeMsg.Type == "resize" {
+					resizePayload := protocol.TerminalStreamResize{
+						ProjectID:  projID,
+						TerminalID: terminalID,
+						Cols:       resizeMsg.Cols,
+						Rows:       resizeMsg.Rows,
+					}
+					dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamResize, "server", resizePayload)
+				} else {
+					dataPayload := protocol.TerminalStreamData{
+						ProjectID:  projID,
+						TerminalID: terminalID,
+						Data:       payload,
+					}
+					dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "server", dataPayload)
+				}
+			}
+		}
+		return
+	}
+
+	resolvedPath := resolveLocalPath(workspacePath)
+	_ = os.MkdirAll(resolvedPath, 0o755)
+
+	sessionName := "pocket-studio-" + projID + "-" + terminalID
+	var cmd *exec.Cmd
+	if command != "" {
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-c", resolvedPath, command)
+	} else {
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-c", resolvedPath)
+	}
 
 	ptyFile, err := pty.Start(cmd)
 	if err != nil {
 		log.Printf("failed to start tmux: %v. falling back to bash.", err)
 		cmd = exec.Command("bash")
-		cmd.Dir = workspacePath
+		cmd.Dir = resolvedPath
 		ptyFile, err = pty.Start(cmd)
 		if err != nil {
 			log.Printf("failed to start fallback shell: %v", err)
@@ -949,4 +1114,100 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+func resolveLocalPath(path string) string {
+	if strings.HasPrefix(path, "~") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, strings.TrimPrefix(path, "~"))
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		return abs
+	}
+	return path
+}
+
+func (h *Hub) handleLocalWorkspaceList(req protocol.WorkspaceListRequest) (protocol.WorkspaceResult, error) {
+	target := resolveLocalPath(req.WorkspacePath)
+	if req.Path != "" && req.Path != "." {
+		target = filepath.Join(target, req.Path)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: err.Error()}, nil
+	}
+	var items []protocol.FileEntry
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == ".git" || name == "node_modules" || name == ".next" || name == "dist" || name == "build" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		childPath := name
+		if req.Path != "" && req.Path != "." {
+			childPath = filepath.ToSlash(filepath.Join(req.Path, name))
+		}
+		items = append(items, protocol.FileEntry{
+			Name:     name,
+			Path:     childPath,
+			IsDir:    entry.IsDir(),
+			Size:     info.Size(),
+			Modified: info.ModTime().Unix(),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].IsDir != items[j].IsDir {
+			return items[i].IsDir
+		}
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+	return protocol.WorkspaceResult{
+		RequestID:     req.RequestID,
+		WorkspacePath: req.WorkspacePath,
+		Path:          req.Path,
+		Entries:       items,
+	}, nil
+}
+
+func (h *Hub) handleLocalWorkspaceRead(req protocol.WorkspaceReadRequest) (protocol.WorkspaceResult, error) {
+	target := filepath.Join(resolveLocalPath(req.WorkspacePath), req.Path)
+	info, err := os.Stat(target)
+	if err != nil {
+		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: err.Error()}, nil
+	}
+	if info.IsDir() {
+		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: "cannot read directory"}, nil
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: err.Error()}, nil
+	}
+	return protocol.WorkspaceResult{
+		RequestID:     req.RequestID,
+		WorkspacePath: req.WorkspacePath,
+		Path:          req.Path,
+		Content:       string(content),
+	}, nil
+}
+
+func (h *Hub) handleLocalWorkspaceWrite(req protocol.WorkspaceWriteRequest) (protocol.WorkspaceResult, error) {
+	target := filepath.Join(resolveLocalPath(req.WorkspacePath), req.Path)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: err.Error()}, nil
+	}
+	if err := os.WriteFile(target, []byte(req.Content), 0o644); err != nil {
+		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: err.Error()}, nil
+	}
+	return protocol.WorkspaceResult{
+		RequestID:     req.RequestID,
+		WorkspacePath: req.WorkspacePath,
+		Path:          req.Path,
+		Content:       req.Content,
+	}, nil
 }

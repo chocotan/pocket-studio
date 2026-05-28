@@ -2,8 +2,22 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PocketStudio</title>
+    <meta name="description" content="Pocket Studio — 轻量化远程/本地开发控制台，支持多终端分裂、实时 WebSocket 连接" />
+    <title>Pocket Studio</title>
+    <!-- Preconnect to Google Fonts for faster load -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* Prevent FOUC */
+      html, body, #root { height: 100%; margin: 0; padding: 0; }
+      body { background: oklch(0.985 0.004 250); }
+    </style>
   </head>
   <body>
     <div id="root"></div>

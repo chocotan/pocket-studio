@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 
 	"remote-agent/internal/protocol"
@@ -28,10 +29,12 @@ import (
 type Daemon struct {
 	cfg Config
 
-	mu      sync.Mutex
-	tasks   map[string]*runningTask
-	history map[string]protocol.TaskRecord
-	send    chan protocol.Envelope
+	mu           sync.Mutex
+	tasks        map[string]*runningTask
+	history      map[string]protocol.TaskRecord
+	send         chan protocol.Envelope
+	termMu       sync.Mutex
+	terminalPTYs map[string]*runningPTY
 }
 
 type runningTask struct {
@@ -49,10 +52,11 @@ type runningTask struct {
 
 func New(cfg Config) *Daemon {
 	return &Daemon{
-		cfg:     cfg,
-		tasks:   make(map[string]*runningTask),
-		history: make(map[string]protocol.TaskRecord),
-		send:    make(chan protocol.Envelope, 128),
+		cfg:          cfg,
+		tasks:        make(map[string]*runningTask),
+		history:      make(map[string]protocol.TaskRecord),
+		send:         make(chan protocol.Envelope, 128),
+		terminalPTYs: make(map[string]*runningPTY),
 	}
 }
 
@@ -355,6 +359,26 @@ func (d *Daemon) handleEnvelope(ctx context.Context, env protocol.Envelope) {
 			return
 		}
 		go d.runTerminalCommand(ctx, request)
+	case protocol.TypeTerminalStreamStart:
+		request, err := protocol.DecodePayload[protocol.TerminalStreamStart](env)
+		if err == nil {
+			go d.startTerminalStream(ctx, request)
+		}
+	case protocol.TypeTerminalStreamData:
+		request, err := protocol.DecodePayload[protocol.TerminalStreamData](env)
+		if err == nil {
+			d.writeTerminalStream(request)
+		}
+	case protocol.TypeTerminalStreamResize:
+		request, err := protocol.DecodePayload[protocol.TerminalStreamResize](env)
+		if err == nil {
+			d.resizeTerminalStream(request)
+		}
+	case protocol.TypeTerminalStreamExit:
+		request, err := protocol.DecodePayload[protocol.TerminalStreamExit](env)
+		if err == nil {
+			d.exitTerminalStream(request)
+		}
 	}
 }
 
@@ -2313,4 +2337,139 @@ func killProcess(cmd *exec.Cmd) {
 		return
 	}
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+}
+
+type runningPTY struct {
+	projectID  string
+	terminalID string
+	ptyFile    *os.File
+	cmd        *exec.Cmd
+	done       chan struct{}
+}
+
+func (d *Daemon) startTerminalStream(parent context.Context, req protocol.TerminalStreamStart) {
+	key := req.ProjectID + "::" + req.TerminalID
+	d.termMu.Lock()
+	if old, exists := d.terminalPTYs[key]; exists {
+		d.termMu.Unlock()
+		_ = old.ptyFile.Close()
+		if old.cmd.Process != nil {
+			_ = old.cmd.Process.Kill()
+		}
+		<-old.done
+		d.termMu.Lock()
+	}
+
+	workspace, err := d.resolveWorkspacePath("", req.WorkspacePath)
+	if err != nil {
+		d.termMu.Unlock()
+		log.Printf("terminal stream failed to resolve workspace path: %v", err)
+		return
+	}
+
+	sessionName := "pocket-studio-" + req.ProjectID + "-" + req.TerminalID
+	var cmd *exec.Cmd
+	if req.Command != "" {
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-c", workspace.Path, req.Command)
+	} else {
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-c", workspace.Path)
+	}
+
+	ptyFile, err := pty.Start(cmd)
+	if err != nil {
+		log.Printf("daemon failed to start tmux: %v. falling back to bash.", err)
+		cmd = exec.Command("bash")
+		cmd.Dir = workspace.Path
+		ptyFile, err = pty.Start(cmd)
+		if err != nil {
+			d.termMu.Unlock()
+			log.Printf("daemon failed to start fallback shell: %v", err)
+			return
+		}
+	}
+
+	done := make(chan struct{})
+	rPty := &runningPTY{
+		projectID:  req.ProjectID,
+		terminalID: req.TerminalID,
+		ptyFile:    ptyFile,
+		cmd:        cmd,
+		done:       done,
+	}
+	d.terminalPTYs[key] = rPty
+	d.termMu.Unlock()
+
+	go func() {
+		defer func() {
+			ptyFile.Close()
+			_ = cmd.Wait()
+			close(done)
+
+			d.termMu.Lock()
+			if d.terminalPTYs[key] == rPty {
+				delete(d.terminalPTYs, key)
+			}
+			d.termMu.Unlock()
+
+			// Send exit signal back to Go server
+			exitPayload := protocol.TerminalStreamExit{
+				ProjectID:  req.ProjectID,
+				TerminalID: req.TerminalID,
+			}
+			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "daemon", exitPayload)
+		}()
+
+		buf := make([]byte, 1024)
+		for {
+			n, err := ptyFile.Read(buf)
+			if err != nil {
+				break
+			}
+			dataPayload := protocol.TerminalStreamData{
+				ProjectID:  req.ProjectID,
+				TerminalID: req.TerminalID,
+				Data:       buf[:n],
+			}
+			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", dataPayload)
+		}
+	}()
+}
+
+func (d *Daemon) writeTerminalStream(req protocol.TerminalStreamData) {
+	key := req.ProjectID + "::" + req.TerminalID
+	d.termMu.Lock()
+	rPty := d.terminalPTYs[key]
+	d.termMu.Unlock()
+
+	if rPty != nil {
+		_, _ = rPty.ptyFile.Write(req.Data)
+	}
+}
+
+func (d *Daemon) resizeTerminalStream(req protocol.TerminalStreamResize) {
+	key := req.ProjectID + "::" + req.TerminalID
+	d.termMu.Lock()
+	rPty := d.terminalPTYs[key]
+	d.termMu.Unlock()
+
+	if rPty != nil {
+		_ = pty.Setsize(rPty.ptyFile, &pty.Winsize{
+			Cols: req.Cols,
+			Rows: req.Rows,
+		})
+	}
+}
+
+func (d *Daemon) exitTerminalStream(req protocol.TerminalStreamExit) {
+	key := req.ProjectID + "::" + req.TerminalID
+	d.termMu.Lock()
+	rPty := d.terminalPTYs[key]
+	d.termMu.Unlock()
+
+	if rPty != nil {
+		_ = rPty.ptyFile.Close()
+		if rPty.cmd.Process != nil {
+			_ = rPty.cmd.Process.Kill()
+		}
+	}
 }

@@ -24,6 +24,10 @@ const (
 	TypeTerminalRun     = "terminal.run"
 	TypeTerminalResult  = "terminal.result"
 	TypeServerError     = "server.error"
+	TypeTerminalStreamStart  = "terminal.stream.start"
+	TypeTerminalStreamData   = "terminal.stream.data"
+	TypeTerminalStreamResize = "terminal.stream.resize"
+	TypeTerminalStreamExit   = "terminal.stream.exit"
 )
 
 type Envelope struct {
@@ -214,6 +218,31 @@ type TerminalResult struct {
 type ServerError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type TerminalStreamStart struct {
+	ProjectID     string `json:"project_id"`
+	TerminalID    string `json:"terminal_id"`
+	WorkspacePath string `json:"workspace_path"`
+	Command       string `json:"command"`
+}
+
+type TerminalStreamData struct {
+	ProjectID  string `json:"project_id"`
+	TerminalID string `json:"terminal_id"`
+	Data       []byte `json:"data"`
+}
+
+type TerminalStreamResize struct {
+	ProjectID  string `json:"project_id"`
+	TerminalID string `json:"terminal_id"`
+	Cols       uint16 `json:"cols"`
+	Rows       uint16 `json:"rows"`
+}
+
+type TerminalStreamExit struct {
+	ProjectID  string `json:"project_id"`
+	TerminalID string `json:"terminal_id"`
 }
 
 func NewEnvelope(messageType, from string, payload any) Envelope {
