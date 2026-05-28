@@ -1,0 +1,1342 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pocket Studio - Refactored IDE Workspace</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Outfit', 'Inter', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    },
+                    colors: {
+                        brand: {
+                            50: '#eef2ff',
+                            100: '#e0e7ff',
+                            200: '#c7d2fe',
+                            300: '#a5b4fc',
+                            400: '#818cf8',
+                            500: '#6366f1',
+                            600: '#4f46e5',
+                            700: '#4338ca',
+                            800: '#3730a3',
+                            900: '#312e81',
+                            950: '#1e1b4b',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* Custom Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.3);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(99, 102, 241, 0.2);
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(99, 102, 241, 0.4);
+        }
+        /* Glassmorphism styling */
+        .glass {
+            background: rgba(15, 23, 42, 0.65);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .glass-highlight {
+            border: 1px solid rgba(99, 102, 241, 0.25);
+            box-shadow: 0 0 15px rgba(99, 102, 241, 0.15);
+        }
+        .glow-indigo {
+            box-shadow: 0 0 30px rgba(99, 102, 241, 0.2);
+        }
+        
+        /* ==================== PREMIUM LIGHT THEME OVERRIDES ==================== */
+        html.light body {
+            background-color: #f1f5f9 !important; /* bg-slate-100 */
+            color: #0f172a !important; /* text-slate-900 */
+            background-image: radial-gradient(ellipse at top, rgba(99, 102, 241, 0.04), #f1f5f9, #f1f5f9) !important;
+        }
+        html.light header.glass {
+            background: rgba(255, 255, 255, 0.8) !important;
+            border-bottom: 1px solid rgba(15, 23, 42, 0.08) !important;
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05) !important;
+        }
+        html.light .glass {
+            background: rgba(255, 255, 255, 0.85) !important;
+            border: 1px solid rgba(15, 23, 42, 0.08) !important;
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            color: #1e293b !important;
+        }
+        html.light .glass-highlight {
+            border: 1px solid rgba(99, 102, 241, 0.4) !important;
+            box-shadow: 0 4px 20px rgba(99, 102, 241, 0.1) !important;
+        }
+        html.light #view-dashboard {
+            background-image: radial-gradient(ellipse at top, rgba(99, 102, 241, 0.06), #f8fafc, #f8fafc) !important;
+        }
+        html.light #view-workspace {
+            background-color: #f8fafc !important;
+        }
+        html.light aside {
+            background-color: #ffffff !important;
+            border-right: 1px solid #e2e8f0 !important;
+        }
+        html.light aside .border-b {
+            border-bottom-color: #e2e8f0 !important;
+            background-color: #f8fafc !important;
+        }
+        html.light aside .bg-slate-900\/50 {
+            background-color: #f8fafc !important;
+            border-top-color: #e2e8f0 !important;
+        }
+        html.light h1, html.light h2, html.light h3, html.light h4, html.light span.text-slate-100, html.light span.text-slate-200 {
+            color: #0f172a !important;
+        }
+        html.light p, html.light span.text-slate-400 {
+            color: #475569 !important;
+        }
+        html.light .text-slate-300 {
+            color: #334155 !important;
+        }
+        html.light .text-slate-500 {
+            color: #64748b !important;
+        }
+        html.light .bg-slate-900, html.light .bg-slate-900\/40, html.light .bg-slate-900\/50, html.light .bg-slate-900\/60, html.light .bg-slate-900\/70, html.light .bg-slate-900\/80 {
+            background-color: #f1f5f9 !important;
+            border-color: #e2e8f0 !important;
+            color: #0f172a !important;
+        }
+        html.light .bg-slate-950, html.light .bg-slate-950\/20 {
+            background-color: #ffffff !important;
+        }
+        html.light textarea, html.light input, html.light select {
+            background-color: #ffffff !important;
+            border-color: #cbd5e1 !important;
+            color: #0f172a !important;
+        }
+        html.light textarea:focus, html.light input:focus, html.light select:focus {
+            border-color: #6366f1 !important;
+        }
+        html.light .border-slate-800, html.light .border-slate-850, html.light .border-slate-900 {
+            border-color: #e2e8f0 !important;
+        }
+        html.light #workspace-tabs-container div.bg-slate-950 {
+            background-color: #ffffff !important;
+            border-top-color: #6366f1 !important;
+            color: #0f172a !important;
+        }
+        html.light #workspace-tabs-container div.bg-slate-900\/60 {
+            background-color: #f1f5f9 !important;
+            color: #475569 !important;
+        }
+        html.light #workspace-tabs-container div.bg-slate-900\/60:hover {
+            background-color: #e2e8f0 !important;
+            color: #0f172a !important;
+        }
+        html.light #chat-messages-container div.bg-slate-900\/80 {
+            background-color: #f1f5f9 !important;
+            color: #0f172a !important;
+            border-color: #e2e8f0 !important;
+        }
+        html.light #terminal-output-container {
+            background-color: #0f172a !important;
+            color: #f8fafc !important;
+        }
+        html.light #terminal-form {
+            background-color: #1e293b !important;
+            border-top-color: #334155 !important;
+        }
+        html.light #terminal-form input {
+            background-color: transparent !important;
+            color: #f8fafc !important;
+        }
+        html.light #terminal-prompt-prefix {
+            color: #38bdf8 !important;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans flex flex-col antialiased overflow-hidden selection:bg-brand-500/30 selection:text-brand-200">
+
+    <!-- Top Navigation Bar -->
+    <header class="glass h-14 shrink-0 flex items-center justify-between px-6 z-30 select-none">
+        <div class="flex items-center space-x-3">
+            <div class="h-8 w-8 rounded-lg bg-gradient-to-tr from-brand-600 to-indigo-400 flex items-center justify-center shadow-lg shadow-brand-500/20">
+                <i data-lucide="layers" class="h-4 w-4 text-white"></i>
+            </div>
+            <span class="font-bold text-lg bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-200 to-brand-300 tracking-tight">Pocket Studio</span>
+            <span class="px-2 py-0.5 text-[10px] uppercase font-bold tracking-widest bg-brand-500/20 text-brand-300 rounded border border-brand-500/30">REFAC PRO</span>
+        </div>
+
+        <!-- Connection & Global Info -->
+        <div class="flex items-center space-x-6 text-sm">
+            <!-- Active Project Breadcrumb (Workspace Mode Only) -->
+            <div id="active-project-bar" class="hidden items-center space-x-2 text-slate-400 bg-slate-900/60 px-3 py-1 rounded-full border border-slate-800">
+                <i data-lucide="server" class="h-3.5 w-3.5 text-brand-400"></i>
+                <span id="active-project-machine" class="text-slate-300 font-medium">Local</span>
+                <span class="text-slate-600">/</span>
+                <i data-lucide="folder" class="h-3.5 w-3.5 text-indigo-400"></i>
+                <span id="active-project-name" class="text-slate-200 font-semibold">my-project</span>
+            </div>
+
+            <div class="flex items-center space-x-2">
+                <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <span class="text-slate-400 text-xs font-mono">DAEMON: CONNECTED</span>
+            </div>
+            
+            <button onclick="toggleStateInspector()" class="flex items-center space-x-1.5 px-3 py-1.5 rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 transition duration-150 text-slate-300 hover:text-white">
+                <i data-lucide="code" class="h-3.5 w-3.5"></i>
+                <span class="text-xs font-medium">状态监视器</span>
+            </button>
+            
+            <button id="back-to-dashboard-btn" onclick="showView('dashboard')" class="hidden flex items-center space-x-1.5 px-3.5 py-1.5 rounded-md bg-brand-600 hover:bg-brand-500 transition duration-150 font-semibold text-xs text-white shadow-lg shadow-brand-600/20">
+                <i data-lucide="home" class="h-3.5 w-3.5"></i>
+                <span>返回大厅</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Dynamic Layout Container -->
+    <main class="grow relative flex overflow-hidden">
+
+        <!-- ==================== VIEW 1: WELCOME DASHBOARD ==================== -->
+        <div id="view-dashboard" class="absolute inset-0 z-10 flex flex-col p-8 overflow-y-auto bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-indigo-950/20 via-slate-950 to-slate-950">
+            
+            <!-- Welcome Header -->
+            <div class="mb-10 text-center max-w-4xl mx-auto">
+                <h1 class="text-4xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white via-slate-100 to-indigo-300 sm:text-5xl">
+                    轻量化跨机开发协同工作流
+                </h1>
+                <p class="mt-3 text-lg text-slate-400 font-light">
+                    管理任意机器上的开发目录，拉起高能 AI Agent 会话，挂载持久化 tmux 终端。
+                </p>
+            </div>
+
+            <!-- Dashboard Grid -->
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 max-w-7xl mx-auto w-full">
+                
+                <!-- Left Sidebar: Machine List (4 Cols) -->
+                <div class="lg:col-span-4 flex flex-col space-y-6">
+                    <div class="glass rounded-xl p-6 flex flex-col space-y-4">
+                        <div class="flex items-center justify-between">
+                            <h2 class="text-base font-bold text-slate-200 flex items-center space-x-2">
+                                <i data-lucide="cpu" class="h-4.5 w-4.5 text-brand-400"></i>
+                                <span>机器列表</span>
+                            </h2>
+                            <button onclick="openModal('add-machine-modal')" class="text-xs text-brand-400 hover:text-brand-300 font-semibold flex items-center space-x-1">
+                                <i data-lucide="plus" class="h-3 w-3"></i>
+                                <span>添加机器</span>
+                            </button>
+                        </div>
+                        
+                        <!-- Machine Cards Container -->
+                        <div id="machine-list" class="space-y-3">
+                            <!-- Injected by JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right Area: Projects Grid (8 Cols) -->
+                <div class="lg:col-span-8 flex flex-col space-y-6">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-lg font-bold text-slate-200 flex items-center space-x-2">
+                            <i data-lucide="folder-git-2" class="h-5 w-5 text-indigo-400"></i>
+                            <span>开发项目列表</span>
+                        </h2>
+                        <button onclick="openModal('create-project-modal')" class="px-3.5 py-1.5 bg-brand-600 hover:bg-brand-500 rounded-lg text-xs font-semibold text-white shadow flex items-center space-x-1.5 transition">
+                            <i data-lucide="plus-circle" class="h-3.5 w-3.5"></i>
+                            <span>创建新项目</span>
+                        </button>
+                    </div>
+
+                    <!-- Project Cards Grid -->
+                    <div id="projects-grid" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <!-- Injected by JS -->
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <!-- ==================== VIEW 2: WORKSPACE (IDE VIEW) ==================== -->
+        <div id="view-workspace" class="absolute inset-0 z-0 hidden flex flex-col bg-slate-950">
+            <!-- IDE Workspace Split container (Left Sidebar, Right Main + Terminal Pane) -->
+            <div class="grow flex overflow-hidden">
+                
+                <!-- Left Pane: IDE Sidebar (File Tree & Sessions) -->
+                <aside class="w-64 shrink-0 glass border-y-0 border-l-0 flex flex-col overflow-hidden z-10 select-none">
+                    
+                    <!-- Sidebar Tabs Header -->
+                    <div class="h-10 border-b border-slate-800/80 flex items-center px-4 justify-between bg-slate-900/40">
+                        <span class="text-xs font-bold text-slate-400 tracking-wider uppercase">项目文件管理器</span>
+                        <i data-lucide="folder-open" class="h-3.5 w-3.5 text-brand-400"></i>
+                    </div>
+
+                    <!-- Interactive File Tree -->
+                    <div class="grow overflow-y-auto p-2" id="workspace-file-tree">
+                        <!-- Injected by JS -->
+                    </div>
+
+                    <!-- Project Relations Info / Sidebar Footer -->
+                    <div class="border-t border-slate-800/80 bg-slate-900/50 p-3 flex flex-col space-y-2">
+                        <span class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">当前会话映射</span>
+                        <div class="space-y-1.5 text-xs">
+                            <div class="flex items-center justify-between text-slate-400">
+                                <span class="flex items-center space-x-1">
+                                    <i data-lucide="bot" class="h-3 w-3 text-indigo-400"></i>
+                                    <span>Agent 会话</span>
+                                </span>
+                                <span id="sidebar-agent-count" class="font-mono text-slate-200">0</span>
+                            </div>
+                            <div class="flex items-center justify-between text-slate-400">
+                                <span class="flex items-center space-x-1">
+                                    <i data-lucide="terminal" class="h-3 w-3 text-brand-400"></i>
+                                    <span>Tmux 终端</span>
+                                </span>
+                                <span id="sidebar-tmux-count" class="font-mono text-slate-200">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </aside>
+
+                <!-- Right Pane Layout (Main tabbed area top, Terminal pane bottom) -->
+                <div class="grow flex flex-col overflow-hidden">
+                    
+                    <!-- Main workspace (Conversations & Code Editors Tabbed Container) -->
+                    <div class="grow flex flex-col overflow-hidden bg-slate-900/10">
+                        <!-- Tab Bar Header -->
+                        <div class="h-10 border-b border-slate-800 bg-slate-900/80 flex items-center justify-between px-2 overflow-x-auto select-none shrink-0">
+                            <div class="flex items-center space-x-1" id="workspace-tabs-container">
+                                <!-- Tabs injected by JS -->
+                            </div>
+                            <!-- Add Agent Conversation button -->
+                            <button onclick="openModal('create-agent-modal')" class="flex items-center justify-center h-7 w-7 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition" title="创建新 Agent 会话">
+                                <i data-lucide="plus" class="h-4 w-4"></i>
+                            </button>
+                        </div>
+
+                        <!-- Tab Active Content Viewport -->
+                        <div class="grow relative overflow-hidden" id="workspace-content-viewport">
+                            <!-- Active View injected by JS -->
+                        </div>
+                    </div>
+
+                    <!-- Resizer bar -->
+                    <div class="h-[1px] bg-slate-800 shrink-0 cursor-row-resize hover:bg-brand-500 transition-colors"></div>
+
+                    <!-- Bottom Area: Unified Tmux xterm.js Terminals Pane -->
+                    <div class="h-64 shrink-0 glass border-x-0 border-b-0 flex flex-col overflow-hidden relative">
+                        
+                        <!-- Terminal Tabs Header -->
+                        <div class="h-9 border-b border-slate-800 bg-slate-900/90 flex items-center justify-between px-3 select-none shrink-0 text-xs">
+                            <div class="flex items-center space-x-1 shrink-0 overflow-x-auto" id="terminal-tabs-container">
+                                <!-- Injected by JS: e.g. [tmux 0]* [tmux 1] -->
+                            </div>
+                            <div class="flex items-center space-x-2">
+                                <span class="text-[10px] text-slate-500 font-mono">WS TERMINAL</span>
+                                <button onclick="addNewTmuxWindow()" class="h-6 w-6 rounded hover:bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center" title="新建 Tmux 窗口 (tmux new-window)">
+                                    <i data-lucide="plus" class="h-3.5 w-3.5"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Terminal Output (Mock xterm.js) -->
+                        <div class="grow bg-slate-950 p-4 font-mono text-sm overflow-y-auto leading-relaxed" id="terminal-output-container">
+                            <!-- Lines injected by JS -->
+                        </div>
+
+                        <!-- Terminal Input line -->
+                        <form id="terminal-form" onsubmit="handleTerminalSubmit(event)" class="h-9 border-t border-slate-800/80 bg-slate-950 flex items-center px-4">
+                            <span class="text-brand-400 font-mono text-xs select-none mr-2" id="terminal-prompt-prefix">choco@remote-agent:~/my-project$</span>
+                            <input type="text" id="terminal-input" autocomplete="off" class="grow bg-transparent focus:outline-none text-slate-100 font-mono text-xs placeholder-slate-700" placeholder="在此输入 shell 命令，例如 'ls', 'npm run dev', 'tmux new-window', 'help'...">
+                        </form>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- ==================== MODAL OVERLAYS ==================== -->
+
+    <!-- Modal 1: Create Project -->
+    <div id="create-project-modal" class="hidden fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="glass w-full max-w-md rounded-xl overflow-hidden shadow-2xl glow-indigo border border-brand-500/20">
+            <div class="px-6 py-4 border-b border-slate-800 bg-slate-900/50 flex justify-between items-center">
+                <h3 class="font-bold text-slate-200 flex items-center space-x-2">
+                    <i data-lucide="folder-plus" class="h-4.5 w-4.5 text-brand-400"></i>
+                    <span>创建新项目</span>
+                </h3>
+                <button onclick="closeModal('create-project-modal')" class="text-slate-400 hover:text-white">
+                    <i data-lucide="x" class="h-4 w-4"></i>
+                </button>
+            </div>
+            <form onsubmit="handleCreateProject(event)" class="p-6 space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">项目名称</label>
+                    <input type="text" id="new-project-name" required placeholder="如 my-agent-tool" class="w-full bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-brand-500 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-brand-500/30 transition">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">宿主机 (绑定机器)</label>
+                    <select id="new-project-machine" class="w-full bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-brand-500 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-brand-500/30 transition">
+                        <!-- Options filled dynamically -->
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">机器内绝对目录路径</label>
+                    <input type="text" id="new-project-path" required placeholder="如 /home/choco/projects/my-agent-tool" class="w-full bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-brand-500 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-brand-500/30 transition font-mono">
+                </div>
+                <div class="pt-2 flex justify-end space-x-3">
+                    <button type="button" onclick="closeModal('create-project-modal')" class="px-4 py-2 border border-slate-800 rounded-lg text-xs font-semibold text-slate-400 hover:text-white transition">取消</button>
+                    <button type="submit" class="px-4 py-2 bg-brand-600 hover:bg-brand-500 rounded-lg text-xs font-semibold text-white shadow transition">确认创建</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal 2: Add Machine -->
+    <div id="add-machine-modal" class="hidden fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="glass w-full max-w-md rounded-xl overflow-hidden shadow-2xl border border-indigo-500/20">
+            <div class="px-6 py-4 border-b border-slate-800 bg-slate-900/50 flex justify-between items-center">
+                <h3 class="font-bold text-slate-200 flex items-center space-x-2">
+                    <i data-lucide="cpu" class="h-4.5 w-4.5 text-indigo-400"></i>
+                    <span>添加远程物理机器</span>
+                </h3>
+                <button onclick="closeModal('add-machine-modal')" class="text-slate-400 hover:text-white">
+                    <i data-lucide="x" class="h-4 w-4"></i>
+                </button>
+            </div>
+            <form onsubmit="handleAddMachine(event)" class="p-6 space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">机器名称 / Alias</label>
+                    <input type="text" id="new-machine-name" required placeholder="如 Cloud-AWS-Server" class="w-full bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-brand-500 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-brand-500/30 transition">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">连接 IP 地址 / 域名</label>
+                    <input type="text" id="new-machine-ip" required placeholder="如 192.168.1.105" class="w-full bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-brand-500 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-brand-500/30 transition font-mono">
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">默认运行 Agent</label>
+                        <select id="new-machine-agent" class="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand-500/30">
+                            <option value="claude">Claude (推荐)</option>
+                            <option value="gpt4o">GPT-4o</option>
+                            <option value="antigravity">Antigravity SDK Agent</option>
+                            <option value="gocoder">GoCoder</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">守护进程端口</label>
+                        <input type="number" id="new-machine-port" required value="18080" class="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none font-mono">
+                    </div>
+                </div>
+                <div class="pt-2 flex justify-end space-x-3">
+                    <button type="button" onclick="closeModal('add-machine-modal')" class="px-4 py-2 border border-slate-800 rounded-lg text-xs font-semibold text-slate-400 hover:text-white transition">取消</button>
+                    <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-semibold text-white shadow transition">添加并连接</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Modal 3: Create Agent Conversation -->
+    <div id="create-agent-modal" class="hidden fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        <div class="glass w-full max-w-md rounded-xl overflow-hidden shadow-2xl border border-brand-500/20">
+            <div class="px-6 py-4 border-b border-slate-800 bg-slate-900/50 flex justify-between items-center">
+                <h3 class="font-bold text-slate-200 flex items-center space-x-2">
+                    <i data-lucide="sparkles" class="h-4.5 w-4.5 text-brand-400 animate-pulse"></i>
+                    <span>拉起新 AI Agent 会话</span>
+                </h3>
+                <button onclick="closeModal('create-agent-modal')" class="text-slate-400 hover:text-white">
+                    <i data-lucide="x" class="h-4 w-4"></i>
+                </button>
+            </div>
+            <form onsubmit="handleCreateAgent(event)" class="p-6 space-y-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">选择 Agent 类型</label>
+                    <div class="grid grid-cols-2 gap-3" id="agent-type-selection">
+                        <label class="relative flex flex-col p-3 rounded-lg border border-brand-500 bg-brand-500/10 cursor-pointer select-none">
+                            <input type="radio" name="agent-type" value="Gemini" checked class="absolute top-2 right-2 accent-brand-500">
+                            <span class="text-xs font-bold text-slate-100 flex items-center space-x-1">
+                                <i data-lucide="sparkles" class="h-3.5 w-3.5 text-brand-400"></i>
+                                <span>Gemini</span>
+                            </span>
+                            <span class="text-[10px] text-slate-400 mt-1">谷歌高能多模态与长上下文</span>
+                        </label>
+                        <label class="relative flex flex-col p-3 rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-900/50 cursor-pointer select-none">
+                            <input type="radio" name="agent-type" value="Codex" class="absolute top-2 right-2 accent-brand-500">
+                            <span class="text-xs font-bold text-slate-100 flex items-center space-x-1">
+                                <i data-lucide="code-2" class="h-3.5 w-3.5 text-indigo-400"></i>
+                                <span>Codex</span>
+                            </span>
+                            <span class="text-[10px] text-slate-400 mt-1">专攻代码生成与语法建模</span>
+                        </label>
+                        <label class="relative flex flex-col p-3 rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-900/50 cursor-pointer select-none">
+                            <input type="radio" name="agent-type" value="ClaudeCode" class="absolute top-2 right-2 accent-brand-500">
+                            <span class="text-xs font-bold text-slate-100 flex items-center space-x-1">
+                                <i data-lucide="terminal" class="h-3.5 w-3.5 text-orange-400"></i>
+                                <span>ClaudeCode</span>
+                            </span>
+                            <span class="text-[10px] text-slate-400 mt-1">Sonnet 终端级多文件协同</span>
+                        </label>
+                        <label class="relative flex flex-col p-3 rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-900/50 cursor-pointer select-none">
+                            <input type="radio" name="agent-type" value="OpenCode" class="absolute top-2 right-2 accent-brand-500">
+                            <span class="text-xs font-bold text-slate-100 flex items-center space-x-1">
+                                <i data-lucide="cpu" class="h-3.5 w-3.5 text-emerald-400"></i>
+                                <span>OpenCode</span>
+                            </span>
+                            <span class="text-[10px] text-slate-400 mt-1">DeepSeek/Qwen 开源生态推理</span>
+                        </label>
+                        <label class="relative flex flex-col p-3 rounded-lg border border-slate-800 hover:border-slate-700 bg-slate-900/50 cursor-pointer select-none col-span-2">
+                            <input type="radio" name="agent-type" value="Pi" class="absolute top-2 right-2 accent-brand-500">
+                            <span class="text-xs font-bold text-slate-100 flex items-center space-x-1">
+                                <i data-lucide="message-square" class="h-3.5 w-3.5 text-pink-400"></i>
+                                <span>Pi</span>
+                            </span>
+                            <span class="text-[10px] text-slate-400 mt-1">高情商共情会话，提供架构灵感</span>
+                        </label>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">首发提示词 (Prompt)</label>
+                    <textarea id="new-agent-prompt" rows="3" class="w-full bg-slate-900 border border-slate-800 hover:border-slate-700 focus:border-brand-500 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-1 focus:ring-brand-500/30 transition" placeholder="例如：我想让你重构 main.go 以支持更好的多通道管理。"></textarea>
+                </div>
+                <div class="pt-2 flex justify-end space-x-3">
+                    <button type="button" onclick="closeModal('create-agent-modal')" class="px-4 py-2 border border-slate-800 rounded-lg text-xs font-semibold text-slate-400 hover:text-white transition">取消</button>
+                    <button type="submit" class="px-4 py-2 bg-brand-600 hover:bg-brand-500 rounded-lg text-xs font-semibold text-white shadow transition">拉起会话</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+
+    <!-- ==================== DRAWER OVERLAY: STATE INSPECTOR ==================== -->
+    <div id="state-inspector-drawer" class="fixed top-14 bottom-0 right-0 w-96 bg-slate-900/95 backdrop-blur border-l border-slate-800 shadow-2xl z-40 translate-x-full transition-transform duration-300 flex flex-col">
+        <div class="px-4 py-3 border-b border-slate-850 flex items-center justify-between">
+            <span class="text-xs font-bold text-slate-300 flex items-center space-x-1">
+                <i data-lucide="database" class="h-3.5 w-3.5 text-amber-500"></i>
+                <span>前端映射与持久化状态数据</span>
+            </span>
+            <button onclick="toggleStateInspector()" class="text-slate-400 hover:text-white">
+                <i data-lucide="x" class="h-4 w-4"></i>
+            </button>
+        </div>
+        <div class="grow overflow-y-auto p-4 font-mono text-xs bg-slate-950 text-emerald-400 leading-relaxed">
+            <pre id="state-json-display" class="whitespace-pre-wrap"></pre>
+        </div>
+        <div class="p-3 border-t border-slate-850 bg-slate-900/50 text-[10px] text-slate-500">
+            每次对机器、项目、文件、会话、终端 tab 的更改，都会实时渲染该映射表，并最终提交至后端接口持久化。
+        </div>
+    </div>
+
+
+    <!-- ==================== SCRIPT LOGIC ==================== -->
+    <script>
+        // --- DATA STATE STRUCTURE ---
+        const state = {
+            machines: [
+                { id: "mac-local", name: "本地开发机 (dev-mac)", ip: "127.0.0.1", port: 18080, status: "online", defaultAgent: "claude" },
+                { id: "aws-ec2", name: "云主机 (Cloud-AWS-EC2)", ip: "54.192.4.88", port: 18080, status: "idle", defaultAgent: "claude" },
+                { id: "gcp-gpu", name: "微调算力 (GCP-A100-Host)", ip: "34.80.12.115", port: 18080, status: "offline", defaultAgent: "gocoder" }
+            ],
+            projects: [
+                { id: "proj-alpha", name: "remote-agent-studio", machineId: "mac-local", path: "/home/choco/Downloads/remote-agent", agentSessions: ["agent-1", "agent-2"], tmuxSessions: ["tmux-dev", "tmux-run"], activeTabId: "file-readme", openTabs: ["file-readme", "agent-1", "file-hub"], fileTreeExpanded: ["."], activeTmuxId: "tmux-dev" },
+                { id: "proj-beta", name: "pocket-app-core", machineId: "aws-ec2", path: "/var/www/pocket-app", agentSessions: ["agent-3"], tmuxSessions: ["tmux-aws"], activeTabId: "agent-3", openTabs: ["agent-3"], fileTreeExpanded: ["."], activeTmuxId: "tmux-aws" }
+            ],
+            // Project-specific detail stores
+            currentProjectId: "",
+            
+            // Sub-collections maps (project-associated models)
+            agents: {
+                "agent-1": { id: "agent-1", projectId: "proj-alpha", type: "Antigravity", name: "AGY-Planner-01", prompt: "重构前端整体目录，组件化页面", messages: [
+                    { role: "user", text: "我觉得你可以重构整个前端，保持老的页面不动，新开发页面吧" },
+                    { role: "agent", text: "已为您制定重构方案。我建议我们在 web/src 下新建组件目录，利用 React.lazy 动态加载，这样不影响老页面的打包。我们会同时新建一套优雅的 Dashboard 及 Workspace 双视窗。我已经为您拉起了一个 mock 终端，您可以尝试执行命令以测试我的文件感知能力。" }
+                ] },
+                "agent-2": { id: "agent-2", projectId: "proj-alpha", type: "Code Architect", name: "AGY-Builder-02", prompt: "编写 React 侧边栏和 Tab 组件", messages: [
+                    { role: "user", text: "侧边栏要包含文件树和当前会话映射信息" },
+                    { role: "agent", text: "收到！在新的 IDE sidebar 中，上端将渲染 `react-arborist` 驱动的可折叠文件系统树，点击任一文件会将其添加并聚焦至 Peer Tabs 主区域；下端实时反映该项目的 Agent 会话和 Tmux 终端数量，保持全局视图同步。" }
+                ] },
+                "agent-3": { id: "agent-3", projectId: "proj-beta", type: "Planner", name: "AWS-Depl-01", prompt: "AWS 部署流程编排", messages: [
+                    { role: "user", text: "设计一键部署脚本" },
+                    { role: "agent", text: "正在为您规划部署流程。首先在 AWS EC2 容器中打包 daemon 镜像，随后在 supervisor 下部署 pocket-studio 服务的 Go backend。" }
+                ] }
+            },
+            
+            tmuxWindows: {
+                "tmux-dev": [
+                    { id: "win-0", name: "0:bash*", lines: [
+                        "Welcome to Pocket Studio Tmux Session [dev]",
+                        "System load average: 0.25 | Uptime: 12 days",
+                        "choco@remote-agent:~/my-project$ ls -la",
+                        "total 368",
+                        "drwxr-xr-x   9 choco  staff    288 May 28 15:55 .",
+                        "drwxr-xr-x   4 choco  staff    128 May 28 07:56 ..",
+                        "-rw-r--r--   1 choco  staff   1505 May 28 07:56 README.md",
+                        "drwxr-xr-x   6 choco  staff    192 May 28 07:56 cmd",
+                        "drwxr-xr-x   6 choco  staff    192 May 28 07:56 internal",
+                        "drwxr-xr-x  10 choco  staff    320 May 28 07:56 web",
+                        "choco@remote-agent:~/my-project$ "
+                    ] },
+                    { id: "win-1", name: "1:dev-server", lines: [
+                        "choco@remote-agent:~/my-project$ npm run dev",
+                        "",
+                        "> web@0.0.0 dev",
+                        "> vite --host 0.0.0.0",
+                        "",
+                        "  VITE v6.1.2  ready in 256 ms",
+                        "",
+                        "  ➜  Local:   http://localhost:5173/",
+                        "  ➜  Network: http://192.168.1.105:5173/",
+                        "  ➜  press h + enter to show help",
+                        ""
+                    ] }
+                ],
+                "tmux-run": [
+                    { id: "win-run-0", name: "0:app-run*", lines: [
+                        "choco@remote-agent:~/my-project$ go run cmd/server/main.go",
+                        "2026/05/28 15:58:05 PocketStudio server listening on http://localhost:8080",
+                        "2026/05/28 15:58:12 [ws] Web client connected from 127.0.0.1:58442"
+                    ] }
+                ],
+                "tmux-aws": [
+                    { id: "win-aws-0", name: "0:aws-shell*", lines: [
+                        "ubuntu@ip-172-31-28-44:~$ docker ps",
+                        "CONTAINER ID   IMAGE      COMMAND   CREATED      STATUS      PORTS",
+                        "b6a48fcf7091   postgres   \"docker\"  4 weeks ago  Up 3 days   0.0.0.0:5432->5432/tcp"
+                    ] }
+                ]
+            },
+            
+            files: {
+                "file-readme": { id: "file-readme", name: "README.md", path: "README.md", type: "markdown", content: `# Pocket Studio
+
+轻量化跨机开发协同工作流。
+
+## 快速开始
+
+1. **启动后端服务**
+   \`\`\`bash
+   go run cmd/server/main.go --addr :8080
+   \`\`\`
+2. **启动前端开发服务器**
+   \`\`\`bash
+   cd web
+   npm run dev
+   \`\`\`
+
+## 架构
+
+* **Server**: 汇集并持久化来自各个机器（Daemon）的信息，向 Web 端提供 API。
+* **Daemon**: 安装于远程机器，负责监听 Server 派发的 AI 任务以及执行 terminal 命令。` },
+                "file-hub": { id: "file-hub", name: "hub.go", path: "internal/server/hub.go", type: "go", content: `package server
+
+import (
+	"log"
+	"net/http"
+	"sync"
+	"remote-agent/internal/protocol"
+)
+
+type Hub struct {
+	mu          sync.Mutex
+	daemons     map[string]*daemonConn
+	webs        map[*webConn]bool
+	taskRecords map[string]protocol.TaskRecord
+}
+
+func NewHub() *Hub {
+	return &Hub{
+		daemons:     make(map[string]*daemonConn),
+		webs:        make(map[*webConn]bool),
+		taskRecords: make(map[string]protocol.TaskRecord),
+	}
+}` }
+            }
+        };
+
+        // Current active sub-indices (for mock interactive)
+        let activeTmuxWindowIndex = 0;
+
+        // --- DOM RENDERING UTILS ---
+        
+        function getProjectById(id) {
+            return state.projects.find(p => p.id === id);
+        }
+        
+        function getMachineById(id) {
+            return state.machines.find(m => m.id === id);
+        }
+
+        // --- INIT FUNCTION ---
+        window.addEventListener('DOMContentLoaded', () => {
+            renderDashboard();
+            updateStateDisplay();
+            lucide.createIcons();
+            
+            // Add radio triggers to radio buttons
+            document.querySelectorAll('#agent-type-selection label').forEach(label => {
+                label.addEventListener('click', function() {
+                    document.querySelectorAll('#agent-type-selection label').forEach(l => {
+                        l.classList.remove('border-brand-500', 'bg-brand-500/10');
+                        l.classList.add('border-slate-800', 'bg-slate-900/50');
+                    });
+                    this.classList.remove('border-slate-800', 'bg-slate-900/50');
+                    this.classList.add('border-brand-500', 'bg-brand-500/10');
+                });
+            });
+        });
+
+        // --- CONTROLLING VISUAL VIEWS ---
+        function showView(viewId) {
+            document.getElementById('view-dashboard').classList.add('hidden');
+            document.getElementById('view-workspace').classList.add('hidden');
+            document.getElementById('back-to-dashboard-btn').classList.add('hidden');
+            document.getElementById('active-project-bar').classList.remove('flex');
+            document.getElementById('active-project-bar').classList.add('hidden');
+
+            if (viewId === 'dashboard') {
+                document.getElementById('view-dashboard').classList.remove('hidden');
+                state.currentProjectId = "";
+                renderDashboard();
+            } else if (viewId === 'workspace') {
+                document.getElementById('view-workspace').classList.remove('hidden');
+                document.getElementById('back-to-dashboard-btn').classList.remove('hidden');
+                document.getElementById('active-project-bar').classList.remove('hidden');
+                document.getElementById('active-project-bar').classList.add('flex');
+                
+                const proj = getProjectById(state.currentProjectId);
+                const mach = getMachineById(proj.machineId);
+                document.getElementById('active-project-machine').innerText = mach.name.split(' ')[0];
+                document.getElementById('active-project-name').innerText = proj.name;
+                
+                renderWorkspace();
+            }
+            updateStateDisplay();
+            lucide.createIcons();
+        }
+
+        // --- RENDER 1: WELCOME DASHBOARD ---
+        function renderDashboard() {
+            // Render Machines List
+            const machContainer = document.getElementById('machine-list');
+            machContainer.innerHTML = '';
+            
+            state.machines.forEach(mach => {
+                let statusDotClass = 'bg-slate-500';
+                let statusText = '离线';
+                let bgBorderClass = 'border-slate-800 bg-slate-900/40';
+
+                if (mach.status === 'online') {
+                    statusDotClass = 'bg-emerald-500 shadow-sm shadow-emerald-500/50 animate-pulse';
+                    statusText = '在线';
+                    bgBorderClass = 'border-emerald-500/20 bg-slate-900/70 hover:border-emerald-500/30';
+                } else if (mach.status === 'idle') {
+                    statusDotClass = 'bg-amber-400';
+                    statusText = '空闲';
+                    bgBorderClass = 'border-slate-800 bg-slate-900/60 hover:border-brand-500/30';
+                }
+
+                machContainer.innerHTML += `
+                    <div class="p-4 rounded-xl border ${bgBorderClass} flex items-center justify-between transition group">
+                        <div class="flex items-center space-x-3">
+                            <div class="h-9 w-9 rounded-lg bg-slate-800/80 flex items-center justify-center border border-slate-700/50 group-hover:border-brand-500/40">
+                                <i data-lucide="cpu" class="h-4.5 w-4.5 text-slate-300 group-hover:text-brand-400"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-slate-100 group-hover:text-brand-300 transition">${mach.name}</h4>
+                                <p class="text-[10px] text-slate-400 font-mono mt-0.5">${mach.ip}:${mach.port}</p>
+                            </div>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <span class="h-2 w-2 rounded-full ${statusDotClass}"></span>
+                            <span class="text-[10px] font-semibold text-slate-400">${statusText}</span>
+                        </div>
+                    </div>
+                `;
+            });
+
+            // Render Projects List
+            const projGrid = document.getElementById('projects-grid');
+            projGrid.innerHTML = '';
+
+            state.projects.forEach(proj => {
+                const mach = getMachineById(proj.machineId);
+                projGrid.innerHTML += `
+                    <div onclick="enterProject('${proj.id}')" class="glass rounded-xl p-5 border border-slate-800 hover:border-brand-500/40 hover:glass-highlight cursor-pointer transition flex flex-col justify-between h-44 group">
+                        <div>
+                            <div class="flex items-center justify-between">
+                                <span class="px-2 py-0.5 text-[9px] uppercase font-bold tracking-wider bg-indigo-500/10 text-indigo-300 rounded border border-indigo-500/20 flex items-center space-x-1">
+                                    <i data-lucide="cpu" class="h-2.5 w-2.5"></i>
+                                    <span>${mach.name.split(' ')[0]}</span>
+                                </span>
+                                <span class="text-[10px] text-slate-500 font-mono">${proj.agentSessions.length} AI 会话 / ${proj.tmuxSessions.length} Term</span>
+                            </div>
+                            <h3 class="text-base font-bold text-slate-100 mt-3 group-hover:text-brand-300 transition">${proj.name}</h3>
+                            <p class="text-[10px] text-slate-400 font-mono mt-1 break-all bg-slate-900/60 p-1.5 rounded border border-slate-800/80">${proj.path}</p>
+                        </div>
+                        <div class="flex items-center justify-between text-xs text-brand-400 group-hover:text-brand-300 pt-3 border-t border-slate-900 font-semibold select-none">
+                            <span>进入工作空间</span>
+                            <i data-lucide="arrow-right" class="h-3.5 w-3.5 group-hover:translate-x-1 transition-transform"></i>
+                        </div>
+                    </div>
+                `;
+            });
+
+            // Add Create Project Option card
+            projGrid.innerHTML += `
+                <div onclick="openModal('create-project-modal')" class="border border-dashed border-slate-800 hover:border-brand-500/50 hover:bg-brand-500/5 cursor-pointer rounded-xl p-5 flex flex-col items-center justify-center h-44 text-slate-400 hover:text-brand-300 transition group select-none">
+                    <i data-lucide="plus-circle" class="h-8 w-8 mb-2 group-hover:scale-110 transition-transform"></i>
+                    <span class="text-xs font-bold">创建新项目挂载</span>
+                    <span class="text-[10px] text-slate-500 mt-1">绑定指定机器目录进行研发</span>
+                </div>
+            `;
+            
+            // Populate Create Project Machine dropdown
+            const machSelect = document.getElementById('new-project-machine');
+            machSelect.innerHTML = '';
+            state.machines.filter(m => m.status !== 'offline').forEach(m => {
+                machSelect.innerHTML += `<option value="${m.id}">${m.name} (${m.ip})</option>`;
+            });
+
+            lucide.createIcons();
+        }
+
+        // --- RENDER 2: WORKSPACE (IDE VIEW) ---
+        function renderWorkspace() {
+            const proj = getProjectById(state.currentProjectId);
+            
+            // 1. Sidebar items (Agent & Terminal counts)
+            document.getElementById('sidebar-agent-count').innerText = proj.agentSessions.length;
+            document.getElementById('sidebar-tmux-count').innerText = proj.tmuxSessions.length;
+
+            // 2. Sidebar File Tree
+            const treeContainer = document.getElementById('workspace-file-tree');
+            treeContainer.innerHTML = `
+                <div class="space-y-1 text-xs">
+                    <!-- Root directory folder -->
+                    <div class="flex items-center space-x-1.5 p-1 rounded hover:bg-slate-900 text-slate-300 cursor-pointer font-semibold select-none">
+                        <i data-lucide="chevron-down" class="h-3.5 w-3.5 text-slate-500"></i>
+                        <i data-lucide="folder-git-2" class="h-3.5 w-3.5 text-indigo-400"></i>
+                        <span class="truncate">${proj.name}</span>
+                    </div>
+                    
+                    <!-- Indented Tree Content -->
+                    <div class="pl-4 space-y-1 select-none">
+                        <!-- Folder 1: cmd -->
+                        <div class="flex items-center space-x-1.5 p-1 rounded hover:bg-slate-900 text-slate-400 cursor-pointer">
+                            <i data-lucide="chevron-right" class="h-3.5 w-3.5 text-slate-600"></i>
+                            <i data-lucide="folder" class="h-3.5 w-3.5 text-brand-400/80"></i>
+                            <span>cmd</span>
+                        </div>
+                        <!-- Folder 2: internal -->
+                        <div class="flex items-center space-x-1.5 p-1 rounded hover:bg-slate-900 text-slate-400 cursor-pointer">
+                            <i data-lucide="chevron-down" class="h-3.5 w-3.5 text-slate-500"></i>
+                            <i data-lucide="folder" class="h-3.5 w-3.5 text-brand-400/80"></i>
+                            <span>internal</span>
+                        </div>
+                        <!-- Indented child files under internal -->
+                        <div class="pl-4 space-y-1">
+                            <div onclick="openFileTab('file-hub')" class="flex items-center space-x-1.5 p-1 rounded hover:bg-slate-900 text-slate-400 cursor-pointer hover:text-brand-300">
+                                <i data-lucide="file-code" class="h-3.5 w-3.5 text-indigo-500"></i>
+                                <span class="${proj.activeTabId === 'file-hub' ? 'text-brand-400 font-semibold' : ''}">hub.go</span>
+                            </div>
+                        </div>
+                        
+                        <!-- File 3: README.md -->
+                        <div onclick="openFileTab('file-readme')" class="flex items-center space-x-1.5 p-1 rounded hover:bg-slate-900 text-slate-400 cursor-pointer hover:text-brand-300">
+                            <i data-lucide="file-text" class="h-3.5 w-3.5 text-slate-500"></i>
+                            <span class="${proj.activeTabId === 'file-readme' ? 'text-brand-400 font-semibold' : ''}">README.md</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // 3. Tab Bar Header
+            const tabsContainer = document.getElementById('workspace-tabs-container');
+            tabsContainer.innerHTML = '';
+            
+            proj.openTabs.forEach(tabId => {
+                const isActive = proj.activeTabId === tabId;
+                let tabName = '';
+                let tabIcon = 'file-text';
+                let iconColor = 'text-slate-400';
+
+                if (tabId.startsWith('file-')) {
+                    const fileObj = state.files[tabId];
+                    tabName = fileObj.name;
+                    tabIcon = fileObj.type === 'go' ? 'file-code' : 'file-text';
+                    iconColor = fileObj.type === 'go' ? 'text-indigo-400' : 'text-slate-400';
+                } else if (tabId.startsWith('agent-')) {
+                    const agentObj = state.agents[tabId];
+                    tabName = `Chat: ${agentObj.type}`;
+                    tabIcon = 'sparkles';
+                    iconColor = 'text-brand-400 animate-pulse';
+                }
+
+                tabsContainer.innerHTML += `
+                    <div onclick="switchActiveTab('${tabId}')" class="h-8 px-3 rounded-t-md border-t-2 ${isActive ? 'bg-slate-950 border-brand-500 text-white font-medium' : 'bg-slate-900/60 border-transparent text-slate-400 hover:bg-slate-900 hover:text-slate-200'} flex items-center space-x-2 cursor-pointer transition select-none group text-xs">
+                        <i data-lucide="${tabIcon}" class="h-3.5 w-3.5 ${iconColor}"></i>
+                        <span>${tabName}</span>
+                        <i onclick="closeTab('${tabId}', event)" data-lucide="x" class="h-3 w-3 text-slate-600 hover:text-slate-300 rounded hover:bg-slate-800 transition p-0.5"></i>
+                    </div>
+                `;
+            });
+
+            // 4. Tab Active Content Viewport
+            const viewport = document.getElementById('workspace-content-viewport');
+            viewport.innerHTML = '';
+
+            if (!proj.activeTabId) {
+                viewport.innerHTML = `
+                    <div class="absolute inset-0 flex flex-col items-center justify-center text-slate-500 select-none">
+                        <i data-lucide="layers" class="h-10 w-10 mb-2 text-slate-700"></i>
+                        <span class="text-xs">无打开的文件或会话</span>
+                        <button onclick="openModal('create-agent-modal')" class="mt-4 px-3 py-1.5 bg-slate-900 border border-slate-800 hover:border-brand-500/50 rounded-lg text-xs text-brand-400 font-semibold flex items-center space-x-1.5 transition">
+                            <i data-lucide="sparkles" class="h-3.5 w-3.5"></i>
+                            <span>拉起 Agent 聊天</span>
+                        </button>
+                    </div>
+                `;
+            } else if (proj.activeTabId.startsWith('file-')) {
+                const fileObj = state.files[proj.activeTabId];
+                
+                // Show Mock Editor (Code Editor)
+                viewport.innerHTML = `
+                    <div class="absolute inset-0 flex flex-col bg-slate-950">
+                        <div class="grow flex overflow-hidden">
+                            <!-- Line numbers -->
+                            <div class="w-10 bg-slate-900/40 select-none text-right pr-2 py-3 font-mono text-[11px] text-slate-600 leading-relaxed border-r border-slate-900">
+                                ${Array.from({ length: fileObj.content.split('\n').length + 5 }, (_, i) => i + 1).join('<br>')}
+                            </div>
+                            <!-- Code Content area (editable mock textarea) -->
+                            <textarea oninput="handleFileEdit(this.value)" class="grow bg-transparent text-slate-200 font-mono text-[11px] leading-relaxed p-3 focus:outline-none resize-none overflow-y-auto selection:bg-brand-500/20">${fileObj.content}</textarea>
+                        </div>
+                        <!-- Mock status bar -->
+                        <div class="h-6 border-t border-slate-900 bg-slate-900/50 flex items-center justify-between px-4 text-[10px] text-slate-500 select-none shrink-0 font-mono">
+                            <span class="flex items-center space-x-1">
+                                <i data-lucide="edit" class="h-3 w-3"></i>
+                                <span>类型: ${fileObj.type.toUpperCase()}</span>
+                            </span>
+                            <span>UTF-8 | CRLF | Tab Size: 4</span>
+                        </div>
+                    </div>
+                `;
+            } else if (proj.activeTabId.startsWith('agent-')) {
+                const agentObj = state.agents[proj.activeTabId];
+                
+                // Show AI Agent Chat interface
+                let messagesHTML = '';
+                agentObj.messages.forEach(msg => {
+                    const isUser = msg.role === 'user';
+                    messagesHTML += `
+                        <div class="flex ${isUser ? 'justify-end' : 'justify-start'} mb-4">
+                            <div class="max-w-[85%] flex items-start space-x-2.5 ${isUser ? 'flex-row-reverse space-x-reverse' : ''}">
+                                <div class="h-8 w-8 rounded-lg shrink-0 flex items-center justify-center text-xs font-bold border ${isUser ? 'bg-indigo-600/20 border-indigo-500/30 text-indigo-300' : 'bg-brand-600/20 border-brand-500/30 text-brand-300'}">
+                                    ${isUser ? 'ME' : 'AI'}
+                                </div>
+                                <div class="rounded-xl px-4 py-2.5 text-xs leading-relaxed ${isUser ? 'bg-indigo-600 text-white rounded-tr-none' : 'bg-slate-900/80 text-slate-200 border border-slate-800/80 rounded-tl-none'}">
+                                    ${isUser ? '' : `<div class="text-[9px] uppercase tracking-wider font-bold text-brand-400 mb-1.5 flex items-center space-x-1"><i data-lucide="shield-check" class="h-3 w-3"></i><span>已通过 Agent 鉴权</span></div>`}
+                                    <div class="whitespace-pre-wrap">${msg.text}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+
+                viewport.innerHTML = `
+                    <div class="absolute inset-0 flex flex-col bg-slate-950/20">
+                        <!-- Message bubble list -->
+                        <div id="chat-messages-container" class="grow overflow-y-auto p-4 space-y-4">
+                            ${messagesHTML}
+                        </div>
+                        
+                        <!-- Input block -->
+                        <div class="p-3 border-t border-slate-900 bg-slate-900/40 shrink-0">
+                            <form onsubmit="handleChatSubmit(event)" class="relative flex items-center">
+                                <input type="text" id="chat-input-text" autocomplete="off" class="w-full bg-slate-950 border border-slate-850 hover:border-slate-700 focus:border-brand-500 focus:ring-1 focus:ring-brand-500/20 rounded-lg pl-3 pr-10 py-2.5 text-xs text-slate-100 focus:outline-none transition" placeholder="向 ${agentObj.type} 提问，输入指令并发送...">
+                                <button type="submit" class="absolute right-1.5 h-7 w-7 rounded-md bg-brand-600 hover:bg-brand-500 text-white flex items-center justify-center transition">
+                                    <i data-lucide="send" class="h-3.5 w-3.5"></i>
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                `;
+                
+                // Scroll chat to bottom
+                setTimeout(() => {
+                    const chatContainer = document.getElementById('chat-messages-container');
+                    if (chatContainer) chatContainer.scrollTop = chatContainer.scrollHeight;
+                }, 50);
+            }
+
+            // 5. Terminal Tabs (Tmux session windows)
+            const termTabsContainer = document.getElementById('terminal-tabs-container');
+            termTabsContainer.innerHTML = '';
+            
+            const tmuxWins = state.tmuxWindows[proj.activeTmuxId] || [];
+            
+            tmuxWins.forEach((win, index) => {
+                const isActive = activeTmuxWindowIndex === index;
+                termTabsContainer.innerHTML += `
+                    <div onclick="switchTmuxWindow(${index})" class="px-2 py-0.5 rounded cursor-pointer transition select-none font-mono ${isActive ? 'bg-brand-600 text-white font-bold' : 'text-slate-500 hover:bg-slate-900 hover:text-slate-300'}">
+                        ${win.name}
+                    </div>
+                `;
+            });
+
+            // 6. Terminal Console Output
+            const termOutput = document.getElementById('terminal-output-container');
+            termOutput.innerHTML = '';
+            
+            const activeWin = tmuxWins[activeTmuxWindowIndex];
+            if (activeWin) {
+                activeWin.lines.forEach(line => {
+                    termOutput.innerHTML += `<div class="text-[11px] tracking-wide text-slate-300 font-mono">${escapeHTML(line)}</div>`;
+                });
+            } else {
+                termOutput.innerHTML = `<div class="text-xs text-slate-600 font-mono">没有活动的 tmux 会话</div>`;
+            }
+            
+            // Scroll terminal to bottom
+            termOutput.scrollTop = termOutput.scrollHeight;
+
+            // Set terminal prompt path prefix
+            const termPrompt = document.getElementById('terminal-prompt-prefix');
+            termPrompt.innerText = `choco@remote-agent:${proj.path.substring(proj.path.lastIndexOf('/'))}$`;
+
+            lucide.createIcons();
+        }
+
+        function escapeHTML(str) {
+            return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+        }
+
+        // --- MOCK TRANSITIONS & CONTROLS ---
+
+        function enterProject(projectId) {
+            state.currentProjectId = projectId;
+            const proj = getProjectById(projectId);
+            activeTmuxWindowIndex = 0; // reset
+            showView('workspace');
+        }
+
+        function switchActiveTab(tabId) {
+            const proj = getProjectById(state.currentProjectId);
+            proj.activeTabId = tabId;
+            renderWorkspace();
+            updateStateDisplay();
+        }
+
+        function openFileTab(fileId) {
+            const proj = getProjectById(state.currentProjectId);
+            if (!proj.openTabs.includes(fileId)) {
+                proj.openTabs.push(fileId);
+            }
+            proj.activeTabId = fileId;
+            renderWorkspace();
+            updateStateDisplay();
+        }
+
+        function closeTab(tabId, event) {
+            if (event) event.stopPropagation(); // prevent parent click
+            
+            const proj = getProjectById(state.currentProjectId);
+            proj.openTabs = proj.openTabs.filter(id => id !== tabId);
+            
+            if (proj.activeTabId === tabId) {
+                proj.activeTabId = proj.openTabs.length > 0 ? proj.openTabs[proj.openTabs.length - 1] : "";
+            }
+            
+            renderWorkspace();
+            updateStateDisplay();
+        }
+
+        function switchTmuxWindow(index) {
+            activeTmuxWindowIndex = index;
+            renderWorkspace();
+            updateStateDisplay();
+        }
+
+        // --- SUBMIT HANDLERS (Simulate backend integrations) ---
+
+        // Create Project
+        function handleCreateProject(event) {
+            event.preventDefault();
+            const name = document.getElementById('new-project-name').value;
+            const machineId = document.getElementById('new-project-machine').value;
+            const path = document.getElementById('new-project-path').value;
+            
+            const id = 'proj-' + Date.now().toString().substring(8);
+            
+            const newProj = {
+                id,
+                name,
+                machineId,
+                path,
+                agentSessions: [],
+                tmuxSessions: ['tmux-dev'],
+                activeTabId: "file-readme",
+                openTabs: ["file-readme"],
+                fileTreeExpanded: ["."],
+                activeTmuxId: "tmux-dev"
+            };
+
+            // Set up mock tmux windows
+            state.tmuxWindows['tmux-dev'] = [
+                { id: "win-0", name: "0:bash*", lines: [
+                    `Welcome to Tmux Session [dev] on Project ${name}!`,
+                    `Running under path ${path}`,
+                    "choco@remote-agent:~$ "
+                ]}
+            ];
+            
+            state.projects.push(newProj);
+            
+            closeModal('create-project-modal');
+            renderDashboard();
+            updateStateDisplay();
+            
+            // Auto enter it!
+            enterProject(id);
+        }
+
+        // Add Machine
+        function handleAddMachine(event) {
+            event.preventDefault();
+            const name = document.getElementById('new-machine-name').value;
+            const ip = document.getElementById('new-machine-ip').value;
+            const agent = document.getElementById('new-machine-agent').value;
+            const port = parseInt(document.getElementById('new-machine-port').value);
+
+            const id = 'mac-' + Date.now().toString().substring(8);
+            state.machines.push({
+                id,
+                name,
+                ip,
+                port,
+                status: "online",
+                defaultAgent: agent
+            });
+
+            closeModal('add-machine-modal');
+            renderDashboard();
+            updateStateDisplay();
+        }
+
+        // Add Agent Chat
+        function handleCreateAgent(event) {
+            event.preventDefault();
+            const proj = getProjectById(state.currentProjectId);
+            const agentRadios = document.getElementsByName('agent-type');
+            let selectedType = 'Antigravity';
+            for (const radio of agentRadios) {
+                if (radio.checked) {
+                    selectedType = radio.value;
+                    break;
+                }
+            }
+            const prompt = document.getElementById('new-agent-prompt').value || 'Hello Agent!';
+            const agentId = 'agent-' + Date.now().toString().substring(8);
+
+            // Ingest new agent
+            state.agents[agentId] = {
+                id: agentId,
+                projectId: state.currentProjectId,
+                type: selectedType,
+                name: `AGY-${selectedType.split(' ')[0]}-${Date.now().toString().substring(10)}`,
+                prompt: prompt,
+                messages: [
+                    { role: "user", text: prompt },
+                    { role: "agent", text: `您好！我是您的 ${selectedType} 协作者。针对您的请求：“${prompt}”，我已经开始分析该项目的架构，您可以在当前标签页中随时与我交谈，我将协同其他 Agent 规划这一工程。` }
+                ]
+            };
+
+            // Associate with project
+            proj.agentSessions.push(agentId);
+            proj.openTabs.push(agentId);
+            proj.activeTabId = agentId;
+
+            closeModal('create-agent-modal');
+            renderWorkspace();
+            updateStateDisplay();
+        }
+
+        // Chat send mock response
+        function handleChatSubmit(event) {
+            event.preventDefault();
+            const input = document.getElementById('chat-input-text');
+            const text = input.value.trim();
+            if (!text) return;
+
+            const proj = getProjectById(state.currentProjectId);
+            const agentObj = state.agents[proj.activeTabId];
+            
+            // Add user message
+            agentObj.messages.push({ role: 'user', text });
+            input.value = '';
+            renderWorkspace();
+            updateStateDisplay();
+
+            // Simulate agent response with streaming effect
+            setTimeout(() => {
+                const answers = [
+                    "我已经检索了您的项目目录，正在通过 AST 分析 Go 后端接口契约，会在下一阶段生成接口骨架。",
+                    "这符合我们的最佳实践规约。我已经修改了工程清单配置，并在终端执行了静态编译分析，您可以检查下面的 tmux 编译日志。",
+                    "理解！已为您创建新的协作流程，我负责编写业务模型并进行自动化单测构建，另一个 Agent 将负责对接接口。"
+                ];
+                const textAns = answers[Math.floor(Math.random() * answers.length)];
+                
+                agentObj.messages.push({ role: 'agent', text: textAns });
+                renderWorkspace();
+                updateStateDisplay();
+            }, 1000);
+        }
+
+        // Terminal Mock commands execution
+        function handleTerminalSubmit(event) {
+            event.preventDefault();
+            const input = document.getElementById('terminal-input');
+            const text = input.value.trim();
+            if (!text) return;
+
+            const proj = getProjectById(state.currentProjectId);
+            const activeWin = state.tmuxWindows[proj.activeTmuxId][activeTmuxWindowIndex];
+            
+            // Append typed command
+            activeWin.lines.push(`${document.getElementById('terminal-prompt-prefix').innerText} ${text}`);
+            
+            // Mock command answers
+            const cmd = text.toLowerCase();
+            if (cmd === 'help') {
+                activeWin.lines.push("PocketStudio Mock Terminal Shell v1.0.0",
+                                    "Available commands:",
+                                    "  ls              - 列出当前工程根路径下文件",
+                                    "  git status      - 检查 git 仓更改日志",
+                                    "  npm run dev     - 模拟在后台拉起 Vite 前端开发进程",
+                                    "  tmux new-window - 调度后端在本项目关联下，新建一个 tmux 窗口 (tmux.go)",
+                                    "  clear           - 清除当前屏幕输出");
+            } else if (cmd === 'ls') {
+                activeWin.lines.push(
+                    "total 368",
+                    "drwxr-xr-x   9 choco  staff    288 May 28 15:55 .",
+                    "drwxr-xr-x   4 choco  staff    128 May 28 07:56 ..",
+                    "-rw-r--r--   1 choco  staff   1505 May 28 07:56 README.md",
+                    "drwxr-xr-x   6 choco  staff    192 May 28 07:56 cmd",
+                    "drwxr-xr-x   6 choco  staff    192 May 28 07:56 internal",
+                    "drwxr-xr-x  10 choco  staff    320 May 28 07:56 web"
+                );
+            } else if (cmd === 'git status') {
+                activeWin.lines.push(
+                    "On branch main",
+                    "Your branch is up to date with 'origin/main'.",
+                    "",
+                    "Changes not staged for commit:",
+                    "  (use \"git add <file>...\" to update what will be committed)",
+                    "  (use \"git restore <file>...\" to discard changes in working directory)",
+                    "	modified:   web/src/main.tsx",
+                    "",
+                    "no changes added to commit (use \"git add\" and/or \"git commit -a\")"
+                );
+            } else if (cmd === 'npm run dev') {
+                activeWin.lines.push(
+                    "> web@0.0.0 dev",
+                    "> vite --host 0.0.0.0",
+                    "  VITE v6.1.2  ready in 256 ms",
+                    "  ➜  Local:   http://localhost:5173/",
+                    "  ➜  Network: http://192.168.1.105:5173/"
+                );
+            } else if (cmd === 'tmux new-window') {
+                addNewTmuxWindow();
+                activeWin.lines.push("Command successful: Spawning new tmux window.");
+            } else if (cmd === 'clear') {
+                activeWin.lines = [];
+            } else {
+                activeWin.lines.push(`bash: ${text}: command not found. Type 'help' to see list of mock command utilities.`);
+            }
+
+            input.value = '';
+            renderWorkspace();
+            updateStateDisplay();
+        }
+
+        // New Tmux Window inside active session
+        function addNewTmuxWindow() {
+            const proj = getProjectById(state.currentProjectId);
+            const tmuxWins = state.tmuxWindows[proj.activeTmuxId];
+            const newIndex = tmuxWins.length;
+            const newWin = {
+                id: `win-${Date.now()}`,
+                name: `${newIndex}:bash*`,
+                lines: [
+                    `[Spawning new tmux window successfully via WebSocket payload]`,
+                    `choco@remote-agent:~/my-project$ `
+                ]
+            };
+            
+            // Remove asterisk from old active
+            tmuxWins.forEach(w => {
+                if (w.name.endsWith('*')) w.name = w.name.slice(0, -1);
+            });
+
+            tmuxWins.push(newWin);
+            activeTmuxWindowIndex = newIndex;
+            
+            renderWorkspace();
+            updateStateDisplay();
+        }
+
+        // Handle File edit text changes
+        function handleFileEdit(val) {
+            const proj = getProjectById(state.currentProjectId);
+            state.files[proj.activeTabId].content = val;
+            updateStateDisplay();
+        }
+
+
+        // --- MODAL UTILS ---
+        function openModal(modalId) {
+            document.getElementById(modalId).classList.remove('hidden');
+        }
+        function closeModal(modalId) {
+            document.getElementById(modalId).classList.add('hidden');
+        }
+
+        // --- DRAW INSPECTOR INFO ---
+        function toggleStateInspector() {
+            const drawer = document.getElementById('state-inspector-drawer');
+            if (drawer.classList.contains('translate-x-full')) {
+                drawer.classList.remove('translate-x-full');
+            } else {
+                drawer.classList.add('translate-x-full');
+            }
+        }
+
+        function updateStateDisplay() {
+            const display = document.getElementById('state-json-display');
+            display.innerText = JSON.stringify(state, null, 4);
+        }
+
+    </script>
+</body>
+</html>

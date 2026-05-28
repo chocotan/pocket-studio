@@ -5,23 +5,37 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 
 	"remote-agent/internal/protocol"
 )
 
+type Project struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	DeviceID      string   `json:"device_id"`
+	WorkspacePath string   `json:"workspace_path"`
+	AgentIDs      []string `json:"agent_ids"`
+	TmuxIDs       []string `json:"tmux_ids"`
+}
+
 type Hub struct {
-	mu          sync.RWMutex
-	daemons     map[string]*daemonConn
-	webs        map[*webConn]struct{}
-	taskDevices map[string]string
-	taskEvents  map[string][]protocol.Envelope
-	taskRecords map[string]protocol.TaskRecord
-	pending     map[string]chan protocol.Envelope
+	mu            sync.RWMutex
+	daemons       map[string]*daemonConn
+	webs          map[*webConn]struct{}
+	taskDevices   map[string]string
+	taskEvents    map[string][]protocol.Envelope
+	taskRecords   map[string]protocol.TaskRecord
+	pending       map[string]chan protocol.Envelope
+	projects      map[string]Project
+	projectStates map[string]string // projectId -> JSON string
 }
 
 type daemonConn struct {
@@ -59,12 +73,14 @@ type StateView struct {
 
 func NewHub() *Hub {
 	return &Hub{
-		daemons:     make(map[string]*daemonConn),
-		webs:        make(map[*webConn]struct{}),
-		taskDevices: make(map[string]string),
-		taskEvents:  make(map[string][]protocol.Envelope),
-		taskRecords: make(map[string]protocol.TaskRecord),
-		pending:     make(map[string]chan protocol.Envelope),
+		daemons:       make(map[string]*daemonConn),
+		webs:          make(map[*webConn]struct{}),
+		taskDevices:   make(map[string]string),
+		taskEvents:    make(map[string][]protocol.Envelope),
+		taskRecords:   make(map[string]protocol.TaskRecord),
+		pending:       make(map[string]chan protocol.Envelope),
+		projects:      make(map[string]Project),
+		projectStates: make(map[string]string),
 	}
 }
 
@@ -104,6 +120,133 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/state" && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, h.stateView())
 		return
+	}
+	if r.URL.Path == "/api/project/list" && r.Method == http.MethodGet {
+		h.mu.RLock()
+		list := make([]Project, 0, len(h.projects))
+		for _, p := range h.projects {
+			list = append(list, p)
+		}
+		h.mu.RUnlock()
+		
+		sort.Slice(list, func(i, j int) bool {
+			return list[i].Name < list[j].Name
+		})
+		
+		writeJSON(w, http.StatusOK, list)
+		return
+	}
+	if r.URL.Path == "/api/project/create" && r.Method == http.MethodPost {
+		var req Project
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.Name == "" || req.DeviceID == "" || req.WorkspacePath == "" {
+			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "name, device_id, and workspace_path are required"})
+			return
+		}
+		
+		h.mu.Lock()
+		if req.ID == "" {
+			req.ID = "proj-" + protocol.NewID("")[4:12]
+		}
+		if req.AgentIDs == nil {
+			req.AgentIDs = []string{}
+		}
+		if req.TmuxIDs == nil {
+			req.TmuxIDs = []string{}
+		}
+		h.projects[req.ID] = req
+		h.mu.Unlock()
+		
+		writeJSON(w, http.StatusOK, req)
+		return
+	}
+	if r.URL.Path == "/api/project/state" {
+		if r.Method == http.MethodGet {
+			projID := r.URL.Query().Get("project_id")
+			if projID == "" {
+				writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "project_id is required"})
+				return
+			}
+			
+			h.mu.RLock()
+			state, ok := h.projectStates[projID]
+			h.mu.RUnlock()
+			
+			if !ok {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"openFiles":       []any{},
+					"activeFilePath":  "",
+					"fileTree":        []any{},
+					"expandedPaths":   []string{"."},
+					"terminalLines":   []any{},
+					"explorerVisible": true,
+					"terminalVisible": false,
+					"activeTaskId":    "",
+				})
+				return
+			}
+			
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(state))
+			return
+		} else if r.Method == http.MethodPost {
+			var req struct {
+				ProjectID string `json:"project_id"`
+				State     any    `json:"state"`
+			}
+			if !decodeJSON(w, r, &req) {
+				return
+			}
+			if req.ProjectID == "" {
+				writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "project_id is required"})
+				return
+			}
+			
+			rawState, err := json.Marshal(req.State)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_payload", Message: err.Error()})
+				return
+			}
+			
+			h.mu.Lock()
+			h.projectStates[req.ProjectID] = string(rawState)
+			
+			if proj, ok := h.projects[req.ProjectID]; ok {
+				var parsedState struct {
+					ActiveTaskId string   `json:"activeTaskId"`
+					OpenTabs     []string `json:"openTabs"`
+				}
+				if json.Unmarshal(rawState, &parsedState) == nil {
+					var agentIDs []string
+					for _, tab := range parsedState.OpenTabs {
+						if strings.HasPrefix(tab, "agent-") || strings.HasPrefix(tab, "task-") {
+							agentIDs = append(agentIDs, tab)
+						}
+					}
+					if parsedState.ActiveTaskId != "" {
+						found := false
+						for _, id := range agentIDs {
+							if id == parsedState.ActiveTaskId {
+								found = true
+								break
+							}
+						}
+						if !found {
+							agentIDs = append(agentIDs, parsedState.ActiveTaskId)
+						}
+					}
+					proj.AgentIDs = agentIDs
+					h.projects[req.ProjectID] = proj
+				}
+			}
+			h.mu.Unlock()
+			
+			writeJSON(w, http.StatusOK, map[string]any{"success": true})
+			return
+		}
 	}
 	if r.URL.Path == "/api/workspace/list" && r.Method == http.MethodPost {
 		var req protocol.WorkspaceListRequest
@@ -731,4 +874,79 @@ func extractModelID(event protocol.TaskEvent) string {
 func MarshalPayload(v any) json.RawMessage {
 	raw, _ := json.Marshal(v)
 	return raw
+}
+
+func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
+	projID := r.URL.Query().Get("project_id")
+	if projID == "" {
+		http.Error(w, "project_id is required", http.StatusBadRequest)
+		return
+	}
+
+	h.mu.RLock()
+	proj, ok := h.projects[projID]
+	h.mu.RUnlock()
+
+	workspacePath := "/home/choco/Downloads/remote-agent"
+	if ok && proj.WorkspacePath != "" {
+		workspacePath = proj.WorkspacePath
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("upgrade terminal websocket: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	sessionName := "pocket-studio-" + projID
+	cmd := exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-c", workspacePath)
+
+	ptyFile, err := pty.Start(cmd)
+	if err != nil {
+		log.Printf("failed to start tmux: %v. falling back to bash.", err)
+		cmd = exec.Command("bash")
+		cmd.Dir = workspacePath
+		ptyFile, err = pty.Start(cmd)
+		if err != nil {
+			log.Printf("failed to start fallback shell: %v", err)
+			return
+		}
+	}
+	defer ptyFile.Close()
+
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, err := ptyFile.Read(buf)
+			if err != nil {
+				break
+			}
+			if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+				break
+			}
+		}
+	}()
+
+	for {
+		msgType, payload, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		if msgType == websocket.BinaryMessage || msgType == websocket.TextMessage {
+			var resizeMsg struct {
+				Type string `json:"type"`
+				Cols uint16 `json:"cols"`
+				Rows uint16 `json:"rows"`
+			}
+			if err := json.Unmarshal(payload, &resizeMsg); err == nil && resizeMsg.Type == "resize" {
+				_ = pty.Setsize(ptyFile, &pty.Winsize{
+					Cols: resizeMsg.Cols,
+					Rows: resizeMsg.Rows,
+				})
+			} else {
+				_, _ = ptyFile.Write(payload)
+			}
+		}
+	}
 }

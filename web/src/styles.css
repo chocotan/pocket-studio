@@ -1384,4 +1384,381 @@
     background: #ffffff;
     box-shadow: none;
   }
+
+  /* --- PocketStudio Project-Centric UI Styles --- */
+
+  /* Project Sidebar Item Glow & Vertical Pill */
+  .activity-bar-project-item {
+    position: relative;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  
+  .activity-bar-project-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%) scaleY(0.3);
+    width: 3px;
+    height: 16px;
+    border-radius: 0 4px 4px 0;
+    background: #3b82f6;
+    opacity: 0;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .activity-bar-item-active.activity-bar-project-item::before {
+    opacity: 1;
+    transform: translateY(-50%) scaleY(1);
+    height: 24px;
+    background: #3b82f6;
+    box-shadow: 0 0 10px rgba(59, 130, 246, 0.5);
+  }
+
+  /* Elegant HSL Project Badges */
+  .project-letter-badge {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 14px;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #ffffff;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .project-letter-badge-lg {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    font-size: 20px;
+    font-weight: 800;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 4px 8px rgba(0, 0, 0, 0.08);
+  }
+
+  .activity-bar-project-item:hover .project-letter-badge {
+    transform: scale(1.08);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 4px 8px rgba(0, 0, 0, 0.15);
+  }
+
+  /* Dashboard Project Grid */
+  .project-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 20px;
+  }
+
+  .project-card {
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 14px;
+    padding: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.01), 0 4px 12px rgba(0, 0, 0, 0.01);
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .project-card:hover {
+    transform: translateY(-4px);
+    border-color: rgba(59, 130, 246, 0.3);
+    box-shadow: 0 12px 28px -4px rgba(0, 0, 0, 0.05), 0 8px 12px -6px rgba(0, 0, 0, 0.02);
+  }
+
+  .project-card-active {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 1px #3b82f6, 0 12px 28px -4px rgba(59, 130, 246, 0.08);
+  }
+
+  .project-card-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .project-card-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #1e293b;
+    line-height: 1.25;
+  }
+
+  .project-card-device {
+    font-size: 12px;
+    color: #64748b;
+    margin-top: 3px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .project-card-path {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    color: #475569;
+    background: #f8fafc;
+    padding: 6px 10px;
+    border-radius: 8px;
+    word-break: break-all;
+    margin-top: 6px;
+    border: 1px solid rgba(0, 0, 0, 0.04);
+  }
+
+  .project-card-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: auto;
+    padding-top: 12px;
+    border-top: 1px solid rgba(0, 0, 0, 0.04);
+  }
+
+  /* Agent Instance Tabs inside Chat Pane */
+  .agent-tabs-container {
+    background: #f8fafc;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    height: 40px;
+    gap: 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .agent-tabs-container::-webkit-scrollbar {
+    display: none;
+  }
+
+  .agent-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 100%;
+    padding: 0 16px;
+    border-right: 1px solid rgba(0, 0, 0, 0.03);
+    font-size: 13px;
+    font-weight: 500;
+    color: #64748b;
+    cursor: pointer;
+    background: transparent;
+    border-top: none;
+    border-left: none;
+    border-bottom: none;
+    position: relative;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .agent-tab:hover {
+    color: #0f172a;
+    background: rgba(0, 0, 0, 0.02);
+  }
+
+  .agent-tab-active {
+    color: #0f172a;
+    background: #ffffff;
+    font-weight: 600;
+    box-shadow: 0 -1px 0 rgba(0, 0, 0, 0.02);
+  }
+
+  .agent-tab::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    background: transparent;
+    transform: scaleX(0.8);
+    transition: all 0.25s ease;
+  }
+
+  .agent-tab-active::after {
+    background: #3b82f6;
+    transform: scaleX(1);
+  }
+
+  /* Custom agent colors for tabs */
+  .agent-tab-active.agent-tab-claude::after {
+    background: #d97706; /* Claude Orange */
+  }
+
+  .agent-tab-active.agent-tab-gemini::after {
+    background: #8b5cf6; /* Gemini Purple */
+  }
+
+  .agent-tab-active.agent-tab-copilot::after {
+    background: #06b6d4; /* Copilot Cyan */
+  }
+
+  .agent-tab-active.agent-tab-deepseek::after {
+    background: #0d6efd; /* DeepSeek Blue */
+  }
+
+  .agent-tab-active.agent-tab-qwen::after {
+    background: #7c3aed; /* Qwen Purple */
+  }
+
+  .agent-tab-close {
+    opacity: 0;
+    width: 14px;
+    height: 14px;
+    border-radius: 99px;
+    display: grid;
+    place-items: center;
+    color: #94a3b8;
+    transition: all 0.15s;
+    margin-left: 2px;
+  }
+
+  .agent-tab:hover .agent-tab-close,
+  .agent-tab-active .agent-tab-close {
+    opacity: 0.6;
+  }
+
+  .agent-tab-close:hover {
+    opacity: 1 !important;
+    background: rgba(0, 0, 0, 0.08);
+    color: #ef4444;
+  }
+
+  .agent-tab-plus-btn {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    display: grid;
+    place-items: center;
+    color: #64748b;
+    cursor: pointer;
+    background: transparent;
+    border: none;
+    margin-left: 6px;
+    transition: all 0.2s;
+  }
+
+  .agent-tab-plus-btn:hover {
+    color: #0f172a;
+    background: rgba(0, 0, 0, 0.05);
+  }
+
+  /* Empty Project Welcoming View */
+  .empty-project-welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: calc(100vh - 12rem);
+    padding: 40px 20px;
+    background: radial-gradient(circle at 50% 30%, rgba(59, 130, 246, 0.02) 0%, transparent 60%);
+    text-align: center;
+  }
+
+  .empty-project-welcome-box {
+    max-width: 580px;
+    width: 100%;
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 16px;
+    padding: 38px;
+    box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.04);
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .empty-project-welcome-title {
+    font-size: 22px;
+    font-weight: 800;
+    color: #0f172a;
+    letter-spacing: -0.02em;
+  }
+
+  .empty-project-welcome-desc {
+    font-size: 13px;
+    color: #64748b;
+    line-height: 1.55;
+    margin-top: -12px;
+  }
+
+  .empty-project-welcome-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    text-align: left;
+  }
+
+  /* Selection Grid & Selector Cards for Agents */
+  .agent-selection-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
+  .agent-selector-card {
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 12px;
+    padding: 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    background: #fafafa;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .agent-selector-card:hover {
+    background: #ffffff;
+    border-color: rgba(59, 130, 246, 0.25);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
+  }
+
+  .agent-selector-card-active {
+    background: #ffffff;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 1px #3b82f6, 0 8px 16px rgba(59, 130, 246, 0.06);
+  }
+
+  .agent-selector-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1e293b;
+  }
+
+  .agent-selector-desc {
+    font-size: 11px;
+    color: #64748b;
+    margin-top: 2px;
+  }
+
+  /* Glowing effect for running agent tabs */
+  .agent-tab-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 99px;
+  }
+
+  .agent-tab-status-running {
+    background: #22c55e;
+    box-shadow: 0 0 8px #22c55e;
+    animation: statusPulse 1.8s infinite ease-in-out;
+  }
+
+  @keyframes statusPulse {
+    0%, 100% { opacity: 0.6; transform: scale(0.9); }
+    50% { opacity: 1; transform: scale(1.1); }
+  }
 }
+
+

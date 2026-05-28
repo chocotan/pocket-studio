@@ -23,6 +23,7 @@ func main() {
 	}
 	mux.HandleFunc("/ws/web", hub.ServeWebSocket)
 	mux.HandleFunc("/ws/daemon", hub.ServeDaemonSocket)
+	mux.HandleFunc("/ws/terminal", hub.ServeTerminalWebSocket)
 	mux.HandleFunc("/api/", hub.ServeAPI)
 
 	log.Printf("PocketStudio server listening on http://localhost%s", *addr)

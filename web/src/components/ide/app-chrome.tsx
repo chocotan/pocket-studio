@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { Code2, Monitor, Plus, Search, Trash2, X, Settings, Home, LayoutPanelLeft, Terminal, Bot, Server } from "lucide-react";
+import { Code2, Monitor, Plus, Search, Trash2, X, Settings, Home, LayoutPanelLeft, Terminal, Bot, Server, Folder, ArrowRight, Sparkles, HardDrive } from "lucide-react";
+import { ProviderIcon } from "@lobehub/icons";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,24 +21,82 @@ import {
 } from "@/lib/session-utils";
 import { cn } from "@/lib/utils";
 
-export function ActivityBar({
-  currentTaskId,
-  tasks,
-  taskRecords,
-  view,
-  onCreateSession,
-  onOpenDashboard,
-  onOpenSearch,
-  onOpenTask
+// --- Map agent name to provider key for Lobe Icons ---
+export function getProviderKey(agentName: string): string {
+  const name = (agentName || "").toLowerCase().trim();
+  if (name.includes("claude") || name === "claude_code" || name === "claude-code") return "anthropic";
+  if (name.includes("gemini")) return "google";
+  if (name.includes("copilot") || name === "github-copilot") return "github";
+  if (name.includes("deepseek")) return "deepseek";
+  if (name.includes("openai") || name.includes("gpt")) return "openai";
+  if (name.includes("qwen")) return "qwen";
+  return "openai";
+}
+
+// --- Beautiful custom AgentIcon with Lobe Icons ---
+export function AgentIcon({
+  agentName,
+  className = "size-5",
+  active = false
 }: {
-  currentTaskId: string;
-  tasks: string[];
-  taskRecords: Map<string, TaskRecord>;
+  agentName: string;
+  className?: string;
+  active?: boolean;
+}) {
+  const provider = getProviderKey(agentName);
+  return (
+    <div 
+      className={cn(
+        "relative flex items-center justify-center rounded-lg border border-slate-100 bg-white p-1 shadow-sm transition-all duration-300", 
+        active && "border-blue-200 bg-blue-50/50 shadow-md ring-2 ring-blue-500/20 scale-105", 
+        className
+      )}
+    >
+      <ProviderIcon provider={provider} size={18} type="color" />
+    </div>
+  );
+}
+
+// --- Deterministic hash-based gradient for project initials ---
+export function getProjectGradient(name: string) {
+  let hash = 0;
+  const projectName = name || "Project";
+  for (let i = 0; i < projectName.length; i++) {
+    hash = projectName.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  
+  // Choose beautiful low-saturation hues (slate, violet, steel blue, sage, charcoal, teal)
+  const hues = [200, 215, 230, 260, 280, 160, 185];
+  const hue = hues[Math.abs(hash) % hues.length];
+  
+  const colorA = `hsl(${hue}, 38%, 42%)`;
+  const colorB = `hsl(${hue}, 48%, 28%)`;
+  
+  return {
+    background: `linear-gradient(135deg, ${colorA} 0%, ${colorB} 100%)`
+  };
+}
+
+export function ActivityBar({
+  currentProjectKey,
+  projects,
+  view,
+  onSelectProject,
+  onOpenDashboard,
+  onOpenSearch
+}: {
+  currentProjectKey: string;
+  projects: Array<{
+    key: string;
+    deviceId: string;
+    workspacePath: string;
+    workspaceName: string;
+    activeAgent?: string;
+  }>;
   view: "dashboard" | "task";
-  onCreateSession: () => void;
+  onSelectProject: (deviceId: string, path: string) => void;
   onOpenDashboard: () => void;
   onOpenSearch: () => void;
-  onOpenTask: (taskId: string) => void;
 }) {
   return (
     <aside className="activity-bar">
@@ -52,31 +111,37 @@ export function ActivityBar({
         <button 
           className="activity-bar-item" 
           onClick={onOpenSearch}
-          title="搜索"
+          title="全局搜索"
         >
           <Search className="size-5" />
         </button>
         
         <div className="activity-bar-separator" />
         
-        {tasks.map((taskId) => (
-          <button 
-            key={taskId} 
-            className={cn("activity-bar-item", currentTaskId === taskId && view === "task" && "activity-bar-item-active")} 
-            onClick={() => onOpenTask(taskId)}
-            title={sessionDisplayTitle(taskRecords.get(taskId), taskId)}
-          >
-            <LayoutPanelLeft className="size-5" />
-          </button>
-        ))}
-        
-        <button 
-          className="activity-bar-item mt-2 text-primary" 
-          onClick={onCreateSession}
-          title="创建会话"
-        >
-          <Plus className="size-5" />
-        </button>
+        {projects.map((project) => {
+          const isActive = view === "task" && currentProjectKey === project.key;
+          const letter = project.workspaceName.trim().charAt(0).toUpperCase() || "P";
+          const gradientStyle = getProjectGradient(project.workspaceName);
+          
+          return (
+            <button 
+              key={project.key} 
+              className={cn(
+                "activity-bar-item activity-bar-project-item flex items-center justify-center", 
+                isActive && "activity-bar-item-active"
+              )} 
+              onClick={() => onSelectProject(project.deviceId, project.workspacePath)}
+              title={`项目: ${project.workspaceName}\n设备: ${project.deviceId}\n物理路径: ${project.workspacePath}`}
+            >
+              <div 
+                className="project-letter-badge" 
+                style={gradientStyle}
+              >
+                {letter}
+              </div>
+            </button>
+          );
+        })}
       </div>
 
       <div className="activity-bar-bottom">
@@ -109,6 +174,12 @@ export function StatusBar({
         <div className={cn("size-2 rounded-full", conn === "Connected" ? "bg-green-500" : "bg-muted-foreground")} />
         <span>{conn === "Connected" ? "在线" : conn}</span>
       </div>
+      {agentLabel ? (
+        <div className="flex items-center gap-1.5 border-r border-border pr-4">
+          <Bot className="size-3.5" />
+          <span>{agentLabel}</span>
+        </div>
+      ) : null}
       <span className="font-medium text-foreground">{status || "idle"}</span>
       <span className="min-w-0 truncate ml-auto">{workspacePath || "未设置目录"}</span>
     </footer>
@@ -225,304 +296,241 @@ export function ConnectionBadge({ conn }: { conn: string }) {
   );
 }
 
-export function SidebarSessions({
-  tasks,
-  taskRecords,
-  currentTaskId,
-  onOpenTask,
-  onDeleteTask
-}: {
-  tasks: string[];
-  taskRecords: Map<string, TaskRecord>;
-  currentTaskId: string;
-  onOpenTask: (taskId: string) => void;
-  onDeleteTask: (taskId: string) => void;
-}) {
-  return (
-    <div className="min-h-0 overflow-auto px-3 py-4">
-      <div className="mb-2 px-2 text-xs font-medium uppercase text-muted-foreground">最近会话</div>
-      <div className="grid gap-1">
-        {tasks.length === 0 ? (
-          <div className="px-2 py-8 text-center text-xs text-muted-foreground">暂无会话</div>
-        ) : tasks.map((taskId) => (
-          <SidebarSessionItem
-            active={taskId === currentTaskId}
-            key={taskId}
-            record={taskRecords.get(taskId)}
-            taskId={taskId}
-            onDelete={() => onDeleteTask(taskId)}
-            onOpen={() => onOpenTask(taskId)}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SidebarSessionItem({
-  active,
-  taskId,
-  record,
-  onDelete,
-  onOpen
-}: {
-  active: boolean;
-  taskId: string;
-  record: TaskRecord | undefined;
-  onDelete: () => void;
-  onOpen: () => void;
-}) {
-  const title = sessionDisplayTitle(record, taskId);
-  const subtitle = [agentDisplayName(record?.agent || ""), workspaceNameFromPath(record?.workspace_path || "")].filter(Boolean).join(" / ");
-  return (
-    <div className={cn("sidebar-session group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 rounded-lg", active && "sidebar-session-active")}>
-      <button className="min-w-0 px-2 py-2 text-left" onClick={onOpen}>
-        <span className="block truncate text-sm font-medium">{title}</span>
-        <span className="block truncate text-xs text-muted-foreground">{subtitle || "未设置目录"}</span>
-      </button>
-      <Button
-        className="session-delete-button mr-1 h-7 w-7 px-0"
-        variant="ghost"
-        size="sm"
-        onClick={(event) => {
-          event.stopPropagation();
-          onDelete();
-        }}
-        aria-label="删除会话"
-      >
-        <Trash2 className="size-3.5" />
-      </Button>
-    </div>
-  );
-}
-
+// --- Redesigned Project-Centric Dashboard ---
 export function Dashboard({
   devices,
   tasks,
   taskRecords,
-  selectedDeviceId,
-  onSelectDevice,
-  onCreateFromDevice,
-  onDeleteTask,
-  onOpenTask
+  projects,
+  onSelectProject,
+  onAddProject
 }: {
   devices: Device[];
   tasks: string[];
   taskRecords: Map<string, TaskRecord>;
-  selectedDeviceId: string;
-  onSelectDevice: (device: Device) => void;
-  onCreateFromDevice: (device: Device) => void;
-  onDeleteTask: (taskId: string) => void;
-  onOpenTask: (taskId: string) => void;
+  projects: Array<{
+    key: string;
+    deviceId: string;
+    deviceName: string;
+    workspacePath: string;
+    workspaceName: string;
+    activeAgent?: string;
+    sessionCount: number;
+  }>;
+  onSelectProject: (deviceId: string, path: string) => void;
+  onAddProject: (deviceId: string, path: string) => void;
 }) {
-  const selectedDevice = devices.find((device) => device.id === selectedDeviceId) || devices[0];
-  const deviceTasks = tasks.filter((taskId) => !selectedDevice || taskRecords.get(taskId)?.device_id === selectedDevice.id);
+  const [targetDeviceId, setTargetDeviceId] = useState(devices[0]?.id || "");
+  const [customPath, setCustomPath] = useState("");
+  
+  React.useEffect(() => {
+    if (devices.length > 0 && !targetDeviceId) {
+      setTargetDeviceId(devices[0].id);
+    }
+  }, [devices]);
+
+  const activeDevice = devices.find(d => d.id === targetDeviceId) || devices[0];
+
+  const handleCreateProject = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetDeviceId || !customPath.trim()) return;
+    onAddProject(targetDeviceId, customPath.trim());
+    setCustomPath("");
+  };
+
   return (
-    <div className="dashboard-canvas min-h-0 h-full overflow-auto p-8 max-sm:p-4">
+    <div className="dashboard-canvas min-h-0 h-full overflow-auto p-8 max-sm:p-4 bg-slate-50/50">
       <div className="mx-auto grid max-w-[1200px] gap-8">
-        <div className="flex flex-col gap-1.5">
-          <h2 className="text-3xl font-semibold tracking-tight text-foreground">欢迎回到工作台</h2>
-          <p className="text-sm text-muted-foreground">管理远程设备上的开发环境，启动由 AI 驱动的编程会话。</p>
+        
+        {/* Welcome Section */}
+        <div className="flex flex-col gap-2">
+          <h2 className="text-3xl font-bold tracking-tight text-slate-900">欢迎来到 PocketStudio</h2>
+          <p className="text-sm text-slate-500 max-w-[600px] leading-relaxed">
+            管理您远程机器上的代码项目，在此直接加载工作区的文件与终端，并自由拉起多个 AI Agent 实例进行高效协作。
+          </p>
         </div>
         
-        {/* Metric Cards Row */}
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <Card className="dashboard-panel">
+        {/* Stats Row */}
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Card className="dashboard-panel border shadow-sm rounded-xl">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">在线设备</CardTitle>
-              <Server className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-xs font-semibold text-slate-400 uppercase tracking-wider">活跃项目</CardTitle>
+              <Folder className="h-4 w-4 text-slate-400" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{devices.length}</div>
+              <div className="text-3xl font-extrabold text-slate-800">{projects.length}</div>
             </CardContent>
           </Card>
-          <Card className="dashboard-panel">
+          <Card className="dashboard-panel border shadow-sm rounded-xl">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">进行中会话</CardTitle>
-              <Terminal className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-xs font-semibold text-slate-400 uppercase tracking-wider">在线设备</CardTitle>
+              <Monitor className="h-4 w-4 text-slate-400" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">{tasks.length}</div>
+              <div className="text-3xl font-extrabold text-slate-800">{devices.length}</div>
             </CardContent>
           </Card>
-          <Card className="dashboard-panel">
+          <Card className="dashboard-panel border shadow-sm rounded-xl">
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium text-muted-foreground">可用 Agent 引擎</CardTitle>
-              <Bot className="h-4 w-4 text-muted-foreground" />
+              <CardTitle className="text-xs font-semibold text-slate-400 uppercase tracking-wider">运行中会话</CardTitle>
+              <Bot className="h-4 w-4 text-slate-400" />
             </CardHeader>
             <CardContent>
-              <div className="text-2xl font-bold">
-                {devices.reduce((acc, dev) => acc + (dev.agents?.length || (dev.agent ? 1 : 0)), 0)}
-              </div>
+              <div className="text-3xl font-extrabold text-slate-800">{tasks.length}</div>
             </CardContent>
           </Card>
         </div>
 
-        <div className="grid min-h-[500px] gap-6 lg:grid-cols-[minmax(0,1fr)_400px]">
-          <Card className="dashboard-panel flex flex-col overflow-hidden border-0 shadow-sm ring-1 ring-border/50">
-            <CardHeader className="border-b bg-card px-6 py-5">
-              <CardTitle className="text-lg">已连接的设备</CardTitle>
-              <CardDescription>选择一台设备以查看其运行状态和会话列表</CardDescription>
-            </CardHeader>
-            <CardContent className="flex-1 overflow-auto p-0 bg-muted/20">
-              {devices.length === 0 ? (
-                <div className="flex h-full items-center justify-center p-8">
-                  <EmptyState title="无在线设备" description="请确保远程机器上的 Agent Daemon 正在运行并连接至平台。" />
-                </div>
-              ) : (
-                <div className="divide-y divide-border/50">
-                  {devices.map((device) => (
-                    <DeviceTreeRow
-                      device={device}
-                      key={device.id}
-                      selected={device.id === selectedDevice?.id}
-                      onCreate={() => onCreateFromDevice(device)}
-                      onSelect={() => onSelectDevice(device)}
-                    />
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+        {/* Two Columns Layout */}
+        <div className="grid gap-6 lg:grid-cols-[1fr_380px] items-start">
           
-          <Card className="dashboard-panel flex flex-col min-h-0 border-0 shadow-sm ring-1 ring-border/50">
-            <CardHeader className="border-b bg-card px-6 py-5 flex flex-row items-center justify-between space-y-0">
-              <div>
-                <CardTitle className="text-lg">近期会话</CardTitle>
-                <CardDescription className="mt-1.5">{selectedDevice ? selectedDevice.name || selectedDevice.id : "未选择设备"}</CardDescription>
-              </div>
-              {selectedDevice && (
-                <Button onClick={() => onCreateFromDevice(selectedDevice)} size="sm" className="shadow-sm">
-                  <Plus className="mr-1 size-3.5" />
-                  新建
-                </Button>
-              )}
-            </CardHeader>
-            <CardContent className="flex-1 overflow-auto p-0 bg-muted/10">
-              <div className="p-4">
-                {deviceTasks.length === 0 ? (
-                  <EmptyState title="暂无会话" description="点击右上角新建按钮，或者在左侧设备列表中快速创建。" />
-                ) : (
-                  <div className="grid gap-3">
-                    {deviceTasks.map((taskId) => (
-                      <SessionDeviceItem
-                        key={taskId}
-                        taskId={taskId}
-                        record={taskRecords.get(taskId)}
-                        onDelete={() => onDeleteTask(taskId)}
-                        onOpen={() => onOpenTask(taskId)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DeviceTreeRow({
-  device,
-  selected,
-  onCreate,
-  onSelect
-}: {
-  device: Device;
-  selected: boolean;
-  onCreate: () => void;
-  onSelect: () => void;
-}) {
-  const agents = device.agents?.length ? device.agents.map((agent) => agent.label || agentDisplayName(agent.name)) : [agentDisplayName(device.agent || "")];
-  return (
-    <div className={cn("device-row group flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 transition-colors", selected ? "bg-muted/50" : "hover:bg-muted/30")}>
-      <button className="grid min-w-0 flex-1 gap-3 text-left w-full" onClick={onSelect}>
-        <div className="flex min-w-0 items-center gap-4">
-          <div className={cn("device-icon grid size-12 place-items-center rounded-xl shadow-sm border", selected ? "bg-primary text-primary-foreground border-primary" : "bg-card text-muted-foreground border-border")}>
-            <Monitor className="size-6" />
-          </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <div className="truncate font-semibold text-base text-foreground">{device.name || device.id}</div>
-              <div className="size-2 rounded-full bg-green-500" title="Online"></div>
+          {/* Projects Column */}
+          <div className="grid gap-6">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <Folder className="size-5 text-slate-500" />
+                我的项目列表
+              </h3>
             </div>
-            <div className="truncate text-xs text-muted-foreground mt-0.5 font-mono">{device.id}</div>
-          </div>
-        </div>
-        
-        {/* Detail Row (Agents & Workspaces) */}
-        <div className="grid gap-2.5 pl-[64px]">
-          <div className="flex flex-wrap gap-1.5">
-            {agents.length === 0 ? <Badge variant="secondary" className="font-normal text-xs">未检测到 Agent</Badge> : agents.map((agent) => <Badge key={agent} variant="outline" className="font-normal text-xs bg-card">{agent}</Badge>)}
-          </div>
-          <div className="grid gap-1">
-            {(device.workspaces || []).map((workspace) => (
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground" key={workspace.id}>
-                <Code2 className="size-3.5" />
-                <span className="font-medium text-foreground">{workspace.name || workspace.id}</span>
-                <span className="opacity-50">·</span>
-                <span className="truncate font-mono opacity-80">{workspace.path}</span>
+
+            {projects.length === 0 ? (
+              <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-white/50 p-12 text-center shadow-sm">
+                <Folder className="size-12 text-slate-300 stroke-[1.5] mb-4" />
+                <h4 className="font-bold text-slate-700 text-sm">暂无活跃项目</h4>
+                <p className="text-xs text-slate-400 max-w-[240px] mt-1 leading-relaxed">请在右侧选择机器与路径，创建一个新项目以开始开发。</p>
               </div>
-            ))}
+            ) : (
+              <div className="project-grid">
+                {projects.map((project) => (
+                  <div 
+                    key={project.key} 
+                    className="project-card shadow-sm cursor-pointer group"
+                    onClick={() => onSelectProject(project.deviceId, project.workspacePath)}
+                  >
+                    <div className="project-card-header">
+                      <div 
+                        className="project-letter-badge project-letter-badge-lg" 
+                        style={getProjectGradient(project.workspaceName)}
+                      >
+                        {project.workspaceName.trim().charAt(0).toUpperCase() || "P"}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="project-card-title truncate">{project.workspaceName}</div>
+                        <div className="project-card-device">
+                          <div className="size-1.5 rounded-full bg-green-500" />
+                          <span className="truncate">{project.deviceName}</span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="project-card-path truncate" title={project.workspacePath}>
+                      {project.workspacePath}
+                    </div>
+
+                    <div className="project-card-meta">
+                      <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                        <Bot className="size-3.5" />
+                        <span>{project.sessionCount} 个 AI 实例</span>
+                      </div>
+                      
+                      <div className="flex items-center gap-1 text-xs font-semibold text-primary group-hover:translate-x-0.5 transition-transform">
+                        <span>打开项目</span>
+                        <ArrowRight className="size-3.5" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
+
+          {/* Quick Start Sidebar Column */}
+          <div className="grid gap-6">
+            
+            {/* Create Project Card */}
+            <Card className="border shadow-sm rounded-xl overflow-hidden bg-white">
+              <CardHeader className="bg-slate-50/50 border-b p-5">
+                <CardTitle className="text-base font-bold text-slate-800">新建/注册项目</CardTitle>
+                <CardDescription className="text-xs text-slate-400">指定机器上的某个目录作为一个独立项目。</CardDescription>
+              </CardHeader>
+              <CardContent className="p-5">
+                <form onSubmit={handleCreateProject} className="grid gap-4">
+                  <label className="grid gap-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                    目标机器
+                    <Select value={targetDeviceId} onValueChange={setTargetDeviceId}>
+                      <SelectTrigger className="w-full h-9 rounded-lg"><SelectValue placeholder="选择机器" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          {devices.length === 0 && <SelectItem value="none" disabled>无可用机器</SelectItem>}
+                          {devices.map((d) => <SelectItem key={d.id} value={d.id}>{d.name || d.id}</SelectItem>)}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </label>
+
+                  <label className="grid gap-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                    物理目录路径
+                    <Input
+                      className="h-9 rounded-lg"
+                      value={customPath}
+                      onChange={(e) => setCustomPath(e.target.value)}
+                      placeholder={activeDevice ? defaultWorkspacePath(activeDevice) : "/home/user/my-project"}
+                    />
+                  </label>
+
+                  <Button 
+                    type="submit" 
+                    disabled={!targetDeviceId || !customPath.trim()} 
+                    className="w-full h-9 rounded-lg shadow-sm"
+                  >
+                    <Plus className="mr-1.5 size-4" />
+                    创建并进入项目
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+
+            {/* Online Devices Panel */}
+            <Card className="border shadow-sm rounded-xl overflow-hidden bg-white">
+              <CardHeader className="bg-slate-50/50 border-b p-5">
+                <CardTitle className="text-base font-bold text-slate-800">在线设备列表</CardTitle>
+                <CardDescription className="text-xs text-slate-400">目前注册的远程 daemon 节点信息。</CardDescription>
+              </CardHeader>
+              <CardContent className="p-0 divide-y divide-slate-100">
+                {devices.length === 0 ? (
+                  <div className="p-6 text-center text-xs text-slate-400">暂无在线设备</div>
+                ) : devices.map((d) => (
+                  <div key={d.id} className="p-4 flex items-start gap-3">
+                    <div className="size-9 rounded-lg bg-slate-50 border flex items-center justify-center text-slate-500 shrink-0">
+                      <Monitor className="size-4" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-bold text-slate-700 text-sm truncate">{d.name || d.id}</span>
+                        <div className="size-1.5 rounded-full bg-green-500 shrink-0" />
+                      </div>
+                      <span className="block font-mono text-[10px] text-slate-400 truncate mt-0.5">{d.id}</span>
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        {(d.agents?.length ? d.agents : [{ name: d.agent || "claude", label: d.agent_label }]).map(a => (
+                          <Badge key={a.name} variant="outline" className="font-normal text-[10px] bg-slate-50 text-slate-500 py-0 px-1.5 h-5">
+                            {a.label || agentDisplayName(a.name)}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+            
+          </div>
+          
         </div>
-      </button>
-      <div className="flex items-center justify-end sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-        <Button variant="secondary" size="sm" onClick={onCreate} className="shadow-sm">
-          <Plus className="mr-1 size-3.5" />
-          新建会话
-        </Button>
       </div>
     </div>
   );
 }
 
-function SessionDeviceItem({ taskId, record, onDelete, onOpen }: { taskId: string; record: TaskRecord | undefined; onDelete: () => void; onOpen: () => void }) {
-  return (
-    <div className="session-device-item group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-xl border bg-card px-4 py-3 shadow-sm transition-all hover:shadow-md hover:border-border/80">
-      <button className="min-w-0 text-left flex flex-col gap-1.5" onClick={onOpen}>
-        <div className="flex items-center gap-2">
-          <span className="block truncate text-sm font-semibold text-foreground">{sessionDisplayTitle(record, taskId)}</span>
-          <Badge variant={statusBadgeVariant(record?.status)} className="h-5 text-[10px] uppercase font-bold tracking-wider">{statusLabel(record?.status)}</Badge>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1"><Bot className="size-3" /> {agentDisplayName(record?.agent || "")}</span>
-          <span className="opacity-40">•</span>
-          <span className="truncate flex-1 font-mono">{record?.workspace_path || taskId}</span>
-        </div>
-        <span className="block text-[11px] text-muted-foreground/70">{formatRecordTime(record?.updated_at || record?.started_at)}</span>
-      </button>
-      <div className="flex flex-col items-end gap-2">
-        <Button
-          className="session-delete-button size-8 rounded-full opacity-0 transition-all hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
-          variant="ghost"
-          size="icon"
-          onClick={(event) => {
-            event.stopPropagation();
-            onDelete();
-          }}
-          aria-label="删除会话"
-        >
-          <Trash2 className="size-4" />
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function EmptyState({ title, description }: { title: string; description: string }) {
-  return (
-    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card/50 p-10 text-center">
-      <div className="grid size-12 place-items-center rounded-full bg-muted text-muted-foreground mb-4">
-        <Monitor className="size-6 opacity-50" />
-      </div>
-      <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-      <p className="mt-1 text-xs text-muted-foreground max-w-[200px] leading-relaxed">{description}</p>
-    </div>
-  );
-}
 
 export function NewSessionDialog({
   devices,
@@ -567,18 +575,45 @@ export function NewSessionDialog({
             </SelectContent>
           </Select>
         </label>
-        <label className="grid gap-2 text-sm font-medium">
-          Agent
-          <Select value={selectedAgent || "none"} onValueChange={onAgentChange}>
-            <SelectTrigger><SelectValue placeholder="选择 Agent" /></SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                {agents.length === 0 && <SelectItem value="none" disabled>暂无可用 Agent</SelectItem>}
-                {agents.map((agent) => <SelectItem key={agent.name} value={agent.name}>{agent.label || agentDisplayName(agent.name)}</SelectItem>)}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-        </label>
+        <div className="grid gap-2 text-sm font-medium text-slate-700">
+          <span>选择 AI 开发引擎</span>
+          <div className="agent-selection-grid">
+            {agents.length === 0 ? (
+              <div className="text-xs text-slate-400 p-2">暂无可用 Agent</div>
+            ) : (
+              agents.map((agent) => {
+                const isActive = selectedAgent === agent.name;
+                const provider = getProviderKey(agent.name);
+                
+                let desc = "远程开发引擎";
+                if (agent.name.includes("claude")) desc = "最强工程代码与指令执行";
+                else if (agent.name.includes("gemini")) desc = "双子座多模态长文本引擎";
+                else if (agent.name.includes("copilot")) desc = "微软全能代码快捷助手";
+                else if (agent.name.includes("deepseek")) desc = "高性价比深度推理";
+                else if (agent.name.includes("qwen")) desc = "先进中文推理";
+                
+                return (
+                  <div
+                    key={agent.name}
+                    className={cn(
+                      "agent-selector-card flex items-center gap-3 cursor-pointer p-2.5 rounded-xl border border-slate-100 transition-all duration-200",
+                      isActive && "agent-selector-card-active border-blue-500 bg-blue-50/5 shadow-sm"
+                    )}
+                    onClick={() => onAgentChange && onAgentChange(agent.name)}
+                  >
+                    <div className="shrink-0 rounded-lg p-1 bg-white border border-slate-100/50 shadow-sm flex items-center justify-center">
+                      <ProviderIcon provider={provider} size={18} type="color" />
+                    </div>
+                    <div className="min-w-0 text-left">
+                      <div className="agent-selector-title text-xs font-bold text-slate-800 truncate">{agent.label || agentDisplayName(agent.name)}</div>
+                      <div className="agent-selector-desc text-[9px] text-slate-400 truncate mt-0.5">{desc}</div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
         <label className="grid gap-2 text-sm font-medium">
           项目工作目录
           <Input

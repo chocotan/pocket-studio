@@ -23,6 +23,7 @@ import {
   Save,
   Search,
   Send,
+  Plus,
   Square,
   Terminal as TerminalIcon,
   X
@@ -49,8 +50,10 @@ import {
   type TimelineItem
 } from "@/lib/agent-events";
 import type { AgentCapability, Device, FileEntry, OpenFile, TaskRecord } from "@/lib/types";
-import { agentDisplayName, defaultWorkspacePath, languageForPath, workspaceNameFromPath } from "@/lib/session-utils";
+import { agentDisplayName, defaultWorkspacePath, languageForPath, workspaceNameFromPath, sessionDisplayTitle } from "@/lib/session-utils";
 import { cn } from "@/lib/utils";
+import { AgentIcon, getProviderKey } from "./app-chrome";
+import { ProviderIcon } from "@lobehub/icons";
 
 type FixedTabID = "explorer" | "chat" | "terminal";
 type FileTabID = `file:${string}`;
@@ -115,7 +118,15 @@ export function SessionWorkspace({
   onToggleExplorer,
   onToggleTerminal,
   onWorkspacePathChange,
-  onToggleToolResult
+  onToggleToolResult,
+  
+  // New props for project-centric agent tabs
+  projectTasks = [],
+  taskRecords = new Map(),
+  currentTaskId = "",
+  onSelectTask,
+  onDeleteTask,
+  onNewSession
 }: {
   activeAgent: string;
   agentLabel: string;
@@ -161,6 +172,12 @@ export function SessionWorkspace({
   onToggleTerminal: () => void;
   onWorkspacePathChange: (value: string) => void;
   onToggleToolResult: (id: string) => void;
+  
+  projectTasks?: string[];
+  taskRecords?: Map<string, TaskRecord>;
+  currentTaskId?: string;
+  onSelectTask?: (id: string) => void;
+  onDeleteTask?: (id: string) => void;
 }) {
   const canSend = Boolean(prompt.trim() && selectedDevice && effectiveWorkspacePath);
   const emptySession = timelineItems.length === 0 && !waitingForAgent;
@@ -251,73 +268,57 @@ export function SessionWorkspace({
         onScroll={onScroll}
         onStopTask={onStopTask}
         onToggleToolResult={onToggleToolResult}
+        projectTasks={projectTasks}
+        taskRecords={taskRecords}
+        currentTaskId={currentTaskId}
+        onSelectTask={onSelectTask}
+        onDeleteTask={onDeleteTask}
+        onNewSession={onNewSession}
+        activeAgent={activeAgent}
+        availableAgents={availableAgents}
+        onAgentChange={onAgentChange}
       />
     );
   };
 
   return (
     <section className="ide-workbench min-h-0">
-      {emptySession ? (
-        <div className="session-canvas min-h-0 overflow-auto px-6 py-5 max-sm:px-4">
-          <StartSessionPanel
-            activeAgent={activeAgent}
-            agentLabel={agentLabel}
-            availableAgents={availableAgents}
-            canSend={canSend}
-            currentModelID={currentModelID}
-            devices={devices}
-            effectiveWorkspacePath={effectiveWorkspacePath}
-            isLoading={waitingForAgent}
-            models={sessionModels}
-            prompt={prompt}
-            selectedDevice={selectedDevice}
-            selectedDeviceId={selectedDeviceId}
-            onAgentChange={onAgentChange}
-            onDeviceChange={onDeviceChange}
-            onDispatch={onDispatch}
-            onModelChange={onModelChange}
-            onPromptChange={onPromptChange}
-            onWorkspacePathChange={onWorkspacePathChange}
-          />
-        </div>
-      ) : (
-        <Group className="h-full w-full" orientation="horizontal" resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}>
-          {leftTabs.length > 0 ? (
-            <>
-              <Panel defaultSize="18%" minSize="12%" maxSize="34%">
-                <TabGroup group="left" tabs={leftTabs} activeTab={activeLeftTab} files={openFiles} onActivate={activateTab} onCloseFile={onCloseFile} onDropTab={moveTab} onSaveFile={onFileSave}>
-                  {activeLeftTab ? renderTab(activeLeftTab) : <TabGroupEmpty label="左侧标签组" />}
-                </TabGroup>
-              </Panel>
-              <Separator className="resize-handle" id="left-main-tabs-separator" />
-            </>
-          ) : null}
-          <Panel defaultSize={leftTabs.length > 0 ? "82%" : "100%"} minSize="45%">
-            <Group className="h-full w-full" orientation="vertical" resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}>
-              <Panel defaultSize={bottomTabs.length > 0 ? "70%" : "100%"} minSize="35%">
-                <TabGroup group="main" tabs={mainTabs} activeTab={activeMainTab} files={openFiles} onActivate={activateTab} onCloseFile={onCloseFile} onDropTab={moveTab} onSaveFile={onFileSave}>
-                  {activeMainTab ? renderTab(activeMainTab) : <TabGroupEmpty label="主编辑区" />}
-                </TabGroup>
-              </Panel>
-              {bottomTabs.length > 0 && terminalVisible ? (
-                <>
-                  <Separator className="resize-handle-horizontal" id="main-bottom-tabs-separator" />
-                  <Panel defaultSize="30%" minSize="16%" maxSize="55%">
-                    <TabGroup group="bottom" tabs={bottomTabs} activeTab={activeBottomTab} files={openFiles} onActivate={activateTab} onCloseFile={onCloseFile} onDropTab={moveTab} onSaveFile={onFileSave}>
-                      {activeBottomTab ? renderTab(activeBottomTab) : <TabGroupEmpty label="底部标签组" />}
-                    </TabGroup>
-                  </Panel>
-                </>
-              ) : null}
-              {bottomTabs.length > 0 && !terminalVisible ? (
-                <div className="bottom-tab-dock">
-                  <TabStrip group="bottom" tabs={bottomTabs} activeTab="" files={openFiles} onActivate={activateTab} onCloseFile={onCloseFile} onDropTab={moveTab} onSaveFile={onFileSave} />
-                </div>
-              ) : null}
-            </Group>
-          </Panel>
-        </Group>
-      )}
+      <Group className="h-full w-full" orientation="horizontal" resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}>
+        {leftTabs.length > 0 ? (
+          <>
+            <Panel defaultSize="18%" minSize="12%" maxSize="34%">
+              <TabGroup group="left" tabs={leftTabs} activeTab={activeLeftTab} files={openFiles} onActivate={activateTab} onCloseFile={onCloseFile} onDropTab={moveTab} onSaveFile={onFileSave}>
+                {activeLeftTab ? renderTab(activeLeftTab) : <TabGroupEmpty label="左侧标签组" />}
+              </TabGroup>
+            </Panel>
+            <Separator className="resize-handle" id="left-main-tabs-separator" />
+          </>
+        ) : null}
+        <Panel defaultSize={leftTabs.length > 0 ? "82%" : "100%"} minSize="45%">
+          <Group className="h-full w-full" orientation="vertical" resizeTargetMinimumSize={{ fine: 8, coarse: 24 }}>
+            <Panel defaultSize={bottomTabs.length > 0 ? "70%" : "100%"} minSize="35%">
+              <TabGroup group="main" tabs={mainTabs} activeTab={activeMainTab} files={openFiles} onActivate={activateTab} onCloseFile={onCloseFile} onDropTab={moveTab} onSaveFile={onFileSave}>
+                {activeMainTab ? renderTab(activeMainTab) : <TabGroupEmpty label="主编辑区" />}
+              </TabGroup>
+            </Panel>
+            {bottomTabs.length > 0 && terminalVisible ? (
+              <>
+                <Separator className="resize-handle-horizontal" id="main-bottom-tabs-separator" />
+                <Panel defaultSize="30%" minSize="16%" maxSize="55%">
+                  <TabGroup group="bottom" tabs={bottomTabs} activeTab={activeBottomTab} files={openFiles} onActivate={activateTab} onCloseFile={onCloseFile} onDropTab={moveTab} onSaveFile={onFileSave}>
+                    {activeBottomTab ? renderTab(activeBottomTab) : <TabGroupEmpty label="底部标签组" />}
+                  </TabGroup>
+                </Panel>
+              </>
+            ) : null}
+            {bottomTabs.length > 0 && !terminalVisible ? (
+              <div className="bottom-tab-dock">
+                <TabStrip group="bottom" tabs={bottomTabs} activeTab="" files={openFiles} onActivate={activateTab} onCloseFile={onCloseFile} onDropTab={moveTab} onSaveFile={onFileSave} />
+              </div>
+            ) : null}
+          </Group>
+        </Panel>
+      </Group>
     </section>
   );
 }
@@ -684,7 +685,18 @@ function ChatPane({
   onRaw,
   onScroll,
   onStopTask,
-  onToggleToolResult
+  onToggleToolResult,
+  
+  // New props for project-centric agent tabs
+  projectTasks = [],
+  taskRecords = new Map(),
+  currentTaskId = "",
+  onSelectTask,
+  onDeleteTask,
+  onNewSession,
+  activeAgent,
+  availableAgents = [],
+  onAgentChange
 }: {
   agentLabel: string;
   currentModelID: string;
@@ -702,10 +714,170 @@ function ChatPane({
   onScroll: () => void;
   onStopTask: () => void;
   onToggleToolResult: (id: string) => void;
+  
+  projectTasks?: string[];
+  taskRecords?: Map<string, TaskRecord>;
+  currentTaskId?: string;
+  onSelectTask?: (id: string) => void;
+  onDeleteTask?: (id: string) => void;
+  onNewSession?: () => void;
+  activeAgent?: string;
+  availableAgents?: AgentCapability[];
+  onAgentChange?: (agent: string) => void;
 }) {
+  const hasSessions = projectTasks.length > 0;
+  
+  if (!hasSessions) {
+    // Beautiful empty project welcome state
+    return (
+      <section className="chat-pane h-full bg-slate-50/50">
+        <div className="empty-project-welcome">
+          <div className="empty-project-welcome-box">
+            <div className="flex justify-center">
+              <div className="size-16 rounded-2xl bg-primary/10 text-primary flex items-center justify-center border border-primary/20 shadow-sm">
+                <Brain className="size-8" />
+              </div>
+            </div>
+            
+            <div className="flex flex-col gap-2">
+              <h3 className="empty-project-welcome-title">在项目中启动您的第一个 AI Agent</h3>
+              <p className="empty-project-welcome-desc">
+                选择一个 AI 开发引擎，输入您的第一个开发指令，PocketStudio 将立即在此项目目录下启动对应的 Agent 实例。
+              </p>
+            </div>
+            
+            <div className="empty-project-welcome-controls w-full text-left">
+              <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block mb-2">
+                选择 AI 开发引擎
+              </span>
+              <div className="agent-selection-grid">
+                {availableAgents.map((agent) => {
+                  const isActive = activeAgent === agent.name;
+                  const provider = getProviderKey(agent.name);
+                  
+                  // Premium descriptive tags
+                  let desc = "全功能多角色开发引擎";
+                  if (agent.name.includes("claude")) {
+                    desc = "最强工程代码与指令执行";
+                  } else if (agent.name.includes("gemini")) {
+                    desc = "双子座多模态长文本引擎";
+                  } else if (agent.name.includes("copilot")) {
+                    desc = "微软全能代码快捷助手";
+                  } else if (agent.name.includes("deepseek")) {
+                    desc = "超高性价比深度推理引擎";
+                  } else if (agent.name.includes("qwen")) {
+                    desc = "阿里开源先进中文推理";
+                  }
+                  
+                  return (
+                    <div
+                      key={agent.name}
+                      className={cn(
+                        "agent-selector-card flex items-center gap-3 cursor-pointer p-3 rounded-xl border border-slate-100 transition-all duration-200",
+                        isActive && "agent-selector-card-active border-blue-500 bg-blue-50/5 shadow-sm"
+                      )}
+                      onClick={() => onAgentChange && onAgentChange(agent.name)}
+                    >
+                      <div className="shrink-0 rounded-lg p-1.5 bg-white border border-slate-100/50 shadow-sm flex items-center justify-center">
+                        <ProviderIcon provider={provider} size={22} type="color" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="agent-selector-title text-sm font-bold text-slate-800 truncate">{agent.label || agentDisplayName(agent.name)}</div>
+                        <div className="agent-selector-desc text-[10px] text-slate-400 truncate mt-0.5">{desc}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="start-composer shadow-sm rounded-xl overflow-hidden border bg-white">
+              <Textarea
+                className="start-composer-input resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 p-3 h-20 text-sm"
+                value={prompt}
+                onChange={(event) => onPromptChange(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+                  event.preventDefault();
+                  onDispatch();
+                }}
+                placeholder={`发消息给 ${agentLabel || "Agent"}，描述你想实现的特性、或者遇到的 Bug...`}
+              />
+              <div className="start-composer-actions p-2 border-t bg-slate-50 flex justify-between items-center">
+                <div className="start-composer-tools">
+                  <ComposerModelSelect currentModelID={currentModelID} models={sessionModels} onChange={onModelChange} />
+                </div>
+                <Button 
+                  className="start-send-button transition-colors size-8 rounded-lg shrink-0" 
+                  disabled={!prompt.trim() || waitingForAgent} 
+                  size="icon" 
+                  type="button" 
+                  onClick={onDispatch}
+                >
+                  {waitingForAgent ? <LoaderCircle className="animate-spin" /> : <Send />}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+  
   return (
-    <section className="chat-pane">
-      <div className="session-canvas min-h-0 overflow-auto px-4 py-4" ref={eventsRef} onScroll={onScroll}>
+    <section className="chat-pane h-full flex flex-col min-h-0 bg-white">
+      {/* Agent Instance Tabs Bar */}
+      <div className="agent-tabs-container">
+        {projectTasks.map((taskId) => {
+          const record = taskRecords.get(taskId);
+          const agentName = record?.agent || "claude";
+          const isActive = currentTaskId === taskId;
+          const title = sessionDisplayTitle(record, taskId);
+          const isRunning = record?.status === "running" || record?.status === "creating";
+          
+          return (
+            <div
+              key={taskId}
+              className={cn(
+                "agent-tab",
+                isActive && "agent-tab-active",
+                `agent-tab-${agentName.toLowerCase()}`
+              )}
+              onClick={() => onSelectTask && onSelectTask(taskId)}
+            >
+              {isRunning ? (
+                <div className="agent-tab-status-dot agent-tab-status-running" />
+              ) : (
+                <div className={cn("agent-tab-status-dot", record?.status === "completed" ? "bg-green-500" : record?.status === "failed" || record?.status === "killed" ? "bg-red-500" : "bg-slate-300")} />
+              )}
+              <AgentIcon agentName={agentName} className="size-4 shrink-0" active={isActive} />
+              <span className="truncate max-w-[120px] select-none text-xs">{title}</span>
+              <button
+                className="agent-tab-close"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDeleteTask && onDeleteTask(taskId);
+                }}
+                aria-label="关闭会话"
+              >
+                <X className="size-3" />
+              </button>
+            </div>
+          );
+        })}
+        
+        {/* + Launch New Agent Button */}
+        <button
+          className="agent-tab-plus-btn"
+          onClick={onNewSession}
+          title="在此项目启动新 AI 实例"
+        >
+          <Plus className="size-4" />
+        </button>
+      </div>
+      
+      <div className="session-canvas min-h-0 flex-1 overflow-auto px-4 py-4" ref={eventsRef} onScroll={onScroll}>
         {timelineItems.map((item, index) => {
           if (item.kind === "tool") {
             return <ToolBlock key={item.uiKey} item={item} resultExpanded={expandedToolResults.has(item.uiKey)} onToggleResult={() => onToggleToolResult(item.uiKey)} onRaw={onRaw} />;

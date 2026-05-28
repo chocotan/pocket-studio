@@ -259,19 +259,19 @@ export function agentDisplayName(agent: string) {
 }
 
 export type RouteState = {
-  view: "dashboard" | "task";
-  taskId: string;
+  view: "dashboard" | "project";
+  projectId: string;
 };
 
 export function routeFromLocation(): RouteState {
   const path = window.location.pathname;
-  const match = path.match(/^\/session\/([^/]+)$/);
-  if (match) return { view: "task", taskId: decodeURIComponent(match[1]) };
-  return { view: "dashboard", taskId: "" };
+  const match = path.match(/^\/project\/([^/]+)\/home$/) || path.match(/^\/project\/([^/]+)$/);
+  if (match) return { view: "project", projectId: decodeURIComponent(match[1]) };
+  return { view: "dashboard", projectId: "" };
 }
 
-export function currentTaskIdFromPath() {
-  return routeFromLocation().taskId;
+export function currentProjectIdFromPath() {
+  return routeFromLocation().projectId;
 }
 
 export function pushRoute(path: string) {
