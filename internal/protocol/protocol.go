@@ -227,6 +227,8 @@ type TerminalStreamStart struct {
 	WorkspacePath string `json:"workspace_path"`
 	Command       string `json:"command"`
 	InitialTitle  string `json:"initial_title,omitempty"`
+	Cols          uint16 `json:"cols,omitempty"`
+	Rows          uint16 `json:"rows,omitempty"`
 }
 
 type TerminalStreamData struct {

@@ -26,7 +26,7 @@ export function EmptyWorkspace({
               <span className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-100 text-sky-700">
                 <FolderTree className="h-3.5 w-3.5" />
               </span>
-              <span className="truncate">文件资源管理器</span>
+              <span className="truncate">文件</span>
             </button>
           )}
           {TERMINAL_TYPES.map((item) => (

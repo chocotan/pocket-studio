@@ -14,14 +14,17 @@ interface FileReadResult {
   error?: string;
 }
 
+import { type StudioTheme } from "./terminal-types";
+
 interface FileViewerTabProps {
   projectId: string;
   path: string;
   active: boolean;
   dragSuspended: boolean;
+  theme?: StudioTheme;
 }
 
-export function FileViewerTab({ projectId, path, active, dragSuspended }: FileViewerTabProps) {
+export function FileViewerTab({ projectId, path, active, dragSuspended, theme = "light" }: FileViewerTabProps) {
   const [file, setFile] = useState<FileReadResult | null>(null);
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
@@ -114,11 +117,11 @@ export function FileViewerTab({ projectId, path, active, dragSuspended }: FileVi
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#fbfbfb]">
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-slate-200/70 px-3">
+    <div className="flex h-full min-h-0 flex-col bg-card text-card-foreground">
+      <div className="flex h-9 shrink-0 items-center justify-between border-b border-border/60 px-3 bg-muted/10">
         <div className="min-w-0">
-          <div className="truncate text-[11px] font-semibold text-slate-700">{basename(path)}</div>
-          <div className="truncate text-[10px] text-slate-400">{path}</div>
+          <div className="truncate text-[11px] font-bold text-foreground/80">{basename(path)}</div>
+          <div className="truncate text-[10px] text-muted-foreground">{path}</div>
         </div>
         {file?.kind === "text" && (
           <button
@@ -128,7 +131,7 @@ export function FileViewerTab({ projectId, path, active, dragSuspended }: FileVi
               save();
             }}
             disabled={!dirty || saving}
-            className="flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex h-6 items-center gap-1 rounded-md border border-border bg-card px-2 text-[11px] font-bold text-foreground hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50 transition-colors cursor-pointer"
           >
             <Save className="h-3.5 w-3.5" />
             {saving ? "保存中" : dirty ? "保存" : "已保存"}
@@ -136,19 +139,19 @@ export function FileViewerTab({ projectId, path, active, dragSuspended }: FileVi
         )}
       </div>
       {error && (
-        <div className="mx-2 mt-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-700">
+        <div className="mx-2 mt-2 rounded-md border border-rose-200/30 bg-rose-500/10 px-2 py-1.5 text-[11px] text-rose-600 dark:text-rose-400">
           {error}
         </div>
       )}
       <div className="min-h-0 flex-1">
         {loading ? (
-          <div className="px-3 py-2 text-[11px] text-slate-400">加载文件...</div>
+          <div className="px-3 py-2 text-[11px] text-muted-foreground">加载文件...</div>
         ) : file?.kind === "image" ? (
-          <div className="flex h-full min-h-0 items-center justify-center overflow-auto bg-slate-50 p-4">
+          <div className="flex h-full min-h-0 items-center justify-center overflow-auto bg-muted/40 p-4">
             {file.data_url ? (
               <img src={file.data_url} alt={file.name || path} className="max-h-full max-w-full object-contain shadow-sm" />
             ) : (
-              <div className="flex items-center gap-2 text-xs text-slate-500">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <ImageIcon className="h-4 w-4" />
                 图片无法预览
               </div>
@@ -157,7 +160,7 @@ export function FileViewerTab({ projectId, path, active, dragSuspended }: FileVi
         ) : file?.kind === "text" ? (
           <MonacoCrashGuard resetKey={`${projectId}:${path}:${editorEpoch}`}>
             {dragSuspended ? (
-              <pre className="h-full overflow-auto whitespace-pre-wrap break-words bg-white px-3 py-2 font-mono text-[11px] leading-5 text-slate-600">
+              <pre className="h-full overflow-auto whitespace-pre-wrap break-words bg-card px-3 py-2 font-mono text-[11px] leading-5 text-foreground/80">
                 {content}
               </pre>
             ) : (
@@ -166,7 +169,7 @@ export function FileViewerTab({ projectId, path, active, dragSuspended }: FileVi
                 height="100%"
                 language={language}
                 value={content}
-                theme="vs"
+                theme={theme === "light" ? "vs" : "vs-dark"}
                 options={{
                   minimap: { enabled: false },
                   fontSize: 12,

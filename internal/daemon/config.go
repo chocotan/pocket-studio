@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"remote-agent/internal/hostinfo"
 	"remote-agent/internal/protocol"
 )
 
@@ -52,9 +53,7 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.Device.ID == "" {
 		return cfg, fmt.Errorf("device.id is required")
 	}
-	if cfg.Device.Name == "" {
-		cfg.Device.Name = cfg.Device.ID
-	}
+	cfg.Device.Name = hostinfo.ResolveDeviceName(cfg.Device.Name)
 	if cfg.Server.URL == "" {
 		cfg.Server.URL = "ws://localhost:8080/ws/daemon"
 	}
@@ -102,7 +101,7 @@ func ExampleConfig() Config {
 	return Config{
 		Device: DeviceConfig{
 			ID:   "dev_local",
-			Name: "Local Machine",
+			Name: hostinfo.DisplayName(),
 		},
 		Server: ServerConfig{
 			URL: "ws://localhost:8080/ws/daemon",

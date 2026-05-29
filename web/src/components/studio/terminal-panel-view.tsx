@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -18,7 +18,9 @@ import {
   type SplitDirection,
   type TerminalKind,
   type TerminalTitleSource,
+  type StudioTheme,
 } from "./terminal-types";
+
 
 interface TerminalPanelViewProps {
   panel: TerminalPanel;
@@ -42,6 +44,7 @@ interface TerminalPanelViewProps {
   onClosePanel: (id: string) => void;
   onTitleChange: (id: string, title: string, command?: string, source?: TerminalTitleSource) => void;
   layoutVersion: number;
+  theme?: StudioTheme;
 }
 
 export function TerminalPanelView({
@@ -66,6 +69,7 @@ export function TerminalPanelView({
   onClosePanel,
   onTitleChange,
   layoutVersion,
+  theme = "light",
 }: TerminalPanelViewProps) {
   const tabScrollerRef = useRef<HTMLDivElement | null>(null);
   const tabButtonRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -80,8 +84,8 @@ export function TerminalPanelView({
     { dir: "bottom" as const, Icon: SplitBottomIcon, label: "向下分割" },
   ];
   const focusClasses = isFocused
-    ? "border-indigo-300/80 shadow-[inset_0_0_0_1px_rgba(99,102,241,0.18)]"
-    : "border-slate-200/80 hover:border-slate-300/80 shadow-sm";
+    ? "border-indigo-500/80 dark:border-indigo-400/85 shadow-[inset_0_0_0_1px_rgba(99,102,241,0.18)]"
+    : "border-border/60 hover:border-border/90 shadow-sm";
   const accentClasses = {
     indigo: "bg-indigo-100 text-indigo-600 ring-1 ring-indigo-200/70",
     violet: "bg-violet-100 text-violet-600 ring-1 ring-violet-200/70",
@@ -212,14 +216,14 @@ export function TerminalPanelView({
         flexDirection: "column",
         overflow: "hidden",
       }}
-      className={`studio-panel border bg-white transition-all duration-200 ${focusClasses}`}
+      className={`studio-panel border border-border bg-card text-card-foreground transition-all duration-200 ${focusClasses}`}
     >
       <div
         data-studio-tabbar="true"
         data-panel-id={panel.id}
         data-tab-count={panel.tabs.length}
         className={`studio-tabbar relative flex h-8 shrink-0 items-end gap-0.5 overflow-visible border-b-0 px-1 pt-0.5 ${
-          isFocused ? "bg-slate-100" : "bg-[#edf2f7]"
+          isFocused ? "bg-slate-100/70 dark:bg-slate-900/60" : "bg-slate-200/50 dark:bg-slate-950/40"
         }`}
       >
         {scrollState.canLeft && (
@@ -270,7 +274,6 @@ export function TerminalPanelView({
                             onActiveTab(panel.id, tab.id);
                           }
                         }}
-                        title={displayTitle}
                         data-studio-tab="true"
                         data-panel-id={panel.id}
                         data-tab-index={tabIndex}
@@ -283,8 +286,8 @@ export function TerminalPanelView({
                         onPointerCancel={handleTabPointerCancel}
                         className={`studio-tab group flex h-7 min-w-[72px] max-w-[220px] flex-[0_1_auto] items-center gap-1 rounded-t-md border px-1.5 text-left transition-colors ${
                           active
-                            ? "studio-tab-active relative z-20 border-slate-200 bg-[#fbfbfb] text-slate-900 shadow-sm"
-                            : "studio-tab-inactive relative border-slate-200/70 bg-slate-50/70 text-slate-500 hover:bg-white/80 hover:text-slate-800"
+                            ? "studio-tab-active relative z-20 border-border bg-card text-foreground shadow-sm"
+                            : "studio-tab-inactive relative border-border/50 bg-muted/40 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
                         }`}
                       >
                         <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-md ${
@@ -430,47 +433,88 @@ export function TerminalPanelView({
         </div>
       </div>
 
-      <div className="studio-terminal-surface relative min-h-0 flex-1 bg-[#fbfbfb]">
-        {panel.tabs.map((tab) => {
-          const type = terminalType(tab.termType);
-          const active = tab.id === panel.activeTabId;
-          return (
-            <div
-              key={tab.id}
-              className="absolute inset-0"
-              style={{
-                visibility: active ? "visible" : "hidden",
-                pointerEvents: active ? "auto" : "none",
-              }}
-            >
-              {tab.kind === "file_explorer" ? (
-                <FileExplorerTab
-                  projectId={projectId}
-                  workspacePath={workspacePath}
-                  active={active}
-                  layoutVersion={layoutVersion}
-                  onOpenFile={(path) => onOpenFile(panel.id, path)}
-                />
-              ) : tab.kind === "file_viewer" ? (
-                <FileViewerTab
-                  projectId={projectId}
-                  path={tab.filePath || ""}
-                  active={active}
-                  dragSuspended={isDraggingTab}
-                />
-              ) : (
-                <XtermInstance
-                  projectId={projectId}
-                  terminalId={tab.id}
-                  command={type.command}
-                  isActive={isFocused && active}
-                  layoutVersion={layoutVersion}
-                  onTitleChange={(title, command, source) => onTitleChange(tab.id, title, command, source)}
-                />
-              )}
+      <div className="studio-terminal-surface relative min-h-0 flex-1 bg-card text-card-foreground border-t border-border">
+        {panel.tabs.length === 0 ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-slate-400 bg-slate-50/50 dark:bg-slate-900/10">
+            <div className="h-10 w-10 rounded-full bg-slate-100/80 border border-slate-200/50 flex items-center justify-center mb-3 dark:bg-slate-800 dark:border-slate-700">
+              <Plus className="h-5 w-5 text-slate-400 dark:text-slate-500" />
             </div>
-          );
-        })}
+            <h3 className="text-xs font-bold text-slate-700 dark:text-slate-350">此面板为空</h3>
+            <p className="text-[10px] text-slate-400 mt-1 max-w-[220px] leading-relaxed dark:text-slate-500">
+              您可以点击上方标签栏的 “+” 按钮，或者使用下方快捷方式创建终端或资源管理器。
+            </p>
+            <div className="mt-4 flex flex-col gap-1.5 w-full max-w-[180px]">
+              <button
+                type="button"
+                onClick={() => onAddTab(panel.id, "bash")}
+                className="w-full h-8 px-3 text-[10px] font-bold bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-indigo-600 transition-all flex items-center gap-2 justify-center cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-indigo-400"
+              >
+                <Terminal className="h-3.5 w-3.5 text-slate-500 shrink-0 dark:text-slate-400" />
+                打开 Bash 终端
+              </button>
+              <button
+                type="button"
+                onClick={() => onAddTab(panel.id, "claude")}
+                className="w-full h-8 px-3 text-[10px] font-bold bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-indigo-600 transition-all flex items-center gap-2 justify-center cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-indigo-400"
+              >
+                <Cpu className="h-3 w-3 text-indigo-500 shrink-0" />
+                打开 Claude Code
+              </button>
+              <button
+                type="button"
+                onClick={() => onAddFileExplorer(panel.id)}
+                className="w-full h-8 px-3 text-[10px] font-bold bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-indigo-600 transition-all flex items-center gap-2 justify-center cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-indigo-400"
+              >
+                <FolderTree className="h-3 w-3 text-sky-500 shrink-0" />
+                打开文件管理器
+              </button>
+            </div>
+          </div>
+        ) : (
+          panel.tabs.map((tab) => {
+            const type = terminalType(tab.termType);
+            const active = tab.id === panel.activeTabId;
+            return (
+              <div
+                key={tab.id}
+                className="absolute inset-0"
+                style={{
+                  visibility: active ? "visible" : "hidden",
+                  pointerEvents: active ? "auto" : "none",
+                }}
+              >
+                {tab.kind === "file_explorer" ? (
+                  <FileExplorerTab
+                    projectId={projectId}
+                    workspacePath={workspacePath}
+                    active={active}
+                    layoutVersion={layoutVersion}
+                    onOpenFile={(path) => onOpenFile(panel.id, path)}
+                    theme={theme}
+                  />
+                ) : tab.kind === "file_viewer" ? (
+                  <FileViewerTab
+                    projectId={projectId}
+                    path={tab.filePath || ""}
+                    active={active}
+                    dragSuspended={isDraggingTab}
+                    theme={theme}
+                  />
+                ) : (
+                  <XtermInstance
+                    projectId={projectId}
+                    terminalId={tab.id}
+                    command={type.command}
+                    isActive={isFocused && active}
+                    layoutVersion={layoutVersion}
+                    theme={theme}
+                    onTitleChange={(title, command, source) => onTitleChange(tab.id, title, command, source)}
+                  />
+                )}
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );
@@ -501,7 +545,7 @@ function TerminalTypeMenu({
         <span className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-100 text-sky-700">
           <FolderTree className="h-3.5 w-3.5" />
         </span>
-        <span className="truncate">文件资源管理器</span>
+        <span className="truncate">文件</span>
       </button>
       {TERMINAL_TYPES.map((item) => (
         <button

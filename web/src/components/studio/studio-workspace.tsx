@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowLeft, CircleDot } from "lucide-react";
+import { ArrowLeft, CircleDot, LayoutGrid, Columns, Maximize, Palette, Check } from "lucide-react";
+import { type StudioTheme } from "./terminal-types";
 import type { Project } from "./studio-dashboard";
 import { EmptyWorkspace } from "./empty-workspace";
 import {
@@ -39,6 +40,25 @@ interface StudioWorkspaceProps {
   onBackToDashboard: () => void;
 }
 
+const Columns3Icon = (props: React.SVGProps<SVGSVGElement>) => (
+  <svg
+    xmlns="http://www.w3.org/2500/svg"
+    width="24"
+    height="24"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2.2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    {...props}
+  >
+    <rect width="18" height="18" x="3" y="3" rx="2" />
+    <path d="M9 3v18" />
+    <path d="M15 3v18" />
+  </svg>
+);
+
 export function StudioWorkspace({
   projectId,
   project,
@@ -52,7 +72,222 @@ export function StudioWorkspace({
   const [layoutVersion, setLayoutVersion] = useState(0);
   const [tabDragTarget, setTabDragTarget] = useState<{ panelId: string; insertIndex: number } | null>(null);
   const [isDraggingTab, setIsDraggingTab] = useState(false);
+  const [theme, setTheme] = useState<StudioTheme>(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const urlTheme = params.get("theme");
+      if (urlTheme === "light" || urlTheme === "dark" || urlTheme === "synthwave" || urlTheme === "onedark") {
+        return urlTheme as StudioTheme;
+      }
+      const saved = localStorage.getItem("pocket-studio-theme");
+      if (saved === "light" || saved === "dark" || saved === "synthwave" || saved === "onedark") {
+        return saved as StudioTheme;
+      }
+    }
+    return "light";
+  });
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem("pocket-studio-theme", theme);
+  }, [theme]);
+
   const skipSaveRef = useRef(true);
+
+  function collectAllTabs(node: LayoutNode | null): StudioTab[] {
+    if (!node) return [];
+    if (node.type === "panel") {
+      return [...node.tabs];
+    }
+    return node.children.flatMap(collectAllTabs);
+  }
+
+  function applyPresetLayout(type: 1 | 2 | 3 | 4) {
+    const existingTabs = collectAllTabs(layoutTree);
+
+    if (type === 1) {
+      // Preset 1: Full IDE layout
+      // Left Explorer, Right-Top Editor, Right-Bottom Terminal
+      const explorerTabs = existingTabs.filter((t) => t.kind === "file_explorer");
+      const editorTabs = existingTabs.filter((t) => t.kind === "file_viewer");
+      const terminalTabs = existingTabs.filter((t) => t.kind === "terminal");
+
+      // Fallbacks if empty
+      if (explorerTabs.length === 0) {
+        explorerTabs.push(createFileExplorerTab());
+      }
+      if (terminalTabs.length === 0) {
+        terminalTabs.push(createTerminalTab("bash"));
+      }
+
+      const explorerPanel: TerminalPanel = {
+        type: "panel",
+        id: makeId("panel"),
+        tabs: explorerTabs,
+        activeTabId: explorerTabs[0].id,
+        focus: false,
+      };
+
+      const editorPanel: TerminalPanel = {
+        type: "panel",
+        id: makeId("panel"),
+        tabs: editorTabs,
+        activeTabId: editorTabs.length > 0 ? editorTabs[0].id : "",
+        focus: false,
+      };
+
+      const termPanel: TerminalPanel = {
+        type: "panel",
+        id: makeId("panel"),
+        tabs: terminalTabs,
+        activeTabId: terminalTabs[0].id,
+        focus: true,
+      };
+
+      const rightSplit: SplitGroup = {
+        type: "split",
+        id: makeId("split"),
+        orientation: "vertical",
+        children: [editorPanel, termPanel],
+        sizes: [60, 40],
+      };
+
+      const mainSplit: SplitGroup = {
+        type: "split",
+        id: makeId("split"),
+        orientation: "horizontal",
+        children: [explorerPanel, rightSplit],
+        sizes: [22, 78],
+      };
+
+      setLayoutTree(mainSplit);
+      setFocusedId(termPanel.id);
+    } else if (type === 2) {
+      // Preset 2: Single panel containing all tabs merged
+      const allTabs = [...existingTabs];
+      if (allTabs.length === 0) {
+        allTabs.push(createTerminalTab("bash"));
+      }
+
+      const panel: TerminalPanel = {
+        type: "panel",
+        id: makeId("panel"),
+        tabs: allTabs,
+        activeTabId: allTabs[0].id,
+        focus: true,
+      };
+
+      setLayoutTree(panel);
+      setFocusedId(panel.id);
+    } else if (type === 3) {
+      // Preset 3: Side-by-side terminal splits
+      const leftTabs: StudioTab[] = [];
+      const rightTabs: StudioTab[] = [];
+
+      // Split layout - explorers left, editors right
+      existingTabs.forEach((tab) => {
+        if (tab.kind === "file_explorer") {
+          leftTabs.push(tab);
+        } else if (tab.kind === "file_viewer") {
+          rightTabs.push(tab);
+        }
+      });
+
+      // Split terminal tabs between left and right evenly
+      const terminalTabs = existingTabs.filter((t) => t.kind === "terminal");
+      terminalTabs.forEach((tab, index) => {
+        if (index % 2 === 0) {
+          leftTabs.push(tab);
+        } else {
+          rightTabs.push(tab);
+        }
+      });
+
+      // Fallbacks if empty
+      if (leftTabs.length === 0) {
+        leftTabs.push(createTerminalTab("bash"));
+      }
+      if (rightTabs.length === 0) {
+        rightTabs.push(createTerminalTab("bash"));
+      }
+
+      const panel1: TerminalPanel = {
+        type: "panel",
+        id: makeId("panel"),
+        tabs: leftTabs,
+        activeTabId: leftTabs[0].id,
+        focus: true,
+      };
+
+      const panel2: TerminalPanel = {
+        type: "panel",
+        id: makeId("panel"),
+        tabs: rightTabs,
+        activeTabId: rightTabs[0].id,
+        focus: false,
+      };
+
+      const split: SplitGroup = {
+        type: "split",
+        id: makeId("split"),
+        orientation: "horizontal",
+        children: [panel1, panel2],
+        sizes: [50, 50],
+      };
+
+      setLayoutTree(split);
+      setFocusedId(panel1.id);
+    } else if (type === 4) {
+      // Preset 4: Three-column layout (Left: Explorer, Middle: Editor, Right: Terminal)
+      const explorerTabs = existingTabs.filter((t) => t.kind === "file_explorer");
+      const editorTabs = existingTabs.filter((t) => t.kind === "file_viewer");
+      const terminalTabs = existingTabs.filter((t) => t.kind === "terminal");
+
+      // Fallbacks if empty
+      if (explorerTabs.length === 0) {
+        explorerTabs.push(createFileExplorerTab());
+      }
+      if (terminalTabs.length === 0) {
+        terminalTabs.push(createTerminalTab("bash"));
+      }
+
+      const explorerPanel: TerminalPanel = {
+        type: "panel",
+        id: makeId("panel"),
+        tabs: explorerTabs,
+        activeTabId: explorerTabs[0].id,
+        focus: false,
+      };
+
+      const editorPanel: TerminalPanel = {
+        type: "panel",
+        id: makeId("panel"),
+        tabs: editorTabs,
+        activeTabId: editorTabs.length > 0 ? editorTabs[0].id : "",
+        focus: false,
+      };
+
+      const termPanel: TerminalPanel = {
+        type: "panel",
+        id: makeId("panel"),
+        tabs: terminalTabs,
+        activeTabId: terminalTabs[0].id,
+        focus: true,
+      };
+
+      const split: SplitGroup = {
+        type: "split",
+        id: makeId("split"),
+        orientation: "horizontal",
+        children: [explorerPanel, editorPanel, termPanel],
+        sizes: [20, 48, 32],
+      };
+
+      setLayoutTree(split);
+      setFocusedId(termPanel.id);
+    }
+    setLayoutVersion((v) => v + 1);
+  }
 
   useEffect(() => {
     const next = initialStudioState(project);
@@ -209,9 +444,11 @@ export function StudioWorkspace({
 
   function closeTabInTree(node: LayoutNode, panelId: string, tabId: string): LayoutNode {
     if (node.type === "panel") {
-      if (node.id !== panelId || node.tabs.length <= 1) return node;
+      if (node.id !== panelId) return node;
       const nextTabs = node.tabs.filter((tab) => tab.id !== tabId);
-      const activeTabId = node.activeTabId === tabId ? nextTabs[Math.max(0, nextTabs.length - 1)].id : node.activeTabId;
+      const activeTabId = node.activeTabId === tabId
+        ? (nextTabs.length > 0 ? nextTabs[Math.max(0, nextTabs.length - 1)].id : "")
+        : node.activeTabId;
       return { ...node, tabs: nextTabs, activeTabId };
     }
     return { ...node, children: node.children.map((child) => closeTabInTree(child, panelId, tabId)) };
@@ -281,7 +518,13 @@ export function StudioWorkspace({
   }
 
   function handleSplit(panelId: string, dir: SplitDirection, kind: TerminalKind) {
-    const newPanel = createTerminalPanel(kind);
+    const newPanel: TerminalPanel = {
+      type: "panel",
+      id: makeId("panel"),
+      tabs: [],
+      activeTabId: "",
+      focus: true,
+    };
     setLayoutTree((prev) => {
       if (!prev) return newPanel;
       const unfocused = setFocusInLayout(prev, null);
@@ -362,16 +605,7 @@ export function StudioWorkspace({
     }
     setLayoutTree((prev) => {
       if (!prev) return prev;
-      const panel = findPanel(prev, panelId);
-      if (!panel || panel.tabs.length > 1) return closeTabInTree(prev, panelId, tabId);
-      const simplified = removePanel(prev, panelId);
-      if (!simplified) {
-        setFocusedId("");
-        return null;
-      }
-      const nextPanel = firstPanelInTree(simplified);
-      setFocusedId(nextPanel.id);
-      return setFocusInLayout(simplified, nextPanel.id);
+      return closeTabInTree(prev, panelId, tabId);
     });
     setLayoutVersion((value) => value + 1);
   }
@@ -515,6 +749,7 @@ export function StudioWorkspace({
           onClosePanel={handleClosePanel}
           onTitleChange={handleTerminalTitle}
           layoutVersion={layoutVersion}
+          theme={theme}
         />
       );
     }
@@ -567,53 +802,148 @@ export function StudioWorkspace({
     <div
       onClick={() => {
         setAddMenuPanelId(null);
+        setThemeMenuOpen(false);
       }}
+      className={`studio-square bg-background text-foreground select-none flex flex-col overflow-hidden theme-${theme} ${theme !== "light" ? "dark" : ""}`}
       style={{
-        display: "flex",
-        flexDirection: "column",
         width: "100dvw",
         height: "100dvh",
-        overflow: "hidden",
         fontFamily: "var(--font-sans)",
       }}
-      className="studio-square bg-[#f8fafc] select-none"
     >
-      <header className="shrink-0 h-10 bg-white/95 backdrop-blur-md border-b border-slate-200/70 flex items-center justify-between px-4 z-50 shadow-sm">
+      <header className="shrink-0 h-11 bg-white/95 border-b border-slate-200/70 flex items-center justify-between px-4 z-50 shadow-sm dark:bg-[#161d28]/95 dark:border-slate-800/80 transition-colors duration-150">
         <div className="flex min-w-0 items-center gap-3">
           <div className="h-6 w-6 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-500/25 flex-shrink-0">
             <span className="text-white font-black text-[10px] leading-none">P</span>
           </div>
-          <span className="font-bold text-slate-800 text-xs tracking-tight">Pocket Studio</span>
-          <span className="px-2 py-0.5 text-[9px] uppercase font-bold tracking-widest bg-indigo-50 text-indigo-600 rounded border border-indigo-100">
+          <span className="font-bold text-slate-800 text-xs tracking-tight dark:text-white">Pocket Studio</span>
+          <span className="px-2 py-0.5 text-[9px] uppercase font-bold tracking-widest bg-indigo-50 text-indigo-600 rounded border border-indigo-100 dark:bg-indigo-950/40 dark:text-indigo-400 dark:border-indigo-900/60">
             PRO
           </span>
-          <div className="ml-2 h-4 w-px bg-slate-200" />
-          <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-slate-500 bg-slate-100/80 px-2.5 py-0.5 rounded-full border border-slate-200/60">
-            <span className="font-semibold text-slate-700">Local</span>
-            <span className="text-slate-300">/</span>
-            <span className="text-indigo-600 font-semibold truncate max-w-[220px]">{project.name}</span>
+          <div className="ml-2 h-4 w-px bg-slate-200 dark:bg-slate-800" />
+          <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-slate-500 bg-slate-100/80 px-2.5 py-0.5 rounded-full border border-slate-200/60 dark:bg-slate-800/50 dark:border-slate-700/60 dark:text-slate-400">
+            <span className="font-semibold text-slate-700 dark:text-slate-300">Local</span>
+            <span className="text-slate-300 dark:text-slate-700">/</span>
+            <span className="text-indigo-600 font-semibold truncate max-w-[220px] dark:text-indigo-400">{project.name}</span>
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-1.5">
-            <CircleDot className="h-3 w-3 text-emerald-500 animate-pulse" />
-            <span className="text-[10px] text-slate-500 font-mono font-bold uppercase tracking-wider">
+        <div className="flex items-center gap-3">
+          {/* Preset Layout Buttons */}
+          <div className="flex items-center bg-slate-150/40 p-0.5 rounded-lg border border-slate-200/55 dark:bg-slate-800/40 dark:border-slate-700/60 mr-2">
+            {/* Preset 1: Full workspace */}
+            <button
+              type="button"
+              onClick={() => applyPresetLayout(1)}
+              className="p-1.5 rounded-md hover:bg-white text-slate-500 hover:text-indigo-600 dark:hover:bg-slate-800 dark:hover:text-indigo-400 transition-all cursor-pointer"
+              title="应用布局：全功能工作区 (文件管理器+编辑器区+终端)"
+            >
+              <LayoutGrid className="h-3.5 w-3.5" />
+            </button>
+            {/* Preset 2: Single terminal */}
+            <button
+              type="button"
+              onClick={() => applyPresetLayout(2)}
+              className="p-1.5 rounded-md hover:bg-white text-slate-500 hover:text-indigo-600 dark:hover:bg-slate-800 dark:hover:text-indigo-400 transition-all cursor-pointer"
+              title="应用布局：单终端面板"
+            >
+              <Maximize className="h-3.5 w-3.5" />
+            </button>
+            {/* Preset 3: Side by side terminals */}
+            <button
+              type="button"
+              onClick={() => applyPresetLayout(3)}
+              className="p-1.5 rounded-md hover:bg-white text-slate-500 hover:text-indigo-600 dark:hover:bg-slate-800 dark:hover:text-indigo-400 transition-all cursor-pointer"
+              title="应用布局：左右双终端"
+            >
+              <Columns className="h-3.5 w-3.5" />
+            </button>
+            {/* Preset 4: Three-column layout */}
+            <button
+              type="button"
+              onClick={() => applyPresetLayout(4)}
+              className="p-1.5 rounded-md hover:bg-white text-slate-500 hover:text-indigo-600 dark:hover:bg-slate-800 dark:hover:text-indigo-400 transition-all cursor-pointer"
+              title="应用布局：左侧文件+中间编辑+右侧终端"
+            >
+              <Columns3Icon className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          <div className="h-4 w-px bg-slate-200 dark:bg-slate-800 mr-1" />
+
+          {/* Theme Dropdown Selector */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setThemeMenuOpen(!themeMenuOpen);
+              }}
+              className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 dark:hover:bg-slate-800 dark:text-slate-400 dark:hover:text-slate-100 transition-colors cursor-pointer flex items-center gap-1"
+              title="切换主题 / Switch Theme"
+            >
+              <Palette className="h-4 w-4" />
+            </button>
+
+            {themeMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-40 cursor-default" onClick={() => setThemeMenuOpen(false)} />
+                <div className="absolute right-0 mt-2 w-48 rounded-lg border border-slate-200 bg-white p-1.5 shadow-lg dark:border-slate-800/80 dark:bg-[#161d28] z-50 animate-scale-in">
+                  <div className="px-2.5 py-1.5 text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest border-b border-slate-100 dark:border-slate-800 mb-1">
+                    选择主题 / Themes
+                  </div>
+                  {[
+                    { id: "light" as const, name: "极光白 (Light)", preview: "bg-[#fafafa] border-slate-350" },
+                    { id: "dark" as const, name: "暗夜黑 (Dark)", preview: "bg-[#121824] border-slate-700" },
+                    { id: "synthwave" as const, name: "霓虹幻境 (Synthwave)", preview: "bg-[#1c0d2e] border-fuchsia-900" },
+                    { id: "onedark" as const, name: "黑客帝国 (One Dark)", preview: "bg-[#1e222a] border-slate-800" },
+                  ].map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => {
+                        setTheme(t.id);
+                        setThemeMenuOpen(false);
+                      }}
+                      className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-colors ${
+                        theme === t.id
+                          ? "bg-indigo-50 text-indigo-650 dark:bg-slate-800/80 dark:text-indigo-400"
+                          : "text-slate-600 hover:bg-slate-50 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800/40 dark:hover:text-slate-100"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2.5 h-2.5 rounded-full border ${t.preview}`} />
+                        <span>{t.name}</span>
+                      </div>
+                      {theme === t.id && <Check className="h-3.5 w-3.5 text-indigo-650 dark:text-indigo-400" />}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Connection Status indicator */}
+          <div className="flex items-center gap-1.5 bg-slate-100/50 dark:bg-slate-800/40 px-2 py-0.5 rounded-full border border-slate-200/50 dark:border-slate-700/60">
+            <CircleDot className="h-2.5 w-2.5 text-emerald-500 animate-pulse" />
+            <span className="text-[9px] text-slate-500 font-mono font-bold uppercase tracking-wider dark:text-slate-400">
               Connected
             </span>
           </div>
+
+          {/* Back button */}
           <button
             type="button"
             onClick={onBackToDashboard}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white hover:bg-slate-50 text-slate-700 hover:text-slate-900 border border-slate-200 hover:border-slate-300 shadow-sm font-semibold text-[11px] transition-all active:scale-95 duration-150 cursor-pointer"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white hover:bg-slate-50 text-slate-700 hover:text-slate-900 border border-slate-205 hover:border-slate-300 shadow-sm font-semibold text-[11px] transition-all active:scale-95 duration-150 cursor-pointer dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-white"
           >
-            <ArrowLeft className="h-3.5 w-3.5 text-slate-400" />
+            <ArrowLeft className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />
             返回项目大厅
           </button>
         </div>
       </header>
 
-      <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5">
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 bg-slate-50 dark:bg-[#0f131c] transition-colors duration-150">
         <div className="relative min-h-0 flex-1">
           {layoutTree ? (
             renderNode(layoutTree)

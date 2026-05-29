@@ -91,6 +91,186 @@
 }
 
 /* ─────────────────────────────────────────────
+   MULTI-STATE THEMES (Light, Dark, Synthwave, OneDark)
+   ───────────────────────────────────────────── */
+.theme-light {
+  /* Core surfaces */
+  --background:        oklch(0.985 0.004 250);    /* warm near-white */
+  --foreground:        oklch(0.18  0.015 250);    /* deep slate */
+
+  /* Cards & Popovers */
+  --card:              oklch(1 0 0);
+  --card-foreground:   oklch(0.18 0.015 250);
+  --popover:           oklch(1 0 0);
+  --popover-foreground:oklch(0.18 0.015 250);
+
+  /* Primary — Indigo */
+  --primary:           oklch(0.511 0.234 264.4);
+  --primary-foreground:oklch(0.98  0 0);
+
+  /* Secondary */
+  --secondary:         oklch(0.954 0.008 250);
+  --secondary-foreground:oklch(0.18 0.015 250);
+
+  /* Muted */
+  --muted:             oklch(0.957 0.006 250);
+  --muted-foreground:  oklch(0.52  0.012 250);
+
+  /* Accent */
+  --accent:            oklch(0.945 0.025 265);
+  --accent-foreground: oklch(0.42  0.15  265);
+
+  /* Destructive */
+  --destructive:       oklch(0.577 0.245 27.3);
+
+  /* Strokes */
+  --border:            oklch(0.904 0.008 250);
+  --input:             oklch(0.904 0.008 250);
+  --ring:              oklch(0.511 0.234 264.4);
+
+  --indigo-50:   #eef2ff;
+  --indigo-100:  #e0e7ff;
+  --indigo-200:  #c7d2fe;
+  --indigo-500:  #6366f1;
+  --indigo-600:  #4f46e5;
+  --indigo-700:  #4338ca;
+}
+
+.theme-dark {
+  /* Core surfaces */
+  --background:        oklch(0.12 0.015 250);     /* deep slate dark background */
+  --foreground:        oklch(0.93 0.01 250);      /* near-white text */
+
+  /* Cards & Popovers */
+  --card:              oklch(0.16 0.015 250);     /* slightly lighter dark card */
+  --card-foreground:   oklch(0.93 0.01 250);
+  --popover:           oklch(0.16 0.015 250);
+  --popover-foreground:oklch(0.93 0.01 250);
+
+  /* Primary — Indigo */
+  --primary:           oklch(0.61 0.20 264);
+  --primary-foreground:oklch(0.98 0 0);
+
+  /* Secondary */
+  --secondary:         oklch(0.18 0.015 250);
+  --secondary-foreground: oklch(0.93 0.01 250);
+
+  /* Muted */
+  --muted:             oklch(0.17 0.015 250);
+  --muted-foreground:  oklch(0.60 0.01 250);
+
+  /* Accent */
+  --accent:            oklch(0.20 0.03 265);
+  --accent-foreground: oklch(0.85 0.08 265);
+
+  /* Destructive */
+  --destructive:       oklch(0.577 0.245 27.3);
+
+  /* Strokes */
+  --border:            oklch(0.22 0.01 250);      /* dark border line */
+  --input:             oklch(0.22 0.01 250);
+  --ring:              oklch(0.61 0.20 264);
+
+  --indigo-50:   #1e1b4b;
+  --indigo-100:  #312e81;
+  --indigo-200:  #3730a3;
+  --indigo-500:  #818cf8;
+  --indigo-600:  #6366f1;
+  --indigo-700:  #4f46e5;
+}
+
+.theme-synthwave {
+  /* Core surfaces */
+  --background:        oklch(0.14 0.045 295);     /* deep retro cyberpunk purple */
+  --foreground:        oklch(0.95 0.03 300);      /* neon light pink-white text */
+
+  /* Cards & Popovers */
+  --card:              oklch(0.16 0.055 295);     /* neon purple card surface */
+  --card-foreground:   oklch(0.95 0.03 300);
+  --popover:           oklch(0.16 0.055 295);
+  --popover-foreground:oklch(0.95 0.03 300);
+
+  /* Primary — Hot Magenta */
+  --primary:           oklch(0.68 0.24 335);
+  --primary-foreground:oklch(0.98 0 0);
+
+  /* Secondary */
+  --secondary:         oklch(0.18 0.06 295);
+  --secondary-foreground: oklch(0.95 0.03 300);
+
+  /* Muted */
+  --muted:             oklch(0.17 0.05 295);
+  --muted-foreground:  oklch(0.60 0.08 300);
+
+  /* Accent */
+  --accent:            oklch(0.20 0.10 325);      /* neon accent */
+  --accent-foreground: oklch(0.90 0.16 335);
+
+  /* Destructive */
+  --destructive:       oklch(0.577 0.245 27.3);
+
+  /* Strokes */
+  --border:            oklch(0.23 0.07 295);      /* neon purple border */
+  --input:             oklch(0.23 0.07 295);
+  --ring:              oklch(0.68 0.24 335);
+
+  --indigo-50:   #2e1065;
+  --indigo-100:  #4c1d95;
+  --indigo-200:  #5b21b6;
+  --indigo-500:  #d946ef;
+  --indigo-600:  #ec4899;
+  --indigo-700:  #f43f5e;
+}
+
+.theme-onedark {
+  /* Core surfaces */
+  --background:        oklch(0.18 0.015 235);     /* VS Code slate-blue-grey */
+  --foreground:        oklch(0.88 0.01 235);      /* clean grey-white text */
+
+  /* Cards & Popovers */
+  --card:              oklch(0.21 0.015 235);     /* OneDark card surface */
+  --card-foreground:   oklch(0.88 0.01 235);
+  --popover:           oklch(0.21 0.015 235);
+  --popover-foreground:oklch(0.88 0.01 235);
+
+  /* Primary — Soft Cyan-Blue */
+  --primary:           oklch(0.65 0.12 215);
+  --primary-foreground:oklch(0.12 0.01 235);
+
+  /* Secondary */
+  --secondary:         oklch(0.23 0.015 235);
+  --secondary-foreground: oklch(0.88 0.01 235);
+
+  /* Muted */
+  --muted:             oklch(0.22 0.015 235);
+  --muted-foreground:  oklch(0.58 0.01 235);
+
+  /* Accent */
+  --accent:            oklch(0.26 0.03 215);
+  --accent-foreground: oklch(0.78 0.08 215);
+
+  /* Destructive */
+  --destructive:       oklch(0.577 0.245 27.3);
+
+  /* Strokes */
+  --border:            oklch(0.24 0.015 235);     /* VS Code border */
+  --input:             oklch(0.24 0.015 235);
+  --ring:              oklch(0.65 0.12 215);
+
+  --indigo-50:   #0f172a;
+  --indigo-100:  #1e293b;
+  --indigo-200:  #334155;
+  --indigo-500:  #38bdf8;
+  --indigo-600:  #0ea5e9;
+  --indigo-700:  #0284c7;
+}
+
+/* Also support dark layout triggers natively for tailwind custom dark variant */
+.dark {
+  @extend .theme-dark;
+}
+
+/* ─────────────────────────────────────────────
    BASE STYLES
    ───────────────────────────────────────────── */
 @layer base {
@@ -139,7 +319,10 @@
   height: 100%;
 }
 .xterm-viewport {
-  background-color: #fafafa !important;
+  background-color: var(--card) !important;
+}
+.xterm-screen {
+  background-color: var(--card) !important;
 }
 /* Ensure the screen canvas fills its parent */
 .xterm-screen {
@@ -328,13 +511,13 @@
 .studio-square .studio-tab-active::before {
   left: -7px;
   border-bottom-right-radius: 7px;
-  box-shadow: 2px 2px 0 #fbfbfb;
+  box-shadow: 2px 2px 0 var(--card);
 }
 
 .studio-square .studio-tab-active::after {
   right: -7px;
   border-bottom-left-radius: 7px;
-  box-shadow: -2px 2px 0 #fbfbfb;
+  box-shadow: -2px 2px 0 var(--card);
 }
 
 .studio-square .studio-terminal-surface {

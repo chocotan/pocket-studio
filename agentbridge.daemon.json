@@ -1,7 +1,7 @@
 {
   "device": {
     "id": "dev_local",
-    "name": "Local Machine"
+    "name": ""
   },
   "server": {
     "url": "ws://localhost:18080/ws/daemon"

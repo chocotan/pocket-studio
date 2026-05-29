@@ -64,7 +64,7 @@ export default function App() {
       setDevices([
         {
           id: "dev_local",
-          name: "Local Machine",
+          name: window.location.hostname || "localhost",
           workspaces: [{ id: "ws-1", name: "Agent", path: "/home/choco/Agent" }],
         },
       ]);

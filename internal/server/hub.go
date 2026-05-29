@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"mime"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 
+	"remote-agent/internal/hostinfo"
 	"remote-agent/internal/protocol"
 )
 
@@ -894,7 +897,7 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 				continue
 			}
 			dc.deviceID = hello.DeviceID
-			dc.deviceName = hello.DeviceName
+			dc.deviceName = hostinfo.ResolveDeviceName(hello.DeviceName)
 			dc.agent = hello.Agent
 			dc.agentLabel = hello.AgentLabel
 			dc.agents = hello.Agents
@@ -1069,7 +1072,7 @@ func (h *Hub) stateView() StateView {
 	if !hasLocalDaemon {
 		devices = append(devices, DeviceView{
 			ID:         "dev_local",
-			Name:       "Local Machine",
+			Name:       hostinfo.DisplayName(),
 			Status:     "online",
 			Agent:      "claude",
 			AgentLabel: "Claude Code",
@@ -1356,6 +1359,8 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	command := r.URL.Query().Get("command")
+	initialCols := parseTerminalDimension(r.URL.Query().Get("cols"))
+	initialRows := parseTerminalDimension(r.URL.Query().Get("rows"))
 
 	h.mu.RLock()
 	proj, ok := h.projects[projID]
@@ -1399,6 +1404,8 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 			WorkspacePath: workspacePath,
 			Command:       command,
 			InitialTitle:  initialTerminalTitle(command),
+			Cols:          initialCols,
+			Rows:          initialRows,
 		}
 		dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamStart, "server", startPayload)
 
@@ -1441,24 +1448,30 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	initialTitle := initialTerminalTitle(command)
 	var cmd *exec.Cmd
 	if command != "" {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", resolvedPath, command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", resolvedPath, command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
 	} else {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", resolvedPath, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", resolvedPath, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
 	}
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = terminalEnv()
 
 	ptyFile, err := pty.Start(cmd)
 	if err != nil {
 		log.Printf("failed to start tmux: %v. falling back to bash.", err)
-		cmd = exec.Command("bash")
+		if command != "" {
+			cmd = exec.Command("bash", "-c", command)
+		} else {
+			cmd = exec.Command("bash")
+		}
 		cmd.Dir = resolvedPath
-		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+		cmd.Env = terminalEnv()
 		ptyFile, err = pty.Start(cmd)
 		if err != nil {
 			log.Printf("failed to start fallback shell: %v", err)
 			return
 		}
 	}
+	applyTerminalSize(ptyFile, initialCols, initialRows)
+	resizeTmuxSession(sessionName, initialCols, initialRows)
 	defer ptyFile.Close()
 	titleDone := make(chan struct{})
 	defer close(titleDone)
@@ -1494,15 +1507,44 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 				Rows uint16 `json:"rows"`
 			}
 			if err := json.Unmarshal(payload, &resizeMsg); err == nil && resizeMsg.Type == "resize" {
-				_ = pty.Setsize(ptyFile, &pty.Winsize{
-					Cols: resizeMsg.Cols,
-					Rows: resizeMsg.Rows,
-				})
+				applyTerminalSize(ptyFile, resizeMsg.Cols, resizeMsg.Rows)
+				resizeTmuxSession(sessionName, resizeMsg.Cols, resizeMsg.Rows)
 			} else {
 				_, _ = ptyFile.Write(payload)
 			}
 		}
 	}
+}
+
+func parseTerminalDimension(value string) uint16 {
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 || n > math.MaxUint16 {
+		return 0
+	}
+	return uint16(n)
+}
+
+func terminalEnv() []string {
+	return append(os.Environ(),
+		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
+		"TERM_PROGRAM=PocketStudio",
+		"FORCE_COLOR=1",
+	)
+}
+
+func applyTerminalSize(ptyFile *os.File, cols uint16, rows uint16) {
+	if ptyFile == nil || cols == 0 || rows == 0 {
+		return
+	}
+	_ = pty.Setsize(ptyFile, &pty.Winsize{Cols: cols, Rows: rows})
+}
+
+func resizeTmuxSession(sessionName string, cols uint16, rows uint16) {
+	if sessionName == "" || cols == 0 || rows == 0 {
+		return
+	}
+	_ = exec.Command("tmux", "resize-window", "-t", sessionName, "-x", strconv.Itoa(int(cols)), "-y", strconv.Itoa(int(rows))).Run()
 }
 
 func writeLocalTerminalSnapshot(conn *websocket.Conn, sessionName string, writeMu *sync.Mutex) {

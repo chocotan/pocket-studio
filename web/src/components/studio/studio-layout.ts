@@ -63,7 +63,7 @@ export function createFileExplorerTab(): StudioTab {
   return {
     id: makeId("file"),
     kind: "file_explorer",
-    title: "文件资源管理器",
+    title: "文件",
     termType: "bash",
     activeCommand: "",
     titleSource: "initial",
@@ -159,10 +159,9 @@ export function sanitizeLayoutNode(value: unknown, tracker = createLayoutIDTrack
     const tabs = Array.isArray(node.tabs)
       ? node.tabs.map((tab) => sanitizeTab(tab, tracker)).filter((tab): tab is TerminalTab => tab !== null)
       : [];
-    if (tabs.length === 0) tabs.push(createTerminalTab("bash"));
     const activeTabId = typeof node.activeTabId === "string" && tabs.some((tab) => tab.id === node.activeTabId)
       ? node.activeTabId
-      : tabs[0].id;
+      : (tabs.length > 0 ? tabs[0].id : "");
     return {
       type: "panel",
       id: uniqueLayoutID(node.id, "panel", tracker.panels),
@@ -273,7 +272,7 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): TerminalTab | n
     id: tracker ? uniqueLayoutID(tab.id, idPrefix, tracker.tabs) : (typeof tab.id === "string" && tab.id ? tab.id : makeId(idPrefix)),
     kind: tabKind,
     title: tabKind === "file_explorer" || tabKind === "file_viewer"
-      ? (typeof tab.title === "string" && tab.title ? tab.title : tabKind === "file_viewer" ? basename(filePath) || "文件" : "文件资源管理器")
+      ? (typeof tab.title === "string" && tab.title ? tab.title : tabKind === "file_viewer" ? basename(filePath) || "文件" : "文件")
       : cleanTerminalTitle(typeof tab.title === "string" ? tab.title : "", type.title, kind),
     termType: kind,
     activeCommand: typeof tab.activeCommand === "string" ? tab.activeCommand : "",

@@ -2,7 +2,119 @@ import { useEffect, useRef } from "react";
 import { Terminal as XTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import type { TerminalTitleSource } from "./terminal-types";
+import type { TerminalTitleSource, StudioTheme } from "./terminal-types";
+
+export function getXtermTheme(theme: StudioTheme) {
+  if (theme === "dark") {
+    return {
+      background:          "#1b222c",
+      foreground:          "#f1f5f9",
+      cursor:              "#818cf8",
+      cursorAccent:        "#0f172a",
+      selectionBackground: "rgba(99, 102, 241, 0.35)",
+      selectionForeground: "#f1f5f9",
+      black:               "#1f2937",
+      red:                 "#ef4444",
+      green:               "#10b981",
+      yellow:              "#f59e0b",
+      blue:                "#3b82f6",
+      magenta:             "#d946ef",
+      cyan:                "#06b6d4",
+      white:               "#f3f4f6",
+      brightBlack:         "#9ca3af",
+      brightRed:           "#f87171",
+      brightGreen:         "#34d399",
+      brightYellow:        "#fbbf24",
+      brightBlue:          "#60a5fa",
+      brightMagenta:       "#c084fc",
+      brightCyan:          "#22d3ee",
+      brightWhite:         "#ffffff",
+    };
+  } else if (theme === "synthwave") {
+    return {
+      background:          "#231032",
+      foreground:          "#f9e5ff",
+      cursor:              "#ff7edb",
+      cursorAccent:        "#1c0d2e",
+      selectionBackground: "rgba(217, 70, 239, 0.3)",
+      selectionForeground: "#f9e5ff",
+      black:               "#25123e",
+      red:                 "#fe4450",
+      green:               "#3fe59a",
+      yellow:              "#fede5d",
+      blue:                "#2de2e6",
+      magenta:             "#ff7edb",
+      cyan:                "#06b6d4",
+      white:               "#f3f4f6",
+      brightBlack:         "#fede5d",
+      brightRed:           "#fe4450",
+      brightGreen:         "#3fe59a",
+      brightYellow:        "#fede5d",
+      brightBlue:          "#2de2e6",
+      brightMagenta:       "#ff7edb",
+      brightCyan:          "#2de2e6",
+      brightWhite:         "#ffffff",
+    };
+  } else if (theme === "onedark") {
+    return {
+      background:          "#262b35",
+      foreground:          "#abb2bf",
+      cursor:              "#528bff",
+      cursorAccent:        "#1e222a",
+      selectionBackground: "rgba(82, 139, 255, 0.3)",
+      selectionForeground: "#abb2bf",
+      black:               "#1e222a",
+      red:                 "#e06c75",
+      green:               "#98c379",
+      yellow:              "#d19a66",
+      blue:                "#61afef",
+      magenta:             "#c678dd",
+      cyan:                "#56b6c2",
+      white:               "#abb2bf",
+      brightBlack:         "#5c6370",
+      brightRed:           "#e06c75",
+      brightGreen:         "#98c379",
+      brightYellow:        "#d19a66",
+      brightBlue:          "#61afef",
+      brightMagenta:       "#c678dd",
+      brightCyan:          "#56b6c2",
+      brightWhite:         "#ffffff",
+    };
+  } else {
+    // Light
+    return {
+      background:          "#ffffff",
+      foreground:          "#1e293b",
+      cursor:              "#4f46e5",
+      cursorAccent:        "#ffffff",
+      selectionBackground: "rgba(99, 102, 241, 0.18)",
+      selectionForeground: "#1e293b",
+      black:               "#1e293b",
+      red:                 "#e11d48",
+      green:               "#16a34a",
+      yellow:              "#ca8a04",
+      blue:                "#2563eb",
+      magenta:             "#9333ea",
+      cyan:                "#0891b2",
+      white:               "#f1f5f9",
+      brightBlack:         "#64748b",
+      brightRed:           "#f43f5e",
+      brightGreen:         "#22c55e",
+      brightYellow:        "#eab308",
+      brightBlue:          "#3b82f6",
+      brightMagenta:       "#a855f7",
+      brightCyan:          "#06b6d4",
+      brightWhite:         "#ffffff",
+    };
+  }
+}
+
+function resolvePanelBackground(element: HTMLElement | null, fallback: string) {
+  if (!element) return fallback;
+  const value = getComputedStyle(element).getPropertyValue("--card").trim();
+  return value || fallback;
+}
+
 
 interface XtermInstanceProps {
   projectId: string;
@@ -10,10 +122,20 @@ interface XtermInstanceProps {
   command: string;
   isActive: boolean;
   layoutVersion?: number;
+  theme?: StudioTheme;
   onTitleChange?: (title: string, command?: string, source?: TerminalTitleSource) => void;
 }
 
-export function XtermInstance({ projectId, terminalId, command, isActive, layoutVersion = 0, onTitleChange }: XtermInstanceProps) {
+
+export function XtermInstance({
+  projectId,
+  terminalId,
+  command,
+  isActive,
+  layoutVersion = 0,
+  theme = "light",
+  onTitleChange
+}: XtermInstanceProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const xtermRef    = useRef<XTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -22,7 +144,10 @@ export function XtermInstance({ projectId, terminalId, command, isActive, layout
   const reconnectTimerRef = useRef<number | null>(null);
   const disposedRef = useRef(false);
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
-  const resizeNotifyTimerRef = useRef<number | null>(null);
+  const receivedFirstFrameRef = useRef(false);
+  const resizeDebounceTimerRef = useRef<number | null>(null);
+  const terminalReadyRef = useRef(false);
+  const incomingBuf = useRef<Array<string | Uint8Array>>([]);
   // Buffer keystrokes that arrive before WS is OPEN
   const inputBuf    = useRef<string[]>([]);
 
@@ -30,21 +155,11 @@ export function XtermInstance({ projectId, terminalId, command, isActive, layout
     onTitleChangeRef.current = onTitleChange;
   }, [onTitleChange]);
 
-  function sendResizeIfChanged() {
-    const ws = wsRef.current;
-    const t = xtermRef.current;
-    if (!t || ws?.readyState !== WebSocket.OPEN) return;
-    const nextSize = { cols: t.cols, rows: t.rows };
-    const lastSize = lastSentSizeRef.current;
-    if (lastSize?.cols === nextSize.cols && lastSize.rows === nextSize.rows) return;
-    lastSentSizeRef.current = nextSize;
-    ws.send(JSON.stringify({ type: "resize", cols: nextSize.cols, rows: nextSize.rows }));
-  }
-
   function sendResizeNow(force = false) {
     const ws = wsRef.current;
     const t = xtermRef.current;
-    if (!t || ws?.readyState !== WebSocket.OPEN) return false;
+    if (!t) return false;
+    if (ws?.readyState !== WebSocket.OPEN) return false;
     const nextSize = { cols: t.cols, rows: t.rows };
     if (nextSize.cols <= 0 || nextSize.rows <= 0) return false;
     const lastSize = lastSentSizeRef.current;
@@ -54,12 +169,49 @@ export function XtermInstance({ projectId, terminalId, command, isActive, layout
     return true;
   }
 
-  function scheduleResizeNotify() {
-    if (resizeNotifyTimerRef.current !== null) return;
-    resizeNotifyTimerRef.current = window.setTimeout(() => {
-      resizeNotifyTimerRef.current = null;
-      sendResizeIfChanged();
-    }, 60);
+  function fitAndResize(force = false) {
+    const fitted = fitAndNotify({ notify: false });
+    if (!fitted) return false;
+    return sendResizeNow(force);
+  }
+
+  function scheduleResizeAfterFit({ force = false, delay = 80 }: { force?: boolean; delay?: number } = {}) {
+    if (!receivedFirstFrameRef.current) return;
+    if (resizeDebounceTimerRef.current !== null) {
+      window.clearTimeout(resizeDebounceTimerRef.current);
+    }
+    resizeDebounceTimerRef.current = window.setTimeout(() => {
+      resizeDebounceTimerRef.current = null;
+      fitAndResize(force);
+    }, delay);
+  }
+
+  function afterFirstTerminalFrame() {
+    if (receivedFirstFrameRef.current) return;
+    receivedFirstFrameRef.current = true;
+    window.requestAnimationFrame(() => scheduleResizeAfterFit({ force: true, delay: 0 }));
+  }
+
+  function writeTerminalData(data: string | Uint8Array) {
+    const term = xtermRef.current;
+    if (!term) return;
+    if (!terminalReadyRef.current) {
+      incomingBuf.current.push(data);
+      return;
+    }
+    term.write(data);
+    afterFirstTerminalFrame();
+  }
+
+  function flushTerminalData() {
+    const term = xtermRef.current;
+    if (!term || !terminalReadyRef.current || incomingBuf.current.length === 0) return;
+    const pending = incomingBuf.current;
+    incomingBuf.current = [];
+    for (const data of pending) {
+      term.write(data);
+    }
+    afterFirstTerminalFrame();
   }
 
   function fitAndNotify({ notify = true }: { notify?: boolean } = {}) {
@@ -72,47 +224,36 @@ export function XtermInstance({ projectId, terminalId, command, isActive, layout
     try {
       fit.fit();
       t.refresh(0, Math.max(0, t.rows - 1));
-      if (notify) scheduleResizeNotify();
+      if (notify) fitAndResize();
       return true;
     } catch {
       return false;
     }
   }
 
-  function scheduleFitBurst() {
-    const frames: number[] = [];
-    const timers: number[] = [];
-    frames.push(window.requestAnimationFrame(() => {
-      fitAndNotify();
-      frames.push(window.requestAnimationFrame(() => fitAndNotify()));
-    }));
-    [40, 120, 300, 650, 1200].forEach((delay) => {
-      timers.push(window.setTimeout(() => fitAndNotify(), delay));
-    });
-    return () => {
-      frames.forEach((frame) => window.cancelAnimationFrame(frame));
-      timers.forEach((timer) => window.clearTimeout(timer));
-    };
+  function measureTerminalSize() {
+    const fit = fitAddonRef.current;
+    const t = xtermRef.current;
+    if (!fit || !t) return { cols: 0, rows: 0 };
+    try {
+      fit.fit();
+    } catch {
+      return { cols: 0, rows: 0 };
+    }
+    return { cols: t.cols, rows: t.rows };
   }
 
-  function forceInitialResize() {
-    let cancelled = false;
+  function scheduleFitBurst({ notify = false }: { notify?: boolean } = {}) {
     const frames: number[] = [];
     const timers: number[] = [];
-    const attempt = () => {
-      if (cancelled) return;
-      const fitted = fitAndNotify({ notify: false });
-      if (fitted && sendResizeNow(true)) return;
-    };
     frames.push(window.requestAnimationFrame(() => {
-      attempt();
-      frames.push(window.requestAnimationFrame(attempt));
+      fitAndNotify({ notify });
+      frames.push(window.requestAnimationFrame(() => fitAndNotify({ notify })));
     }));
-    [30, 80, 160, 320, 700, 1200].forEach((delay) => {
-      timers.push(window.setTimeout(attempt, delay));
+    [40, 120, 300, 650, 1200].forEach((delay) => {
+      timers.push(window.setTimeout(() => fitAndNotify({ notify }), delay));
     });
     return () => {
-      cancelled = true;
       frames.forEach((frame) => window.cancelAnimationFrame(frame));
       timers.forEach((timer) => window.clearTimeout(timer));
     };
@@ -122,187 +263,282 @@ export function XtermInstance({ projectId, terminalId, command, isActive, layout
     const container = containerRef.current;
     if (!container) return;
 
-    /* ── 1. Create xterm.js instance ── */
-    const term = new XTerminal({
-      cursorBlink:   true,
-      cursorStyle:   "bar",
-      fontSize:      12,
-      fontFamily:    "JetBrains Mono, Menlo, Monaco, Consolas, monospace",
-      lineHeight:    1.2,
-      scrollback:    5000,
-      scrollSensitivity: 1,
-      scrollOnUserInput: true,
-      allowProposedApi: true,
-      theme: {
-        background:          "#fafafa",
-        foreground:          "#1e293b",
-        cursor:              "#4f46e5",
-        cursorAccent:        "#ffffff",
-        selectionBackground: "rgba(99, 102, 241, 0.18)",
-        selectionForeground: "#1e293b",
-        black:               "#1e293b",
-        red:                 "#e11d48",
-        green:               "#16a34a",
-        yellow:              "#ca8a04",
-        blue:                "#2563eb",
-        magenta:             "#9333ea",
-        cyan:                "#0891b2",
-        white:               "#f1f5f9",
-        brightBlack:         "#64748b",
-        brightRed:           "#f43f5e",
-        brightGreen:         "#22c55e",
-        brightYellow:        "#eab308",
-        brightBlue:          "#3b82f6",
-        brightMagenta:       "#a855f7",
-        brightCyan:          "#06b6d4",
-        brightWhite:         "#ffffff",
-      },
-    });
-
-    xtermRef.current = term;
-    const fitAddon = new FitAddon();
-    fitAddonRef.current = fitAddon;
-    term.loadAddon(fitAddon);
-
-    const titleDisposable = term.onTitleChange((title) => {
-      onTitleChangeRef.current?.(title, undefined, "terminal");
-    });
-
-    term.attachCustomWheelEventHandler((event) => {
-      if (event.ctrlKey) return true;
-      const rawDelta = event.deltaMode === WheelEvent.DOM_DELTA_PIXEL
-        ? event.deltaY / 18
-        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-          ? event.deltaY * term.rows
-          : event.deltaY;
-      const lines = Math.sign(rawDelta) * Math.max(1, Math.min(12, Math.round(Math.abs(rawDelta))));
-      term.scrollLines(lines);
-      event.preventDefault();
-      event.stopPropagation();
-      return false;
-    });
-
-    /* Mount terminal into the container div */
-    term.open(container);
-
-    const cancelInitialFit = scheduleFitBurst();
-    let cancelInitialResize: (() => void) | null = null;
+    let term: XTerminal | null = null;
+    let fitAddon: FitAddon | null = null;
+    let titleDisposable: { dispose: () => void } | null = null;
+    let connectFrame: number | null = null;
+    let cancelInitialFit: (() => void) | null = null;
     let cancelFontFit: (() => void) | null = null;
-    void document.fonts?.ready.then(() => {
-      if (!disposedRef.current) cancelFontFit = scheduleFitBurst();
-    });
+    const postOpenResizeTimers: number[] = [];
 
-    /* ── 2. WebSocket connection ── */
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const currentHost = window.location.hostname || "localhost";
-    const currentPort = window.location.port;
-    const host = currentPort === "5173"
-      ? `${currentHost}:18080`
-      : (window.location.host || "localhost:18080");
-    const wsUrl = `${proto}//${host}/ws/terminal?project_id=${encodeURIComponent(projectId)}&terminal_id=${encodeURIComponent(terminalId)}&command=${encodeURIComponent(command)}`;
-
+    let initialized = false;
     disposedRef.current = false;
-    const connect = () => {
-      if (disposedRef.current) return;
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-      ws.binaryType = "arraybuffer";
 
-      ws.onopen = () => {
-        for (const chunk of inputBuf.current) {
-          ws.send(chunk);
+    const initTerminalAndWS = () => {
+      if (initialized || disposedRef.current) return;
+      initialized = true;
+      receivedFirstFrameRef.current = false;
+      terminalReadyRef.current = false;
+      incomingBuf.current = [];
+
+      /* ── 1. Create xterm.js instance ── */
+      const terminalTheme = getXtermTheme(theme);
+      term = new XTerminal({
+        cursorBlink:   true,
+        cursorStyle:   "bar",
+        fontSize:      12,
+        fontFamily:    "JetBrains Mono, Menlo, Monaco, Consolas, monospace",
+        lineHeight:    1.2,
+        scrollback:    5000,
+        scrollSensitivity: 1,
+        scrollOnUserInput: true,
+        allowProposedApi: true,
+        theme: {
+          ...terminalTheme,
+          background: resolvePanelBackground(container, terminalTheme.background),
         }
-        inputBuf.current = [];
-        lastSentSizeRef.current = null;
-        cancelInitialResize?.();
-        cancelInitialResize = forceInitialResize();
-        scheduleFitBurst();
-      };
+      });
 
-      ws.onmessage = (event) => {
-        if (event.data instanceof ArrayBuffer) {
-          term.write(new Uint8Array(event.data));
-        } else if (typeof event.data === "string") {
-          try {
-            const message = JSON.parse(event.data) as { type?: string; title?: string; command?: string };
-            if (message.type === "title" && typeof message.title === "string") {
-              onTitleChangeRef.current?.(message.title, message.command, "tmux");
-              return;
-            }
-          } catch {
-            // Plain terminal text from the PTY.
+      xtermRef.current = term;
+      fitAddon = new FitAddon();
+      fitAddonRef.current = fitAddon;
+      term.loadAddon(fitAddon);
+
+      titleDisposable = term.onTitleChange((title) => {
+        onTitleChangeRef.current?.(title, undefined, "terminal");
+      });
+
+      term.attachCustomWheelEventHandler((event) => {
+        if (event.ctrlKey) return true;
+        const rawDelta = event.deltaMode === WheelEvent.DOM_DELTA_PIXEL
+          ? event.deltaY / 18
+          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+            ? event.deltaY * term!.rows
+            : event.deltaY;
+        const lines = Math.sign(rawDelta) * Math.max(1, Math.min(12, Math.round(Math.abs(rawDelta))));
+        term!.scrollLines(lines);
+        event.preventDefault();
+        event.stopPropagation();
+        return false;
+      });
+
+      /* Mount terminal into the container div */
+      term.open(container);
+
+      // Force instant initial fit calculation before websocket runs
+      try {
+        fitAddon.fit();
+      } catch (e) {}
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          if (disposedRef.current) return;
+          if (fitAndNotify({ notify: false })) {
+            terminalReadyRef.current = true;
+            flushTerminalData();
           }
-          term.write(event.data);
+        });
+      });
+
+      cancelInitialFit = scheduleFitBurst();
+      cancelFontFit = scheduleFitBurst();
+      void document.fonts?.ready.then(() => {
+        if (!disposedRef.current && fitAddon) {
+          try {
+            fitAddon.fit();
+          } catch (e) {}
         }
-      };
+      });
 
-      ws.onerror = () => {
-        if (disposedRef.current) return;
-        term.write("\r\n\x1b[31m[WebSocket connection failed]\x1b[0m\r\n");
-      };
-
-      ws.onclose = () => {
-        if (disposedRef.current) return;
-        term.write("\r\n\x1b[33m[Connection closed, reconnecting...]\x1b[0m\r\n");
-        reconnectTimerRef.current = window.setTimeout(connect, 1000);
-      };
-    };
-    const connectFrame = window.requestAnimationFrame(connect);
-
-    /* ── 3. User input → WS ── */
-    term.onData((data) => {
-      const current = wsRef.current;
-      if (current?.readyState === WebSocket.OPEN) {
-        current.send(data);
-      } else {
-        inputBuf.current.push(data);
+      /* ── 2. WebSocket connection ── */
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const currentHost = window.location.hostname || "localhost";
+      const currentPort = window.location.port;
+      const host = currentPort === "5173"
+        ? `${currentHost}:18080`
+        : (window.location.host || "localhost:18080");
+      const initialSize = measureTerminalSize();
+      const wsParams = new URLSearchParams({
+        project_id: projectId,
+        terminal_id: terminalId,
+        command,
+      });
+      if (initialSize.cols > 0 && initialSize.rows > 0) {
+        wsParams.set("cols", String(initialSize.cols));
+        wsParams.set("rows", String(initialSize.rows));
       }
-    });
+      const wsUrl = `${proto}//${host}/ws/terminal?${wsParams.toString()}`;
+
+      const connect = () => {
+        if (disposedRef.current) return;
+        const socket = new WebSocket(wsUrl);
+        wsRef.current = socket;
+        socket.binaryType = "arraybuffer";
+
+        socket.onopen = () => {
+          for (const chunk of inputBuf.current) {
+            socket.send(chunk);
+          }
+          inputBuf.current = [];
+          lastSentSizeRef.current = null;
+          scheduleFitBurst();
+          [500, 2000].forEach((delay) => {
+            postOpenResizeTimers.push(window.setTimeout(() => {
+              fitAndResize(true);
+            }, delay));
+          });
+        };
+
+        socket.onmessage = (event) => {
+          if (event.data instanceof ArrayBuffer) {
+            writeTerminalData(new Uint8Array(event.data));
+          } else if (typeof event.data === "string") {
+            try {
+              const message = JSON.parse(event.data) as { type?: string; title?: string; command?: string };
+              if (message.type === "title" && typeof message.title === "string") {
+                onTitleChangeRef.current?.(message.title, message.command, "tmux");
+                return;
+              }
+            } catch {
+              // Plain terminal text
+            }
+            writeTerminalData(event.data);
+          }
+        };
+
+        socket.onerror = () => {
+          if (disposedRef.current) return;
+          term!.write("\r\n\x1b[31m[WebSocket connection failed]\x1b[0m\r\n");
+        };
+
+        socket.onclose = () => {
+          if (disposedRef.current) return;
+          term!.write("\r\n\x1b[33m[Connection closed, reconnecting...]\x1b[0m\r\n");
+          reconnectTimerRef.current = window.setTimeout(connect, 1000);
+        };
+      };
+
+      connectFrame = window.requestAnimationFrame(connect);
+
+      /* ── 3. User input → WS ── */
+      term.onData((data) => {
+        const current = wsRef.current;
+        if (current?.readyState === WebSocket.OPEN) {
+          current.send(data);
+        } else {
+          inputBuf.current.push(data);
+        }
+      });
+    };
+
+    // Check size immediately to see if we can initialize right away
+    const rect = container.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      initTerminalAndWS();
+    }
 
     /* ── 4. Resize observer — refit when container dimensions change ── */
     const ro = new ResizeObserver(() => {
-      scheduleFitBurst();
+      const r = container.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        if (!initialized) {
+          initTerminalAndWS();
+        } else {
+          scheduleFitBurst();
+          scheduleResizeAfterFit();
+        }
+      }
     });
 
     // Observe the container itself AND its nearest scrollable ancestor
     ro.observe(container);
     if (container.parentElement) ro.observe(container.parentElement);
 
+    // Listen to window resize events to force PTY resize update
+    const handleWinResize = () => {
+      lastSentSizeRef.current = null;
+      scheduleFitBurst();
+      scheduleResizeAfterFit({ delay: 120 });
+    };
+    window.addEventListener("resize", handleWinResize);
+
     /* ── 5. Cleanup ── */
     return () => {
       disposedRef.current = true;
-      cancelInitialFit();
-      cancelInitialResize?.();
-      cancelFontFit?.();
+      if (cancelInitialFit) cancelInitialFit();
+      if (cancelFontFit) cancelFontFit();
+      window.removeEventListener("resize", handleWinResize);
       if (reconnectTimerRef.current !== null) {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
-      if (resizeNotifyTimerRef.current !== null) {
-        window.clearTimeout(resizeNotifyTimerRef.current);
-        resizeNotifyTimerRef.current = null;
+      postOpenResizeTimers.forEach((timer) => window.clearTimeout(timer));
+      if (resizeDebounceTimerRef.current !== null) {
+        window.clearTimeout(resizeDebounceTimerRef.current);
+        resizeDebounceTimerRef.current = null;
       }
+      receivedFirstFrameRef.current = false;
+      terminalReadyRef.current = false;
+      incomingBuf.current = [];
       ro.disconnect();
-      titleDisposable.dispose();
-      window.cancelAnimationFrame(connectFrame);
+      if (titleDisposable) titleDisposable.dispose();
+      if (connectFrame !== null) window.cancelAnimationFrame(connectFrame);
       if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
         wsRef.current.close();
       }
       wsRef.current = null;
-      term.dispose();
+      if (term) term.dispose();
       inputBuf.current = [];
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, terminalId, command]);
 
-  /* Re-fit when this pane becomes the focused/active one */
+  /* Dynamic xterm theme switching */
+  useEffect(() => {
+    const term = xtermRef.current;
+    const container = containerRef.current;
+    if (!term) return;
+    const nextTheme = getXtermTheme(theme);
+    term.options.theme = {
+      ...nextTheme,
+      background: resolvePanelBackground(container, nextTheme.background),
+    };
+  }, [theme]);
+
+
+  /* Re-fit and force PTY size sync when this pane becomes the focused/active one */
   useEffect(() => {
     if (!isActive) return;
-    return scheduleFitBurst();
+    const timer1 = window.setTimeout(() => {
+      scheduleFitBurst();
+      scheduleResizeAfterFit();
+    }, 150);
+    const timer2 = window.setTimeout(() => {
+      scheduleFitBurst();
+      scheduleResizeAfterFit();
+    }, 400);
+    const cleanup = scheduleFitBurst();
+    return () => {
+      cleanup();
+      window.clearTimeout(timer1);
+      window.clearTimeout(timer2);
+    };
   }, [isActive]);
 
   useEffect(() => {
-    return scheduleFitBurst();
+    const timer1 = window.setTimeout(() => {
+      scheduleFitBurst();
+      scheduleResizeAfterFit();
+    }, 150);
+    const timer2 = window.setTimeout(() => {
+      scheduleFitBurst();
+      scheduleResizeAfterFit();
+    }, 400);
+    const cleanup = scheduleFitBurst();
+    return () => {
+      cleanup();
+      window.clearTimeout(timer1);
+      window.clearTimeout(timer2);
+    };
   }, [layoutVersion]);
 
   /*

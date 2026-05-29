@@ -6,6 +6,8 @@ export type TerminalKind = "bash" | "claude" | "codex" | "opencode" | "pi" | "ag
 export type SplitDirection = "left" | "right" | "top" | "bottom";
 export type TerminalAccent = "indigo" | "violet" | "emerald" | "amber" | "cyan" | "rose";
 export type TerminalTitleSource = "initial" | "tmux" | "terminal";
+export type StudioTheme = "light" | "dark" | "synthwave" | "onedark";
+
 
 export interface TerminalTypeDefinition {
   value: TerminalKind;

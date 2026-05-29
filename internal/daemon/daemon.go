@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 
+	"remote-agent/internal/hostinfo"
 	"remote-agent/internal/protocol"
 )
 
@@ -102,7 +104,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 
 	d.send <- protocol.NewEnvelope(protocol.TypeDaemonHello, "daemon", protocol.DaemonHello{
 		DeviceID:      d.cfg.Device.ID,
-		DeviceName:    d.cfg.Device.Name,
+		DeviceName:    hostinfo.ResolveDeviceName(d.cfg.Device.Name),
 		DaemonVersion: "0.1.0",
 		Agent:         d.agentName(),
 		AgentLabel:    d.agentLabel(),
@@ -2350,9 +2352,11 @@ type runningPTY struct {
 func (d *Daemon) startTerminalStream(parent context.Context, req protocol.TerminalStreamStart) {
 	key := req.ProjectID + "::" + req.TerminalID
 	d.termMu.Lock()
-	if _, exists := d.terminalPTYs[key]; exists {
+	if rPty, exists := d.terminalPTYs[key]; exists {
 		d.termMu.Unlock()
 		sessionName := "pocket-studio-" + req.ProjectID + "-" + req.TerminalID
+		applyTerminalSize(rPty.ptyFile, req.Cols, req.Rows)
+		resizeTmuxSession(sessionName, req.Cols, req.Rows)
 		d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
 		return
 	}
@@ -2368,18 +2372,22 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	initialTitle := initialTerminalTitle(req.Command, req.InitialTitle)
 	var cmd *exec.Cmd
 	if req.Command != "" {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, req.Command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, req.Command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
 	} else {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
 	}
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = terminalEnv()
 
 	ptyFile, err := pty.Start(cmd)
 	if err != nil {
 		log.Printf("daemon failed to start tmux: %v. falling back to bash.", err)
-		cmd = exec.Command("bash")
+		if req.Command != "" {
+			cmd = exec.Command("bash", "-c", req.Command)
+		} else {
+			cmd = exec.Command("bash")
+		}
 		cmd.Dir = workspace.Path
-		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+		cmd.Env = terminalEnv()
 		ptyFile, err = pty.Start(cmd)
 		if err != nil {
 			d.termMu.Unlock()
@@ -2387,6 +2395,8 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 			return
 		}
 	}
+	applyTerminalSize(ptyFile, req.Cols, req.Rows)
+	resizeTmuxSession(sessionName, req.Cols, req.Rows)
 
 	done := make(chan struct{})
 	rPty := &runningPTY{
@@ -2513,6 +2523,29 @@ func tmuxCapturePane(sessionName string) []byte {
 	return append(raw, '\r')
 }
 
+func terminalEnv() []string {
+	return append(os.Environ(),
+		"TERM=xterm-256color",
+		"COLORTERM=truecolor",
+		"TERM_PROGRAM=PocketStudio",
+		"FORCE_COLOR=1",
+	)
+}
+
+func applyTerminalSize(ptyFile *os.File, cols uint16, rows uint16) {
+	if ptyFile == nil || cols == 0 || rows == 0 {
+		return
+	}
+	_ = pty.Setsize(ptyFile, &pty.Winsize{Cols: cols, Rows: rows})
+}
+
+func resizeTmuxSession(sessionName string, cols uint16, rows uint16) {
+	if sessionName == "" || cols == 0 || rows == 0 {
+		return
+	}
+	_ = exec.Command("tmux", "resize-window", "-t", sessionName, "-x", strconv.Itoa(int(cols)), "-y", strconv.Itoa(int(rows))).Run()
+}
+
 func initialTerminalTitle(command string, fallback string) string {
 	fallback = strings.TrimSpace(fallback)
 	if fallback != "" {
@@ -2556,10 +2589,9 @@ func (d *Daemon) resizeTerminalStream(req protocol.TerminalStreamResize) {
 	d.termMu.Unlock()
 
 	if rPty != nil {
-		_ = pty.Setsize(rPty.ptyFile, &pty.Winsize{
-			Cols: req.Cols,
-			Rows: req.Rows,
-		})
+		sessionName := "pocket-studio-" + req.ProjectID + "-" + req.TerminalID
+		applyTerminalSize(rPty.ptyFile, req.Cols, req.Rows)
+		resizeTmuxSession(sessionName, req.Cols, req.Rows)
 	}
 }
 

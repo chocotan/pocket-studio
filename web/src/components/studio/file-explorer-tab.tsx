@@ -47,16 +47,20 @@ interface FileTreeNode {
   loaded?: boolean;
 }
 
+import { type StudioTheme } from "./terminal-types";
+
 interface FileExplorerTabProps {
   projectId: string;
   workspacePath: string;
   active: boolean;
   layoutVersion: number;
   onOpenFile: (path: string) => void;
+  theme?: StudioTheme;
 }
 
-export function FileExplorerTab({ projectId, workspacePath, active, layoutVersion, onOpenFile }: FileExplorerTabProps) {
+export function FileExplorerTab({ projectId, workspacePath, active, layoutVersion, onOpenFile, theme = "light" }: FileExplorerTabProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  void theme;
   const [treeData, setTreeData] = useState<FileTreeNode[]>([]);
   const [error, setError] = useState("");
   const [loadingRoot, setLoadingRoot] = useState(true);
@@ -249,11 +253,11 @@ export function FileExplorerTab({ projectId, workspacePath, active, layoutVersio
   }
 
   return (
-    <div ref={containerRef} className="flex h-full min-h-0 flex-col bg-[#fbfbfb]">
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-slate-200/70 px-3">
+    <div ref={containerRef} className="flex h-full min-h-0 flex-col bg-card text-card-foreground">
+      <div className="flex h-9 shrink-0 items-center justify-between border-b border-border/60 px-3">
         <div className="min-w-0">
-          <div className="truncate text-[11px] font-semibold text-slate-700">{rootName}</div>
-          <div className="truncate text-[10px] text-slate-400">{workspacePath}</div>
+          <div className="truncate text-[11px] font-bold text-foreground/80">{rootName}</div>
+          <div className="truncate text-[10px] text-muted-foreground">{workspacePath}</div>
         </div>
         <button
           type="button"
@@ -261,38 +265,38 @@ export function FileExplorerTab({ projectId, workspacePath, active, layoutVersio
             event.stopPropagation();
             refresh();
           }}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-indigo-600"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-indigo-650 dark:hover:text-indigo-400 transition-colors"
           aria-label="刷新文件资源管理器"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${loadingRoot ? "animate-spin" : ""}`} />
         </button>
       </div>
       {error && (
-        <div className="mx-2 mt-2 rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-[11px] text-rose-700">
+        <div className="mx-2 mt-2 rounded-md border border-rose-200/30 bg-rose-500/10 px-2 py-1.5 text-[11px] text-rose-600 dark:text-rose-400">
           {error}
         </div>
       )}
-      <div className="flex h-8 shrink-0 items-center gap-1 border-b border-slate-100 px-2">
+      <div className="flex h-8 shrink-0 items-center gap-1 border-b border-border/40 px-2 bg-muted/20">
         <ToolbarButton title="新建文件" onClick={createFile}><FilePlus2 className="h-3.5 w-3.5" /></ToolbarButton>
         <ToolbarButton title="新建目录" onClick={createDirectory}><FolderPlus className="h-3.5 w-3.5" /></ToolbarButton>
         <ToolbarButton title="移动" onClick={moveSelected} disabled={!selectedEntry?.path}><MoveRight className="h-3.5 w-3.5" /></ToolbarButton>
         <ToolbarButton title="删除" onClick={deleteSelected} disabled={!selectedEntry?.path}><Trash2 className="h-3.5 w-3.5" /></ToolbarButton>
-        <div className="h-4 w-px bg-slate-200" />
+        <div className="h-4 w-px bg-border" />
         <ToolbarButton title="刷新" onClick={refresh}><RefreshCw className={`h-3.5 w-3.5 ${loadingRoot ? "animate-spin" : ""}`} /></ToolbarButton>
         {selectedEntry?.path && (
-          <span className="ml-1 min-w-0 flex-1 truncate text-[10px] text-slate-400" title={selectedEntry.path}>
+          <span className="ml-1 min-w-0 flex-1 truncate text-[10px] text-muted-foreground" title={selectedEntry.path}>
             {selectedEntry.path}
           </span>
         )}
       </div>
-      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-slate-100 px-2">
-        <Search className="h-3.5 w-3.5 text-slate-400" />
+      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-border/40 px-2">
+        <Search className="h-3.5 w-3.5 text-muted-foreground" />
         <input
           value={searchQuery}
           onChange={(event) => setSearchQuery(event.target.value)}
           onClick={(event) => event.stopPropagation()}
           placeholder="搜索文件"
-          className="min-w-0 flex-1 bg-transparent text-[11px] text-slate-700 outline-none placeholder:text-slate-400"
+          className="min-w-0 flex-1 bg-transparent text-[11px] text-foreground outline-none placeholder:text-muted-foreground"
         />
         {searchQuery && (
           <button
@@ -301,7 +305,7 @@ export function FileExplorerTab({ projectId, workspacePath, active, layoutVersio
               event.stopPropagation();
               setSearchQuery("");
             }}
-            className="flex h-5 w-5 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+            className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
             aria-label="清空搜索"
           >
             <X className="h-3 w-3" />
@@ -381,8 +385,10 @@ function FileTreeRow({
           onOpenFile(node.data.path);
         }
       }}
-      className={`group flex cursor-default select-none items-center gap-1 rounded px-1.5 text-[11px] ${
-        node.isSelected ? "bg-indigo-50 text-indigo-700" : "text-slate-600 hover:bg-slate-100"
+      className={`group flex cursor-default select-none items-center gap-1 rounded px-1.5 py-0.5 text-[11px] transition-colors ${
+        node.isSelected
+          ? "bg-indigo-500/15 text-indigo-650 dark:text-indigo-400 font-semibold"
+          : "text-foreground/80 hover:bg-muted/70 hover:text-foreground"
       }`}
       title={node.data.path || node.data.name}
     >
@@ -424,7 +430,7 @@ function SearchResults({
             event.stopPropagation();
             onOpenFile(item.path);
           }}
-          className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] text-slate-600 hover:bg-slate-100 hover:text-indigo-700"
+          className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px] text-foreground/80 hover:bg-muted/70 hover:text-foreground transition-colors"
           title={item.path}
         >
           {(() => {
