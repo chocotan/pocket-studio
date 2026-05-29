@@ -2350,14 +2350,11 @@ type runningPTY struct {
 func (d *Daemon) startTerminalStream(parent context.Context, req protocol.TerminalStreamStart) {
 	key := req.ProjectID + "::" + req.TerminalID
 	d.termMu.Lock()
-	if old, exists := d.terminalPTYs[key]; exists {
+	if _, exists := d.terminalPTYs[key]; exists {
 		d.termMu.Unlock()
-		_ = old.ptyFile.Close()
-		if old.cmd.Process != nil {
-			_ = old.cmd.Process.Kill()
-		}
-		<-old.done
-		d.termMu.Lock()
+		sessionName := "pocket-studio-" + req.ProjectID + "-" + req.TerminalID
+		d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
+		return
 	}
 
 	workspace, err := d.resolveWorkspacePath("", req.WorkspacePath)
@@ -2368,18 +2365,21 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	}
 
 	sessionName := "pocket-studio-" + req.ProjectID + "-" + req.TerminalID
+	initialTitle := initialTerminalTitle(req.Command, req.InitialTitle)
 	var cmd *exec.Cmd
 	if req.Command != "" {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-c", workspace.Path, req.Command)
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, req.Command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
 	} else {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-c", workspace.Path)
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
 	}
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
 	ptyFile, err := pty.Start(cmd)
 	if err != nil {
 		log.Printf("daemon failed to start tmux: %v. falling back to bash.", err)
 		cmd = exec.Command("bash")
 		cmd.Dir = workspace.Path
+		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 		ptyFile, err = pty.Start(cmd)
 		if err != nil {
 			d.termMu.Unlock()
@@ -2398,6 +2398,8 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	}
 	d.terminalPTYs[key] = rPty
 	d.termMu.Unlock()
+	go d.watchTerminalTitle(parent, req.ProjectID, req.TerminalID, sessionName, done)
+	d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
 
 	go func() {
 		defer func() {
@@ -2433,6 +2435,107 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", dataPayload)
 		}
 	}()
+}
+
+func (d *Daemon) sendTerminalSnapshot(projectID string, terminalID string, sessionName string) {
+	if data := tmuxCapturePane(sessionName); len(data) > 0 {
+		d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", protocol.TerminalStreamData{
+			ProjectID:  projectID,
+			TerminalID: terminalID,
+			Data:       data,
+		})
+	}
+	title, command := tmuxTerminalInfo(sessionName)
+	if title != "" {
+		d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamTitle, "daemon", protocol.TerminalStreamTitle{
+			ProjectID:  projectID,
+			TerminalID: terminalID,
+			Title:      title,
+			Command:    command,
+		})
+	}
+}
+
+func (d *Daemon) watchTerminalTitle(ctx context.Context, projectID string, terminalID string, sessionName string, done <-chan struct{}) {
+	ticker := time.NewTicker(1200 * time.Millisecond)
+	defer ticker.Stop()
+	lastTitle := ""
+	lastCommand := ""
+	for {
+		title, command := tmuxTerminalInfo(sessionName)
+		if title != "" && (title != lastTitle || command != lastCommand) {
+			lastTitle = title
+			lastCommand = command
+			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamTitle, "daemon", protocol.TerminalStreamTitle{
+				ProjectID:  projectID,
+				TerminalID: terminalID,
+				Title:      title,
+				Command:    command,
+			})
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func tmuxTerminalInfo(sessionName string) (string, string) {
+	cmd := exec.Command("tmux", "display-message", "-p", "-t", sessionName, "#{window_name}\t#{pane_current_command}")
+	raw, err := cmd.Output()
+	if err != nil {
+		return "", ""
+	}
+	parts := strings.SplitN(strings.TrimSpace(string(raw)), "\t", 2)
+	title := strings.TrimSpace(parts[0])
+	command := ""
+	if len(parts) > 1 {
+		command = strings.TrimSpace(parts[1])
+	}
+	if title == "" {
+		title = command
+	}
+	return title, command
+}
+
+func tmuxCapturePane(sessionName string) []byte {
+	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", sessionName)
+	raw, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	return append(raw, '\r')
+}
+
+func initialTerminalTitle(command string, fallback string) string {
+	fallback = strings.TrimSpace(fallback)
+	if fallback != "" {
+		return fallback
+	}
+	command = strings.TrimSpace(command)
+	if command == "" || command == "bash" || command == "zsh" || command == "sh" {
+		return "Shell"
+	}
+	switch {
+	case strings.Contains(command, "claude"):
+		return "Claude Code"
+	case strings.Contains(command, "codex"):
+		return "Codex"
+	case strings.Contains(command, "opencode"):
+		return "OpenCode"
+	case command == "pi" || strings.HasPrefix(command, "pi "):
+		return "Pi"
+	case command == "agy" || strings.Contains(command, "antigravity"):
+		return "Antigravity"
+	default:
+		return command
+	}
 }
 
 func (d *Daemon) writeTerminalStream(req protocol.TerminalStreamData) {

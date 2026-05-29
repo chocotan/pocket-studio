@@ -4,14 +4,36 @@ import { StudioWorkspace } from "./components/studio/studio-workspace";
 import type { Device } from "./lib/types";
 
 export default function App() {
-  const [view, setView] = useState<"studio_dashboard" | "studio_workspace">("studio_dashboard");
+  const initialProjectId = projectIdFromPath();
+  const [view, setView] = useState<"studio_dashboard" | "studio_workspace">(
+    initialProjectId ? "studio_workspace" : "studio_dashboard"
+  );
   const [devices, setDevices] = useState<Device[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(initialProjectId);
 
   useEffect(() => {
     refreshAll();
   }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const projectId = projectIdFromPath();
+      setSelectedProjectId(projectId);
+      setView(projectId ? "studio_workspace" : "studio_dashboard");
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedProjectId || projects.length === 0) return;
+    if (!projects.some((project) => project.id === selectedProjectId)) {
+      setSelectedProjectId("");
+      setView("studio_dashboard");
+      replacePath("/");
+    }
+  }, [projects, selectedProjectId]);
 
   async function refreshAll() {
     try {
@@ -62,6 +84,7 @@ export default function App() {
   function handleSelectProject(projectId: string) {
     setSelectedProjectId(projectId);
     setView("studio_workspace");
+    pushPath(`/projects/${encodeURIComponent(projectId)}`);
   }
 
   const activeProject = projects.find((p) => p.id === selectedProjectId);
@@ -83,10 +106,27 @@ export default function App() {
             onBackToDashboard={() => {
               refreshAll();
               setView("studio_dashboard");
+              setSelectedProjectId("");
+              pushPath("/");
             }}
           />
         )
       )}
     </div>
   );
+}
+
+function projectIdFromPath() {
+  const match = window.location.pathname.match(/^\/projects\/([^/]+)\/?$/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
+
+function pushPath(path: string) {
+  if (window.location.pathname === path) return;
+  window.history.pushState({}, "", path);
+}
+
+function replacePath(path: string) {
+  if (window.location.pathname === path) return;
+  window.history.replaceState({}, "", path);
 }

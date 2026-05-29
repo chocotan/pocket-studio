@@ -35,6 +35,7 @@ export interface Project {
   workspace_path: string;
   agent_ids: string[];
   tmux_ids: string[];
+  studio_state?: unknown;
 }
 
 interface StudioDashboardProps {
@@ -107,14 +108,7 @@ export function StudioDashboard({
   }
 
   return (
-    <div className="min-h-screen bg-[oklch(0.985_0.004_250)] select-none font-sans overflow-y-auto">
-      {/* Ambient background decoration */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute -top-32 -left-32 w-[600px] h-[600px] rounded-full bg-indigo-500/5 blur-3xl" />
-        <div className="absolute -bottom-32 -right-32 w-[600px] h-[600px] rounded-full bg-violet-500/5 blur-3xl" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[900px] h-[400px] rounded-full bg-indigo-400/3 blur-3xl" />
-      </div>
-
+    <div className="studio-square min-h-screen bg-[#f8fafc] select-none font-sans overflow-y-auto">
       <div className="relative z-10 max-w-7xl mx-auto px-6 py-12">
         {/* ── Hero Header ── */}
         <header className="text-center mb-16 animate-fade-in">
@@ -127,7 +121,7 @@ export function StudioDashboard({
           </div>
 
           <h1 className="text-5xl sm:text-6xl font-extrabold tracking-tight leading-[1.12] mb-5">
-            <span className="bg-clip-text text-transparent bg-gradient-to-br from-slate-800 via-indigo-700 to-violet-600">
+            <span className="text-slate-900">
               轻量开发控制台
             </span>
           </h1>
@@ -311,26 +305,26 @@ export function StudioDashboard({
 
             <div className="space-y-1.5">
               <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                项目名称
+                显示名称
               </Label>
               <Input
                 required
                 value={newProjName}
                 onChange={(e) => setNewProjName(e.target.value)}
-                placeholder="例如 my-server-app"
+                placeholder="例如 remote-agent"
                 className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50"
               />
             </div>
 
             <div className="space-y-1.5">
               <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">
-                绝对工作目录
+                项目目录
               </Label>
               <Input
                 required
                 value={newProjPath}
                 onChange={(e) => setNewProjPath(e.target.value)}
-                placeholder="/home/user/projects/my-app"
+                placeholder="/home/choco/Downloads/remote-agent"
                 className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 font-mono"
               />
             </div>

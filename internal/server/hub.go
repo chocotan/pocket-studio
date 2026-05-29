@@ -1,13 +1,16 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -19,13 +22,20 @@ import (
 	"remote-agent/internal/protocol"
 )
 
+var (
+	safeTerminalIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,96}$`)
+)
+
+const maxProjectFileReadSize = 8 * 1024 * 1024
+
 type Project struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	DeviceID      string   `json:"device_id"`
-	WorkspacePath string   `json:"workspace_path"`
-	AgentIDs      []string `json:"agent_ids"`
-	TmuxIDs       []string `json:"tmux_ids"`
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	DeviceID      string          `json:"device_id"`
+	WorkspacePath string          `json:"workspace_path"`
+	AgentIDs      []string        `json:"agent_ids"`
+	TmuxIDs       []string        `json:"tmux_ids"`
+	StudioState   json.RawMessage `json:"studio_state,omitempty"`
 }
 
 type Hub struct {
@@ -39,7 +49,8 @@ type Hub struct {
 	projects      map[string]Project
 	projectStates map[string]string // projectId -> JSON string
 	termMu        sync.RWMutex
-	terminalConns map[string]*websocket.Conn
+	terminalConns map[string]*terminalConn
+	configDir     string
 }
 
 type daemonConn struct {
@@ -59,6 +70,11 @@ type webConn struct {
 	send chan protocol.Envelope
 }
 
+type terminalConn struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
 type DeviceView struct {
 	ID         string                     `json:"id"`
 	Name       string                     `json:"name"`
@@ -76,7 +92,7 @@ type StateView struct {
 }
 
 func NewHub() *Hub {
-	return &Hub{
+	h := &Hub{
 		daemons:       make(map[string]*daemonConn),
 		webs:          make(map[*webConn]struct{}),
 		taskDevices:   make(map[string]string),
@@ -85,7 +101,172 @@ func NewHub() *Hub {
 		pending:       make(map[string]chan protocol.Envelope),
 		projects:      make(map[string]Project),
 		projectStates: make(map[string]string),
-		terminalConns: make(map[string]*websocket.Conn),
+		terminalConns: make(map[string]*terminalConn),
+	}
+	h.configDir = pocketStudioConfigDir()
+	if err := h.loadProjects(); err != nil {
+		log.Printf("load projects: %v", err)
+	}
+	return h
+}
+
+func pocketStudioConfigDir() string {
+	if dir := strings.TrimSpace(os.Getenv("POCKET_STUDIO_CONFIG_DIR")); dir != "" {
+		return dir
+	}
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "pocket-studio")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".config", "pocket-studio")
+	}
+	return ".pocket-studio"
+}
+
+func (h *Hub) projectsPath() string {
+	return filepath.Join(h.configDir, "projects.json")
+}
+
+func (h *Hub) loadProjects() error {
+	raw, err := os.ReadFile(h.projectsPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var projects []Project
+	if err := json.Unmarshal(raw, &projects); err != nil {
+		return err
+	}
+	for _, project := range projects {
+		if project.ID == "" {
+			continue
+		}
+		if project.AgentIDs == nil {
+			project.AgentIDs = []string{}
+		}
+		if project.TmuxIDs == nil {
+			project.TmuxIDs = []string{}
+		}
+		if len(project.StudioState) > 0 {
+			h.projectStates[project.ID] = string(project.StudioState)
+		}
+		h.projects[project.ID] = project
+	}
+	return nil
+}
+
+func (h *Hub) saveProjectsLocked() error {
+	projects := make([]Project, 0, len(h.projects))
+	for _, project := range h.projects {
+		projects = append(projects, project)
+	}
+	sort.Slice(projects, func(i, j int) bool {
+		return projects[i].Name < projects[j].Name
+	})
+	if err := os.MkdirAll(h.configDir, 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(projects, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(h.projectsPath(), append(raw, '\n'), 0o644)
+}
+
+func (h *Hub) newProjectIDLocked() string {
+	for {
+		id := protocol.NewUUIDNoDash()
+		if _, exists := h.projects[id]; !exists {
+			return id
+		}
+	}
+}
+
+func (h *Hub) projectByID(projectID string) (Project, bool) {
+	if projectID == "" {
+		return Project{}, false
+	}
+	h.mu.RLock()
+	project, ok := h.projects[projectID]
+	h.mu.RUnlock()
+	return project, ok
+}
+
+func collectTerminalTabIDs(node any) []string {
+	var ids []string
+	var walk func(any)
+	walk = func(value any) {
+		obj, ok := value.(map[string]any)
+		if !ok {
+			return
+		}
+		typ, _ := obj["type"].(string)
+		if typ == "panel" {
+			tabs, _ := obj["tabs"].([]any)
+			for _, tabValue := range tabs {
+				tab, ok := tabValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				if kind, _ := tab["kind"].(string); kind != "" && kind != "terminal" {
+					continue
+				}
+				if id, _ := tab["id"].(string); id != "" {
+					ids = append(ids, id)
+				}
+			}
+			return
+		}
+		if typ == "pane" {
+			if id, _ := obj["id"].(string); id != "" {
+				ids = append(ids, id)
+			}
+			return
+		}
+		children, _ := obj["children"].([]any)
+		for _, child := range children {
+			walk(child)
+		}
+	}
+	walk(node)
+	return ids
+}
+
+func cleanStudioState(value any) {
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	if layout, ok := obj["layoutTree"]; ok {
+		cleanStudioLayout(layout)
+	}
+}
+
+func cleanStudioLayout(value any) {
+	obj, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	if title, ok := obj["title"].(string); ok {
+		obj["title"] = title
+	}
+	if tabs, ok := obj["tabs"].([]any); ok {
+		for _, tabValue := range tabs {
+			tab, ok := tabValue.(map[string]any)
+			if !ok {
+				continue
+			}
+			if title, ok := tab["title"].(string); ok {
+				tab["title"] = title
+			}
+		}
+	}
+	if children, ok := obj["children"].([]any); ok {
+		for _, child := range children {
+			cleanStudioLayout(child)
+		}
 	}
 }
 
@@ -133,11 +314,11 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 			list = append(list, p)
 		}
 		h.mu.RUnlock()
-		
+
 		sort.Slice(list, func(i, j int) bool {
 			return list[i].Name < list[j].Name
 		})
-		
+
 		writeJSON(w, http.StatusOK, list)
 		return
 	}
@@ -150,11 +331,9 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "name, device_id, and workspace_path are required"})
 			return
 		}
-		
+
 		h.mu.Lock()
-		if req.ID == "" {
-			req.ID = "proj-" + protocol.NewID("")[4:12]
-		}
+		req.ID = h.newProjectIDLocked()
 		if req.AgentIDs == nil {
 			req.AgentIDs = []string{}
 		}
@@ -162,8 +341,13 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 			req.TmuxIDs = []string{}
 		}
 		h.projects[req.ID] = req
+		if err := h.saveProjectsLocked(); err != nil {
+			h.mu.Unlock()
+			writeJSON(w, http.StatusInternalServerError, protocol.ServerError{Code: "save_failed", Message: err.Error()})
+			return
+		}
 		h.mu.Unlock()
-		
+
 		writeJSON(w, http.StatusOK, req)
 		return
 	}
@@ -174,25 +358,27 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "project_id is required"})
 				return
 			}
-			
+
 			h.mu.RLock()
 			state, ok := h.projectStates[projID]
 			h.mu.RUnlock()
-			
+
+			if !ok {
+				if project, exists := h.projects[projID]; exists && len(project.StudioState) > 0 {
+					state = string(project.StudioState)
+					ok = true
+				}
+			}
+
 			if !ok {
 				writeJSON(w, http.StatusOK, map[string]any{
-					"openFiles":       []any{},
-					"activeFilePath":  "",
-					"fileTree":        []any{},
-					"expandedPaths":   []string{"."},
-					"terminalLines":   []any{},
-					"explorerVisible": true,
-					"terminalVisible": false,
-					"activeTaskId":    "",
+					"layoutTree":      nil,
+					"focusedId":       "",
+					"newTerminalType": "bash",
 				})
 				return
 			}
-			
+
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(state))
@@ -209,49 +395,174 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "project_id is required"})
 				return
 			}
-			
+
+			cleanStudioState(req.State)
 			rawState, err := json.Marshal(req.State)
 			if err != nil {
 				writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_payload", Message: err.Error()})
 				return
 			}
-			
+
 			h.mu.Lock()
 			h.projectStates[req.ProjectID] = string(rawState)
-			
+
 			if proj, ok := h.projects[req.ProjectID]; ok {
+				proj.StudioState = append(proj.StudioState[:0], rawState...)
 				var parsedState struct {
-					ActiveTaskId string   `json:"activeTaskId"`
-					OpenTabs     []string `json:"openTabs"`
+					FocusedID  string `json:"focusedId"`
+					LayoutTree any    `json:"layoutTree"`
 				}
 				if json.Unmarshal(rawState, &parsedState) == nil {
-					var agentIDs []string
-					for _, tab := range parsedState.OpenTabs {
-						if strings.HasPrefix(tab, "agent-") || strings.HasPrefix(tab, "task-") {
-							agentIDs = append(agentIDs, tab)
-						}
+					if parsedState.FocusedID != "" {
+						proj.TmuxIDs = collectTerminalTabIDs(parsedState.LayoutTree)
 					}
-					if parsedState.ActiveTaskId != "" {
-						found := false
-						for _, id := range agentIDs {
-							if id == parsedState.ActiveTaskId {
-								found = true
-								break
-							}
-						}
-						if !found {
-							agentIDs = append(agentIDs, parsedState.ActiveTaskId)
-						}
-					}
-					proj.AgentIDs = agentIDs
-					h.projects[req.ProjectID] = proj
 				}
+				h.projects[req.ProjectID] = proj
+			}
+			if err := h.saveProjectsLocked(); err != nil {
+				h.mu.Unlock()
+				writeJSON(w, http.StatusInternalServerError, protocol.ServerError{Code: "save_failed", Message: err.Error()})
+				return
 			}
 			h.mu.Unlock()
-			
+
 			writeJSON(w, http.StatusOK, map[string]any{"success": true})
 			return
 		}
+	}
+	if r.URL.Path == "/api/project/files" && r.Method == http.MethodPost {
+		var req struct {
+			ProjectID string `json:"project_id"`
+			Path      string `json:"path,omitempty"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.ProjectID == "" {
+			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "project_id is required"})
+			return
+		}
+		h.mu.RLock()
+		project, ok := h.projects[req.ProjectID]
+		h.mu.RUnlock()
+		if !ok {
+			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
+			return
+		}
+		if project.DeviceID != "dev_local" {
+			requestID := protocol.NewID("req")
+			env, err := h.requestDaemon(r, protocol.TypeWorkspaceList, project.WorkspacePath, requestID, protocol.WorkspaceListRequest{
+				RequestID:     requestID,
+				WorkspacePath: project.WorkspacePath,
+				Path:          req.Path,
+			})
+			writeAPIEnvelope(w, env, err)
+			return
+		}
+		res, _ := h.handleLocalWorkspaceList(protocol.WorkspaceListRequest{
+			RequestID:     protocol.NewID("req"),
+			WorkspacePath: project.WorkspacePath,
+			Path:          req.Path,
+		})
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
+	if r.URL.Path == "/api/project/search-files" && r.Method == http.MethodPost {
+		var req struct {
+			ProjectID string `json:"project_id"`
+			Query     string `json:"query"`
+			Limit     int    `json:"limit,omitempty"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		project, ok := h.projectByID(req.ProjectID)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
+			return
+		}
+		if project.DeviceID != "dev_local" {
+			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "unsupported", Message: "remote file search is not supported yet"})
+			return
+		}
+		writeJSON(w, http.StatusOK, h.handleLocalProjectFileSearch(project, req.Query, req.Limit))
+		return
+	}
+	if r.URL.Path == "/api/project/file/read" && r.Method == http.MethodPost {
+		var req struct {
+			ProjectID string `json:"project_id"`
+			Path      string `json:"path"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		project, ok := h.projectByID(req.ProjectID)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
+			return
+		}
+		if project.DeviceID != "dev_local" {
+			requestID := protocol.NewID("req")
+			env, err := h.requestDaemon(r, protocol.TypeWorkspaceRead, project.WorkspacePath, requestID, protocol.WorkspaceReadRequest{
+				RequestID:     requestID,
+				WorkspacePath: project.WorkspacePath,
+				Path:          req.Path,
+			})
+			writeAPIEnvelope(w, env, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, h.handleLocalProjectFileRead(project, req.Path))
+		return
+	}
+	if r.URL.Path == "/api/project/file/write" && r.Method == http.MethodPost {
+		var req struct {
+			ProjectID string `json:"project_id"`
+			Path      string `json:"path"`
+			Content   string `json:"content"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		project, ok := h.projectByID(req.ProjectID)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
+			return
+		}
+		if project.DeviceID != "dev_local" {
+			requestID := protocol.NewID("req")
+			env, err := h.requestDaemon(r, protocol.TypeWorkspaceWrite, project.WorkspacePath, requestID, protocol.WorkspaceWriteRequest{
+				RequestID:     requestID,
+				WorkspacePath: project.WorkspacePath,
+				Path:          req.Path,
+				Content:       req.Content,
+			})
+			writeAPIEnvelope(w, env, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, h.handleLocalProjectFileWrite(project, req.Path, req.Content))
+		return
+	}
+	if r.URL.Path == "/api/project/file/action" && r.Method == http.MethodPost {
+		var req struct {
+			ProjectID string `json:"project_id"`
+			Action    string `json:"action"`
+			Path      string `json:"path"`
+			Target    string `json:"target,omitempty"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		project, ok := h.projectByID(req.ProjectID)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
+			return
+		}
+		if project.DeviceID != "dev_local" {
+			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "unsupported", Message: "remote file actions are not supported yet"})
+			return
+		}
+		writeJSON(w, http.StatusOK, h.handleLocalProjectFileAction(project, req.Action, req.Path, req.Target))
+		return
 	}
 	if r.URL.Path == "/api/workspace/list" && r.Method == http.MethodPost {
 		var req protocol.WorkspaceListRequest
@@ -305,6 +616,22 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		env, err := h.requestDaemon(r, protocol.TypeTerminalRun, req.WorkspacePath, req.RequestID, req)
 		writeAPIEnvelope(w, env, err)
+		return
+	}
+	if r.URL.Path == "/api/terminal/close" && r.Method == http.MethodPost {
+		var req struct {
+			ProjectID  string `json:"project_id"`
+			TerminalID string `json:"terminal_id"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.ProjectID == "" || req.TerminalID == "" {
+			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "project_id and terminal_id are required"})
+			return
+		}
+		h.closeTerminal(req.ProjectID, req.TerminalID)
+		writeJSON(w, http.StatusOK, map[string]any{"success": true})
 		return
 	}
 	http.NotFound(w, r)
@@ -513,6 +840,35 @@ func (h *Hub) readWebLoop(wc *webConn) {
 	}
 }
 
+func (h *Hub) closeTerminal(projectID string, terminalID string) {
+	key := projectID + "::" + terminalID
+	h.termMu.Lock()
+	if wc := h.terminalConns[key]; wc != nil {
+		_ = wc.conn.Close()
+		delete(h.terminalConns, key)
+	}
+	h.termMu.Unlock()
+
+	h.mu.RLock()
+	project, ok := h.projects[projectID]
+	var dc *daemonConn
+	if ok {
+		dc = h.daemons[project.DeviceID]
+	}
+	h.mu.RUnlock()
+
+	if dc != nil {
+		dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", protocol.TerminalStreamExit{
+			ProjectID:  projectID,
+			TerminalID: terminalID,
+		})
+		return
+	}
+
+	sessionName := "pocket-studio-" + projectID + "-" + terminalID
+	_ = exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+}
+
 func (h *Hub) readDaemonLoop(dc *daemonConn) {
 	defer func() {
 		h.mu.Lock()
@@ -620,7 +976,26 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 				wc := h.terminalConns[key]
 				h.termMu.RUnlock()
 				if wc != nil {
-					_ = wc.WriteMessage(websocket.BinaryMessage, streamData.Data)
+					wc.mu.Lock()
+					_ = wc.conn.WriteMessage(websocket.BinaryMessage, streamData.Data)
+					wc.mu.Unlock()
+				}
+			}
+		case protocol.TypeTerminalStreamTitle:
+			streamTitle, err := protocol.DecodePayload[protocol.TerminalStreamTitle](env)
+			if err == nil {
+				key := streamTitle.ProjectID + "::" + streamTitle.TerminalID
+				h.termMu.RLock()
+				wc := h.terminalConns[key]
+				h.termMu.RUnlock()
+				if wc != nil {
+					wc.mu.Lock()
+					_ = wc.conn.WriteJSON(map[string]string{
+						"type":    "title",
+						"title":   streamTitle.Title,
+						"command": streamTitle.Command,
+					})
+					wc.mu.Unlock()
 				}
 			}
 		case protocol.TypeTerminalStreamExit:
@@ -632,7 +1007,7 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 				delete(h.terminalConns, key)
 				h.termMu.Unlock()
 				if wc != nil {
-					_ = wc.Close()
+					_ = wc.conn.Close()
 				}
 			}
 		case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult:
@@ -652,7 +1027,11 @@ func (h *Hub) stateView() StateView {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	devices := make([]DeviceView, 0, len(h.daemons)+1)
+	hasLocalDaemon := false
 	for _, dc := range h.daemons {
+		if dc.deviceID == "dev_local" {
+			hasLocalDaemon = true
+		}
 		devices = append(devices, DeviceView{
 			ID:         dc.deviceID,
 			Name:       dc.deviceName,
@@ -687,20 +1066,22 @@ func (h *Hub) stateView() StateView {
 		})
 	}
 
-	devices = append(devices, DeviceView{
-		ID:         "dev_local",
-		Name:       "Local Machine",
-		Status:     "online",
-		Agent:      "claude",
-		AgentLabel: "Claude Code",
-		Agents: []protocol.AgentCapability{
-			{Name: "claude", Label: "Claude Code"},
-			{Name: "bash", Label: "Standard Bash"},
-			{Name: "gemini", Label: "Gemini CLI"},
-		},
-		LastSeenAt: time.Now().Unix(),
-		Workspaces: localWorkspaces,
-	})
+	if !hasLocalDaemon {
+		devices = append(devices, DeviceView{
+			ID:         "dev_local",
+			Name:       "Local Machine",
+			Status:     "online",
+			Agent:      "claude",
+			AgentLabel: "Claude Code",
+			Agents: []protocol.AgentCapability{
+				{Name: "claude", Label: "Claude Code"},
+				{Name: "bash", Label: "Standard Bash"},
+				{Name: "gemini", Label: "Gemini CLI"},
+			},
+			LastSeenAt: time.Now().Unix(),
+			Workspaces: localWorkspaces,
+		})
+	}
 
 	tasks := make([]protocol.TaskRecord, 0, len(h.taskRecords))
 	for _, record := range h.taskRecords {
@@ -970,22 +1351,21 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	if terminalID == "" {
 		terminalID = "default"
 	}
+	if !safeTerminalIDPattern.MatchString(terminalID) {
+		http.Error(w, "invalid terminal_id", http.StatusBadRequest)
+		return
+	}
 	command := r.URL.Query().Get("command")
 
 	h.mu.RLock()
 	proj, ok := h.projects[projID]
 	h.mu.RUnlock()
-
-	workspacePath := "/home/choco/Agent"
-	deviceID := "dev_local"
-	if ok {
-		if proj.WorkspacePath != "" {
-			workspacePath = proj.WorkspacePath
-		}
-		if proj.DeviceID != "" {
-			deviceID = proj.DeviceID
-		}
+	if !ok {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
 	}
+	workspacePath := proj.WorkspacePath
+	deviceID := proj.DeviceID
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -1000,20 +1380,17 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	if dc != nil {
 		key := projID + "::" + terminalID
+		terminal := &terminalConn{conn: conn}
 		h.termMu.Lock()
-		h.terminalConns[key] = conn
+		h.terminalConns[key] = terminal
 		h.termMu.Unlock()
 
 		defer func() {
 			h.termMu.Lock()
-			delete(h.terminalConns, key)
-			h.termMu.Unlock()
-
-			exitPayload := protocol.TerminalStreamExit{
-				ProjectID:  projID,
-				TerminalID: terminalID,
+			if h.terminalConns[key] == terminal {
+				delete(h.terminalConns, key)
 			}
-			dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", exitPayload)
+			h.termMu.Unlock()
 		}()
 
 		startPayload := protocol.TerminalStreamStart{
@@ -1021,6 +1398,7 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 			TerminalID:    terminalID,
 			WorkspacePath: workspacePath,
 			Command:       command,
+			InitialTitle:  initialTerminalTitle(command),
 		}
 		dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamStart, "server", startPayload)
 
@@ -1060,18 +1438,21 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	_ = os.MkdirAll(resolvedPath, 0o755)
 
 	sessionName := "pocket-studio-" + projID + "-" + terminalID
+	initialTitle := initialTerminalTitle(command)
 	var cmd *exec.Cmd
 	if command != "" {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-c", resolvedPath, command)
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", resolvedPath, command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
 	} else {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-c", resolvedPath)
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", resolvedPath, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
 	}
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
 	ptyFile, err := pty.Start(cmd)
 	if err != nil {
 		log.Printf("failed to start tmux: %v. falling back to bash.", err)
 		cmd = exec.Command("bash")
 		cmd.Dir = resolvedPath
+		cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 		ptyFile, err = pty.Start(cmd)
 		if err != nil {
 			log.Printf("failed to start fallback shell: %v", err)
@@ -1079,6 +1460,11 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	defer ptyFile.Close()
+	titleDone := make(chan struct{})
+	defer close(titleDone)
+	var writeMu sync.Mutex
+	go watchLocalTerminalTitle(conn, sessionName, titleDone, &writeMu)
+	writeLocalTerminalSnapshot(conn, sessionName, &writeMu)
 
 	go func() {
 		buf := make([]byte, 1024)
@@ -1087,9 +1473,12 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				break
 			}
+			writeMu.Lock()
 			if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+				writeMu.Unlock()
 				break
 			}
+			writeMu.Unlock()
 		}
 	}()
 
@@ -1113,6 +1502,104 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 				_, _ = ptyFile.Write(payload)
 			}
 		}
+	}
+}
+
+func writeLocalTerminalSnapshot(conn *websocket.Conn, sessionName string, writeMu *sync.Mutex) {
+	if data := tmuxCapturePane(sessionName); len(data) > 0 {
+		writeMu.Lock()
+		_ = conn.WriteMessage(websocket.BinaryMessage, data)
+		writeMu.Unlock()
+	}
+	title, command := tmuxTerminalInfo(sessionName)
+	if title != "" {
+		writeMu.Lock()
+		_ = conn.WriteJSON(map[string]string{
+			"type":    "title",
+			"title":   title,
+			"command": command,
+		})
+		writeMu.Unlock()
+	}
+}
+
+func watchLocalTerminalTitle(conn *websocket.Conn, sessionName string, done <-chan struct{}, writeMu *sync.Mutex) {
+	ticker := time.NewTicker(1200 * time.Millisecond)
+	defer ticker.Stop()
+	lastTitle := ""
+	lastCommand := ""
+	for {
+		title, command := tmuxTerminalInfo(sessionName)
+		if title != "" && (title != lastTitle || command != lastCommand) {
+			lastTitle = title
+			lastCommand = command
+			writeMu.Lock()
+			err := conn.WriteJSON(map[string]string{
+				"type":    "title",
+				"title":   title,
+				"command": command,
+			})
+			writeMu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func tmuxTerminalInfo(sessionName string) (string, string) {
+	cmd := exec.Command("tmux", "display-message", "-p", "-t", sessionName, "#{window_name}\t#{pane_current_command}")
+	raw, err := cmd.Output()
+	if err != nil {
+		return "", ""
+	}
+	parts := strings.SplitN(strings.TrimSpace(string(raw)), "\t", 2)
+	title := strings.TrimSpace(parts[0])
+	command := ""
+	if len(parts) > 1 {
+		command = strings.TrimSpace(parts[1])
+	}
+	if title == "" {
+		title = command
+	}
+	return title, command
+}
+
+func tmuxCapturePane(sessionName string) []byte {
+	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", sessionName)
+	raw, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	return append(raw, '\r')
+}
+
+func initialTerminalTitle(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" || command == "bash" || command == "zsh" || command == "sh" {
+		return "Shell"
+	}
+	switch {
+	case strings.Contains(command, "claude"):
+		return "Claude Code"
+	case strings.Contains(command, "codex"):
+		return "Codex"
+	case strings.Contains(command, "opencode"):
+		return "OpenCode"
+	case command == "pi" || strings.HasPrefix(command, "pi "):
+		return "Pi"
+	case command == "agy" || strings.Contains(command, "antigravity"):
+		return "Antigravity"
+	default:
+		return command
 	}
 }
 
@@ -1142,7 +1629,7 @@ func (h *Hub) handleLocalWorkspaceList(req protocol.WorkspaceListRequest) (proto
 	var items []protocol.FileEntry
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == ".git" || name == "node_modules" || name == ".next" || name == "dist" || name == "build" {
+		if shouldSkipFileTreeName(name) {
 			continue
 		}
 		info, err := entry.Info()
@@ -1210,4 +1697,208 @@ func (h *Hub) handleLocalWorkspaceWrite(req protocol.WorkspaceWriteRequest) (pro
 		Path:          req.Path,
 		Content:       req.Content,
 	}, nil
+}
+
+type projectFileSearchResult struct {
+	Entries []protocol.FileEntry `json:"entries"`
+	Error   string               `json:"error,omitempty"`
+}
+
+type projectFileReadResult struct {
+	Path     string `json:"path"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Content  string `json:"content,omitempty"`
+	DataURL  string `json:"data_url,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+type projectFileActionResult struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+func (h *Hub) handleLocalProjectFileSearch(project Project, query string, limit int) projectFileSearchResult {
+	query = strings.TrimSpace(strings.ToLower(query))
+	if query == "" {
+		return projectFileSearchResult{Entries: []protocol.FileEntry{}}
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 80
+	}
+	root := resolveLocalPath(project.WorkspacePath)
+	var entries []protocol.FileEntry
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		name := entry.Name()
+		if entry.IsDir() && shouldSkipFileTreeName(name) && path != root {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if !strings.Contains(strings.ToLower(rel), query) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		entries = append(entries, protocol.FileEntry{
+			Name:     name,
+			Path:     rel,
+			IsDir:    false,
+			Size:     info.Size(),
+			Modified: info.ModTime().Unix(),
+		})
+		if len(entries) >= limit {
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return projectFileSearchResult{Error: err.Error()}
+	}
+	return projectFileSearchResult{Entries: entries}
+}
+
+func (h *Hub) handleLocalProjectFileRead(project Project, path string) projectFileReadResult {
+	target, ok := safeProjectPath(project.WorkspacePath, path)
+	if !ok {
+		return projectFileReadResult{Path: path, Error: "invalid path"}
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return projectFileReadResult{Path: path, Error: err.Error()}
+	}
+	if info.IsDir() {
+		return projectFileReadResult{Path: path, Error: "cannot read directory"}
+	}
+	if info.Size() > maxProjectFileReadSize {
+		return projectFileReadResult{Path: path, Name: filepath.Base(path), Size: info.Size(), Error: "file is too large to preview"}
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		return projectFileReadResult{Path: path, Error: err.Error()}
+	}
+	mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(target)))
+	if mimeType == "" {
+		mimeType = http.DetectContentType(content)
+	}
+	result := projectFileReadResult{
+		Path:     filepath.ToSlash(path),
+		Name:     filepath.Base(path),
+		MimeType: mimeType,
+		Size:     info.Size(),
+	}
+	if strings.HasPrefix(mimeType, "image/") {
+		result.Kind = "image"
+		result.DataURL = "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(content)
+		return result
+	}
+	result.Kind = "text"
+	result.Content = string(content)
+	return result
+}
+
+func (h *Hub) handleLocalProjectFileWrite(project Project, path string, content string) projectFileReadResult {
+	target, ok := safeProjectPath(project.WorkspacePath, path)
+	if !ok {
+		return projectFileReadResult{Path: path, Error: "invalid path"}
+	}
+	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+		return projectFileReadResult{Path: path, Error: err.Error()}
+	}
+	return h.handleLocalProjectFileRead(project, path)
+}
+
+func (h *Hub) handleLocalProjectFileAction(project Project, action string, path string, target string) projectFileActionResult {
+	switch action {
+	case "mkdir":
+		targetPath, ok := safeProjectPath(project.WorkspacePath, path)
+		if !ok {
+			return projectFileActionResult{Error: "invalid path"}
+		}
+		if err := os.MkdirAll(targetPath, 0o755); err != nil {
+			return projectFileActionResult{Error: err.Error()}
+		}
+	case "create_file":
+		targetPath, ok := safeProjectPath(project.WorkspacePath, path)
+		if !ok {
+			return projectFileActionResult{Error: "invalid path"}
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return projectFileActionResult{Error: err.Error()}
+		}
+		file, err := os.OpenFile(targetPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+		if err != nil {
+			return projectFileActionResult{Error: err.Error()}
+		}
+		_ = file.Close()
+	case "delete":
+		targetPath, ok := safeProjectPath(project.WorkspacePath, path)
+		if !ok {
+			return projectFileActionResult{Error: "invalid path"}
+		}
+		if err := os.RemoveAll(targetPath); err != nil {
+			return projectFileActionResult{Error: err.Error()}
+		}
+	case "move":
+		sourcePath, ok := safeProjectPath(project.WorkspacePath, path)
+		if !ok {
+			return projectFileActionResult{Error: "invalid source path"}
+		}
+		targetPath, ok := safeProjectPath(project.WorkspacePath, target)
+		if !ok {
+			return projectFileActionResult{Error: "invalid target path"}
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+			return projectFileActionResult{Error: err.Error()}
+		}
+		if err := os.Rename(sourcePath, targetPath); err != nil {
+			return projectFileActionResult{Error: err.Error()}
+		}
+	default:
+		return projectFileActionResult{Error: "unknown action"}
+	}
+	return projectFileActionResult{Success: true}
+}
+
+func safeProjectPath(root string, rel string) (string, bool) {
+	root = resolveLocalPath(root)
+	cleanRel := filepath.Clean(rel)
+	if cleanRel == "." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) || cleanRel == ".." || filepath.IsAbs(cleanRel) {
+		return "", false
+	}
+	target := filepath.Join(root, cleanRel)
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return "", false
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	if absTarget != absRoot && !strings.HasPrefix(absTarget, absRoot+string(filepath.Separator)) {
+		return "", false
+	}
+	return absTarget, true
+}
+
+func shouldSkipFileTreeName(name string) bool {
+	switch name {
+	case ".git", "node_modules", ".next", "dist", "build", "target", ".idea":
+		return true
+	default:
+		return false
+	}
 }

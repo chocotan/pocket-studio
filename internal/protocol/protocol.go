@@ -6,26 +6,27 @@ import (
 )
 
 const (
-	TypeDaemonHello     = "daemon.hello"
-	TypeDaemonSnapshot  = "daemon.snapshot"
-	TypeDaemonHeartbeat = "daemon.heartbeat"
-	TypeWebHello        = "web.hello"
-	TypeTaskDispatch    = "task.dispatch"
-	TypeTaskEvent       = "task.event"
-	TypeTaskSnapshot    = "task.snapshot"
-	TypeTaskStop        = "task.stop"
-	TypeTaskSetModel    = "task.set_model"
-	TypeSessionDelete   = "session.delete"
-	TypeSessionCreate   = "session.create"
-	TypeWorkspaceList   = "workspace.list"
-	TypeWorkspaceRead   = "workspace.read"
-	TypeWorkspaceWrite  = "workspace.write"
-	TypeWorkspaceResult = "workspace.result"
-	TypeTerminalRun     = "terminal.run"
-	TypeTerminalResult  = "terminal.result"
-	TypeServerError     = "server.error"
+	TypeDaemonHello          = "daemon.hello"
+	TypeDaemonSnapshot       = "daemon.snapshot"
+	TypeDaemonHeartbeat      = "daemon.heartbeat"
+	TypeWebHello             = "web.hello"
+	TypeTaskDispatch         = "task.dispatch"
+	TypeTaskEvent            = "task.event"
+	TypeTaskSnapshot         = "task.snapshot"
+	TypeTaskStop             = "task.stop"
+	TypeTaskSetModel         = "task.set_model"
+	TypeSessionDelete        = "session.delete"
+	TypeSessionCreate        = "session.create"
+	TypeWorkspaceList        = "workspace.list"
+	TypeWorkspaceRead        = "workspace.read"
+	TypeWorkspaceWrite       = "workspace.write"
+	TypeWorkspaceResult      = "workspace.result"
+	TypeTerminalRun          = "terminal.run"
+	TypeTerminalResult       = "terminal.result"
+	TypeServerError          = "server.error"
 	TypeTerminalStreamStart  = "terminal.stream.start"
 	TypeTerminalStreamData   = "terminal.stream.data"
+	TypeTerminalStreamTitle  = "terminal.stream.title"
 	TypeTerminalStreamResize = "terminal.stream.resize"
 	TypeTerminalStreamExit   = "terminal.stream.exit"
 )
@@ -225,12 +226,20 @@ type TerminalStreamStart struct {
 	TerminalID    string `json:"terminal_id"`
 	WorkspacePath string `json:"workspace_path"`
 	Command       string `json:"command"`
+	InitialTitle  string `json:"initial_title,omitempty"`
 }
 
 type TerminalStreamData struct {
 	ProjectID  string `json:"project_id"`
 	TerminalID string `json:"terminal_id"`
 	Data       []byte `json:"data"`
+}
+
+type TerminalStreamTitle struct {
+	ProjectID  string `json:"project_id"`
+	TerminalID string `json:"terminal_id"`
+	Title      string `json:"title"`
+	Command    string `json:"command,omitempty"`
 }
 
 type TerminalStreamResize struct {
