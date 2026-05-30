@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
 import {
-  Cpu,
   Plus,
   FolderGit2,
   FolderPlus,
@@ -13,9 +12,12 @@ import {
   Loader2,
   Home,
   Check,
+  RefreshCw,
+  Settings,
+  TerminalSquare,
 } from "lucide-react";
 import type { Device } from "../../lib/types";
-import { postJSON } from "../../lib/api";
+import { loadClientConfig, postJSON, saveClientConfig, type ClientConfig } from "../../lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -92,6 +94,10 @@ export function StudioDashboard({
   const [newProjPath, setNewProjPath] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [serverURL, setServerURL] = useState("");
+  const [settingsError, setSettingsError] = useState("");
+  const [savingSettings, setSavingSettings] = useState(false);
 
   // Directory browser states
   const [showBrowser, setShowBrowser] = useState(false);
@@ -108,6 +114,10 @@ export function StudioDashboard({
       setSelectedDeviceId(devices[0].id);
     }
   }, [devices, selectedDeviceId]);
+
+  useEffect(() => {
+    loadClientConfig().then((cfg) => setServerURL(cfg.server_url)).catch(() => {});
+  }, []);
 
   const activeDevice = devices.find((d) => d.id === selectedDeviceId) || devices[0];
   const deviceProjects = projects.filter(
@@ -232,155 +242,193 @@ export function StudioDashboard({
     setCreateOpen(true);
   }
 
+  async function handleSaveSettings(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingSettings(true);
+    setSettingsError("");
+    try {
+      const cfg: ClientConfig = {
+        server_url: serverURL.trim(),
+        local_mode: false,
+      };
+      const saved = await saveClientConfig(cfg);
+      setServerURL(saved.server_url);
+      setSettingsOpen(false);
+      onRefreshProjects();
+    } catch (err) {
+      setSettingsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingSettings(false);
+    }
+  }
+
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-[#f8fafc] font-sans">
-      {/* ── Left Sidebar (Dark Console Style) ── */}
-      <aside className="w-64 bg-[#0b0f19] text-slate-200 flex flex-col justify-between border-r border-slate-800 flex-shrink-0">
-        <div className="p-6">
-          {/* Brand Logo & Header */}
-          <div className="flex items-center gap-3 mb-8">
-            <div className="h-8 w-8 rounded-lg bg-gradient-to-tr from-indigo-500 to-violet-500 flex items-center justify-center shadow-lg shadow-indigo-500/30">
-              <span className="text-white text-sm font-black">P</span>
-            </div>
-            <div>
-              <h1 className="font-extrabold text-sm tracking-tight text-white">Pocket Studio</h1>
-              <p className="text-[10px] text-slate-500 font-medium">轻量开发控制台</p>
-            </div>
+    <div
+      className="studio-square theme-light flex h-dvh w-dvw flex-col overflow-hidden bg-background text-foreground font-sans"
+      style={{ fontFamily: "var(--font-sans)" }}
+    >
+      <header className="shrink-0 h-11 bg-white/95 border-b border-slate-200/70 flex items-center justify-between px-4 z-50 shadow-sm">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="h-6 w-6 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-500/25 flex-shrink-0">
+            <span className="text-white font-black text-[10px] leading-none">P</span>
           </div>
+          <span className="font-bold text-slate-800 text-xs tracking-tight">Pocket Studio</span>
+        </div>
 
-          {/* Machine List Label */}
-          <div className="space-y-4">
-            <div className="flex items-center justify-between text-[11px] uppercase tracking-wider text-slate-500 font-bold font-mono">
-              <span>机器列表</span>
-              <span className="bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded text-[9px]">{devices.length}</span>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onRefreshProjects}
+            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            title="刷新设备和项目"
+          >
+            <RefreshCw className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            title="配置服务端地址"
+          >
+            <Settings className="h-4 w-4" />
+          </button>
+        </div>
+      </header>
+
+      <main className="min-h-0 flex-1 overflow-hidden bg-slate-50 p-2.5">
+        <div className="grid h-full min-h-0 grid-cols-[minmax(220px,260px)_1fr] gap-2.5 max-lg:grid-cols-1">
+          <aside className="studio-panel min-h-0 overflow-hidden border border-slate-200/80 bg-white shadow-sm max-lg:h-64">
+            <div className="flex h-9 items-center justify-between border-b border-slate-200/70 bg-slate-100/70 px-3">
+              <div className="flex items-center gap-2">
+                <Server className="h-3.5 w-3.5 text-slate-500" />
+                <span className="text-[11px] font-bold text-slate-700">开发设备</span>
+              </div>
+              <Badge className="rounded bg-white px-1.5 py-0 text-[9px] font-bold text-slate-500 border border-slate-200">
+                {devices.length}
+              </Badge>
             </div>
 
-            {/* Machines Stack */}
-            <div className="space-y-1.5 overflow-y-auto max-h-[calc(100vh-200px)] pr-1">
+            <div className="h-[calc(100%-2.25rem)] overflow-y-auto p-2">
               {devices.length === 0 ? (
-                <div className="text-center py-10 text-xs text-slate-500 border border-dashed border-slate-800 rounded-lg">
-                  <Server className="h-6 w-6 mx-auto mb-2 text-slate-700" />
+                <div className="flex h-full min-h-36 flex-col items-center justify-center border border-dashed border-slate-200 bg-slate-50 text-center text-xs text-slate-500">
+                  <Server className="mb-2 h-6 w-6 text-slate-300" />
                   无在线设备
                 </div>
               ) : (
-                devices.map((device) => {
-                  const isSelected = selectedDeviceId === device.id;
-                  const online = device.workspaces !== undefined;
-                  return (
-                    <button
-                      key={device.id}
-                      type="button"
-                      onClick={() => setSelectedDeviceId(device.id)}
-                      className={`w-full p-3 rounded-xl border text-left cursor-pointer transition-all duration-150 flex items-center gap-3 ${
-                        isSelected
-                          ? "bg-indigo-600/10 border-indigo-500/50 text-white shadow-sm"
-                          : "border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
-                      }`}
+                <div className="space-y-1">
+                  {devices.map((device) => {
+                    const isSelected = selectedDeviceId === device.id;
+                    const online = device.workspaces !== undefined;
+                    const projectCount = projects.filter((project) => project.device_id === device.id).length;
+                    return (
+                      <button
+                        key={device.id}
+                        type="button"
+                        onClick={() => setSelectedDeviceId(device.id)}
+                        className={`group grid w-full grid-cols-[1.75rem_1fr_auto] items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors cursor-pointer ${
+                          isSelected
+                            ? "border-indigo-200 bg-indigo-50 text-slate-900"
+                            : "border-transparent text-slate-600 hover:border-slate-200 hover:bg-slate-50"
+                        }`}
+                      >
+                        <span className={`flex h-7 w-7 items-center justify-center rounded-md ${
+                          isSelected ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 group-hover:bg-white"
+                        }`}>
+                          <Server className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="min-w-0">
+                          <span className="block truncate text-xs font-bold">{device.name || device.id}</span>
+                          <span className="mt-0.5 block truncate font-mono text-[9px] text-slate-400">
+                            {device.id === "dev_local" ? "local daemon" : device.id}
+                          </span>
+                        </span>
+                        <span className="flex flex-col items-end gap-1">
+                          <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-emerald-500" : "bg-slate-300"}`} />
+                          <span className="font-mono text-[9px] font-bold text-slate-400">{projectCount}</span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </aside>
+
+          <section className="studio-panel min-h-0 overflow-hidden border border-slate-200/80 bg-white shadow-sm">
+            <div className="flex h-9 items-center justify-between border-b border-slate-200/70 bg-slate-100/70 px-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <FolderGit2 className="h-3.5 w-3.5 text-indigo-600" />
+                <span className="truncate text-[11px] font-bold text-slate-700">
+                  {activeDevice ? `${activeDevice.name || activeDevice.id} 的项目` : "项目工作区"}
+                </span>
+                {activeDevice && (
+                  <Badge className="rounded bg-white px-1.5 py-0 text-[9px] font-bold text-slate-500 border border-slate-200">
+                    {deviceProjects.length}
+                  </Badge>
+                )}
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="hidden items-center gap-2 text-[10px] font-mono text-slate-400 sm:flex">
+                  <span>name</span>
+                  <span className="text-slate-300">/</span>
+                  <span>workspace</span>
+                  <span className="text-slate-300">/</span>
+                  <span>term</span>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={openCreateModal}
+                  disabled={!activeDevice}
+                  className="h-6 rounded-md bg-indigo-600 px-2 text-[10px] font-semibold text-white hover:bg-indigo-500 shadow-sm shadow-indigo-500/15 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Plus className="h-3 w-3" />
+                  创建
+                </Button>
+              </div>
+            </div>
+
+            <div className="h-[calc(100%-2.25rem)] overflow-y-auto p-2">
+              {activeDevice ? (
+                deviceProjects.length === 0 ? (
+                  <div className="flex h-full min-h-80 flex-col items-center justify-center border border-dashed border-slate-200 bg-slate-50 text-center text-slate-500">
+                    <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-md border border-slate-200 bg-white">
+                      <FolderGit2 className="h-5 w-5 text-slate-400" />
+                    </div>
+                    <h3 className="text-sm font-bold text-slate-800">暂无项目</h3>
+                    <p className="mt-1 max-w-sm text-xs leading-relaxed text-slate-500">
+                      该设备还没有关联项目目录。创建一个项目后可直接进入工作区。
+                    </p>
+                    <Button
+                      size="sm"
+                      onClick={openCreateModal}
+                      className="mt-4 h-8 rounded-md bg-indigo-600 px-3 text-xs font-semibold text-white hover:bg-indigo-500 cursor-pointer"
                     >
-                      <div className={`h-8 w-8 rounded-lg flex-shrink-0 flex items-center justify-center transition-all ${
-                        isSelected ? "bg-indigo-600 text-white" : "bg-slate-800 text-slate-400"
-                      }`}>
-                        <Server className="h-4 w-4" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-bold truncate">{device.name || device.id}</p>
-                        <p className="text-[9px] text-slate-500 font-mono truncate mt-0.5">
-                          {device.id === "dev_local" ? "本地主机" : "远程云主机"}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-emerald-500 animate-pulse-dot" : "bg-slate-600"}`} />
-                      </div>
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Sidebar Footer */}
-        <div className="p-6 border-t border-slate-800 bg-[#070b13]/80 flex items-center justify-between">
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <Cpu className="h-3.5 w-3.5 text-indigo-500" />
-            <span>Daemon {devices.length > 0 ? "已在线" : "离线"}</span>
-          </div>
-          <span className="text-[9px] text-slate-600 font-mono">v0.1.0</span>
-        </div>
-      </aside>
-
-      {/* ── Right Content Area (Beautiful Premium Dashboard) ── */}
-      <main className="flex-1 overflow-y-auto flex flex-col">
-        {/* Sticky Header */}
-        <header className="h-16 border-b border-slate-200 bg-white/80 backdrop-blur px-8 flex items-center justify-between sticky top-0 z-30 flex-shrink-0">
-          <div className="flex items-center gap-2">
-            <FolderGit2 className="h-5 w-5 text-indigo-600" />
-            <h2 className="text-sm font-bold text-slate-800">
-              {activeDevice ? `${activeDevice.name || activeDevice.id} 的项目列表` : "选择设备查看项目"}
-            </h2>
-            {activeDevice && (
-              <Badge className="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-200 rounded-full ml-2">
-                {deviceProjects.length} 个项目
-              </Badge>
-            )}
-          </div>
-
-          <div className="flex items-center gap-3">
-            {activeDevice && (
-              <Button
-                size="sm"
-                onClick={openCreateModal}
-                className="h-9 px-4 text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white shadow-md shadow-indigo-500/20 rounded-xl transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer"
-              >
-                <Plus className="h-4 w-4" />
-                创建项目
-              </Button>
-            )}
-          </div>
-        </header>
-
-        {/* Content Body */}
-        <div className="flex-1 p-8 max-w-6xl w-full mx-auto">
-          {activeDevice ? (
-            <div className="space-y-6">
-              {deviceProjects.length === 0 ? (
-                <div className="border border-dashed border-slate-200 bg-white rounded-2xl p-16 text-center text-slate-400 shadow-sm flex flex-col items-center justify-center min-h-[300px]">
-                  <div className="h-12 w-12 rounded-full bg-slate-50 flex items-center justify-center mb-4 border border-slate-100">
-                    <FolderGit2 className="h-6 w-6 text-slate-400" />
+                      <Plus className="mr-1.5 h-3.5 w-3.5" />
+                      创建项目
+                    </Button>
                   </div>
-                  <h3 className="text-sm font-bold text-slate-800">暂无项目</h3>
-                  <p className="text-xs text-slate-500 max-w-sm mt-2 leading-relaxed">
-                    该设备上还没有关联任何项目工作区。点击右上角的“创建项目”按钮，关联一个本地目录。
-                  </p>
-                  <Button
-                    size="sm"
-                    onClick={openCreateModal}
-                    className="mt-4 text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl px-4 h-9 shadow-md shadow-indigo-500/10 cursor-pointer"
-                  >
-                    关联新项目
-                  </Button>
-                </div>
+                ) : (
+                  <div className="grid gap-1.5 animate-fade-in">
+                    {deviceProjects.map((proj, i) => (
+                      <ProjectCard
+                        key={proj.id}
+                        proj={proj}
+                        deviceLabel={activeDevice.id === "dev_local" ? "Local" : "Remote"}
+                        index={i}
+                        onClick={() => onSelectProject(proj.id)}
+                      />
+                    ))}
+                  </div>
+                )
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-fade-in">
-                  {deviceProjects.map((proj, i) => (
-                    <ProjectCard
-                      key={proj.id}
-                      proj={proj}
-                      deviceLabel={activeDevice.id === "dev_local" ? "Local" : "Remote"}
-                      index={i}
-                      onClick={() => onSelectProject(proj.id)}
-                    />
-                  ))}
+                <div className="flex h-full min-h-80 flex-col items-center justify-center border border-dashed border-slate-200 bg-slate-50 text-center text-slate-500">
+                  <HelpCircle className="mb-3 h-8 w-8 text-slate-300" />
+                  <span className="text-sm font-bold text-slate-800">请选择一台开发机</span>
+                  <span className="mt-1 text-xs text-slate-500">在左侧设备面板中选择在线守护进程。</span>
                 </div>
               )}
             </div>
-          ) : (
-            <div className="border border-slate-200 bg-white rounded-2xl p-16 text-center text-slate-400 shadow-sm flex flex-col items-center justify-center min-h-[400px]">
-              <HelpCircle className="h-10 w-10 text-slate-300 mb-3 animate-bounce" />
-              <span className="text-sm font-bold text-slate-800">请选择一台开发机</span>
-              <span className="text-xs text-slate-500 mt-1">在左侧机器列表中选择一个在线的守护进程设备。</span>
-            </div>
-          )}
+          </section>
         </div>
       </main>
 
@@ -572,11 +620,61 @@ export function StudioDashboard({
           </form>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="max-w-md p-0 overflow-hidden border-slate-200/80 shadow-2xl rounded-2xl animate-scale-in">
+          <DialogHeader className="px-6 py-4 bg-slate-50 border-b border-slate-100">
+            <DialogTitle className="text-sm font-bold text-slate-800 flex items-center gap-2">
+              <div className="h-6.5 w-6.5 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center">
+                <Settings className="h-3.5 w-3.5 text-indigo-600" />
+              </div>
+              服务端地址
+            </DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSaveSettings} className="p-6 space-y-4">
+            {settingsError && (
+              <div className="bg-rose-50 text-rose-600 rounded-xl p-3.5 border border-rose-100 text-xs font-semibold">
+                {settingsError}
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                Server URL
+              </Label>
+              <Input
+                required
+                value={serverURL}
+                onChange={(e) => setServerURL(e.target.value)}
+                placeholder="http://127.0.0.1:18080"
+                className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 font-mono h-9"
+              />
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                使用本地模式时填本机地址；使用云端时填云端 server 地址。保存后前端和 daemon 使用同一地址。
+              </p>
+            </div>
+            <DialogFooter className="pt-3 flex justify-end gap-2 border-t border-slate-100">
+              <DialogClose
+                type="button"
+                className="inline-flex items-center justify-center text-xs rounded-xl border border-slate-250 text-slate-600 hover:text-slate-800 hover:bg-slate-50 px-4 h-9 font-semibold transition-colors cursor-pointer"
+              >
+                取消
+              </DialogClose>
+              <Button
+                type="submit"
+                size="sm"
+                disabled={savingSettings}
+                className="text-xs h-9 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow shadow-indigo-500/20 font-semibold cursor-pointer"
+              >
+                {savingSettings ? "保存中..." : "保存"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
-/* ── Project Card Sub-Component (Spectacular Glassmorphic Glow) ── */
 function ProjectCard({
   proj,
   deviceLabel,
@@ -589,45 +687,44 @@ function ProjectCard({
   onClick: () => void;
 }) {
   return (
-    <div
+    <button
+      type="button"
       role="button"
-      tabIndex={0}
       onClick={onClick}
-      onKeyDown={(e) => e.key === "Enter" && onClick()}
-      className="group relative bg-white/90 backdrop-blur-xl border border-slate-200/80 rounded-2xl p-6 shadow-sm hover:border-indigo-300/80 hover:shadow-lg hover:shadow-indigo-500/[0.04] transition-all duration-300 transform hover:-translate-y-0.5 cursor-pointer flex flex-col justify-between h-44 overflow-hidden animate-fade-in"
+      className="group grid min-h-16 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-slate-200/75 bg-white px-3 py-2.5 text-left shadow-sm transition-colors hover:border-indigo-200 hover:bg-indigo-50/35 focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-indigo-400 cursor-pointer sm:grid-cols-[minmax(160px,0.75fr)_minmax(220px,1.35fr)_auto_auto]"
       style={{ animationDelay: `${(index + 1) * 60}ms` }}
     >
-      {/* Premium indigo left border accent */}
-      <div className="absolute inset-y-0 left-0 w-1 bg-gradient-to-b from-indigo-500 to-violet-500 rounded-l-2xl" />
-
-      {/* Top: Labels & stats */}
-      <div className="flex items-center justify-between pl-1">
-        <Badge className="text-[9px] uppercase font-bold tracking-widest bg-indigo-50 text-indigo-600 border border-indigo-100 rounded-md px-2 py-0.5">
-          {deviceLabel}
-        </Badge>
-        <Badge variant="secondary" className="text-[10px] bg-slate-50 text-slate-500 border border-slate-200 rounded-md font-mono font-bold">
-          {proj.tmux_ids?.length || 0} tmux 终端
-        </Badge>
-      </div>
-
-      {/* Middle: Title & workspace absolute path */}
-      <div className="pl-1 flex-1 flex flex-col justify-center mt-2">
-        <h3 className="text-sm font-bold text-slate-800 group-hover:text-indigo-600 transition-colors duration-200 truncate">
-          {proj.name}
-        </h3>
-        <div className="flex items-center gap-1.5 mt-1.5 text-[10.5px] text-slate-400 font-mono">
-          <Folder className="h-3 w-3 text-slate-300 flex-shrink-0" />
-          <span className="truncate" title={proj.workspace_path}>
-            {proj.workspace_path}
-          </span>
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-500 group-hover:bg-white group-hover:text-indigo-600">
+          <FolderGit2 className="h-4 w-4" />
+        </span>
+        <div className="min-w-0">
+          <h3 className="truncate text-xs font-bold text-slate-800 group-hover:text-indigo-600">
+            {proj.name}
+          </h3>
+          <div className="mt-1 flex items-center gap-1.5">
+            <Badge className="rounded border border-indigo-100 bg-indigo-50 px-1.5 py-0 text-[9px] font-bold uppercase tracking-widest text-indigo-600">
+              {deviceLabel}
+            </Badge>
+            <span className="hidden truncate font-mono text-[9px] text-slate-400 sm:block">{proj.id}</span>
+          </div>
         </div>
       </div>
 
-      {/* Bottom: Direct link trigger */}
-      <div className="flex items-center justify-between text-xs text-indigo-600 font-bold pt-3 border-t border-slate-100 pl-1">
-        <span className="group-hover:text-indigo-500 transition-colors">进入工作区</span>
-        <ArrowRight className="h-3.5 w-3.5 transform group-hover:translate-x-1 transition-transform duration-200 text-indigo-500" />
+      <div className="hidden min-w-0 items-center gap-1.5 font-mono text-[10px] text-slate-500 sm:flex">
+        <Folder className="h-3.5 w-3.5 shrink-0 text-slate-300" />
+        <span className="truncate" title={proj.workspace_path}>{proj.workspace_path}</span>
       </div>
-    </div>
+
+      <div className="hidden items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-[10px] font-bold text-slate-500 sm:flex">
+        <TerminalSquare className="h-3.5 w-3.5 text-slate-400" />
+        <span>{proj.tmux_ids?.length || 0}</span>
+      </div>
+
+      <span className="flex items-center gap-1.5 text-[11px] font-bold text-indigo-600">
+        <span className="hidden sm:inline">打开</span>
+        <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+      </span>
+    </button>
   );
 }

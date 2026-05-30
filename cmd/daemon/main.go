@@ -9,11 +9,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"remote-agent/internal/appconfig"
 	"remote-agent/internal/daemon"
 )
 
 func main() {
 	configPath := flag.String("config", "agentbridge.daemon.json", "daemon config path")
+	clientConfigPath := flag.String("client-config", "", "client config path; server_url overrides daemon server.url when set")
 	initConfig := flag.Bool("init-config", false, "write an example config and exit")
 	flag.Parse()
 
@@ -28,6 +30,17 @@ func main() {
 	cfg, err := daemon.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *clientConfigPath != "" {
+		clientCfg, err := appconfig.Load(*clientConfigPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		daemonURL, err := appconfig.DaemonWebSocketURL(clientCfg.ServerURL)
+		if err != nil {
+			log.Fatal(err)
+		}
+		cfg.Server.URL = daemonURL
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

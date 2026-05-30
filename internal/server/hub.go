@@ -21,6 +21,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 
+	"remote-agent/internal/appconfig"
 	"remote-agent/internal/hostinfo"
 	"remote-agent/internal/protocol"
 )
@@ -308,6 +309,32 @@ func (h *Hub) ServeDaemonSocket(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/state" && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, h.stateView())
+		return
+	}
+	if r.URL.Path == "/api/config" {
+		if r.Method == http.MethodGet {
+			cfg, err := appconfig.Load("")
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, protocol.ServerError{Code: "config_load_failed", Message: err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, cfg)
+			return
+		}
+		if r.Method == http.MethodPost {
+			var cfg appconfig.Config
+			if !decodeJSON(w, r, &cfg) {
+				return
+			}
+			if err := appconfig.Save("", cfg); err != nil {
+				writeJSON(w, http.StatusInternalServerError, protocol.ServerError{Code: "config_save_failed", Message: err.Error()})
+				return
+			}
+			saved, _ := appconfig.Load("")
+			writeJSON(w, http.StatusOK, saved)
+			return
+		}
+		writeJSON(w, http.StatusMethodNotAllowed, protocol.ServerError{Code: "method_not_allowed", Message: "unsupported method"})
 		return
 	}
 	if r.URL.Path == "/api/project/list" && r.Method == http.MethodGet {

@@ -71,6 +71,66 @@ go build ./cmd/server
 go build ./cmd/daemon
 ```
 
+## AppImage 运行形态
+
+Pocket Studio 只打包一个 Electron AppImage，里面包含 UI、server、daemon。启动时通过模块参数控制运行哪些部分：
+
+```bash
+pocket-studio ui
+pocket-studio server
+pocket-studio daemon
+pocket-studio ui server daemon
+```
+
+不传模块参数时，默认等同于：
+
+```bash
+pocket-studio ui server daemon
+```
+
+统一配置仍然保存在 `~/.config/pocket-studio/client.json`。本机 standalone 模式会为本地 server 选择随机端口，并把实际地址写回配置：
+
+```json
+{
+  "server_url": "http://127.0.0.1:<random-port>",
+  "local_mode": true
+}
+```
+
+常用启动方式：
+
+```bash
+# 本机 standalone：启动 UI + 随机端口 server + daemon
+pocket-studio ui server daemon
+
+# 只打开 UI，并连接已有 server
+pocket-studio ui --ui.server.addr=http://localhost:10080
+
+# 只启动 server
+pocket-studio server --server.port=18080
+
+# 只启动 daemon，并连接已有 server
+pocket-studio daemon --daemon.server.addr=http://localhost:10080
+```
+
+如果 `ui server daemon` 同时存在，且没有显式指定 `--ui.server.addr` 或 `--daemon.server.addr`，UI 和 daemon 会自动连接本次启动的本地 server。
+
+构建 AppImage：
+
+```bash
+bash scripts/build-packages.sh
+```
+
+产物：
+
+- `dist/electron/PocketStudio-0.0.0-x86_64.AppImage`
+
+运行：
+
+```bash
+./dist/electron/PocketStudio-0.0.0-x86_64.AppImage ui server daemon
+```
+
 ## 当前限制
 
 - MVP 只支持 Claude Code。

@@ -3,6 +3,7 @@ import { Terminal as XTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { TerminalTitleSource, StudioTheme } from "./terminal-types";
+import { websocketURL } from "@/lib/api";
 
 export function getXtermTheme(theme: StudioTheme) {
   if (theme === "dark") {
@@ -350,12 +351,6 @@ export function XtermInstance({
       });
 
       /* ── 2. WebSocket connection ── */
-      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const currentHost = window.location.hostname || "localhost";
-      const currentPort = window.location.port;
-      const host = currentPort === "5173"
-        ? `${currentHost}:18080`
-        : (window.location.host || "localhost:18080");
       const initialSize = measureTerminalSize();
       const wsParams = new URLSearchParams({
         project_id: projectId,
@@ -366,15 +361,20 @@ export function XtermInstance({
         wsParams.set("cols", String(initialSize.cols));
         wsParams.set("rows", String(initialSize.rows));
       }
-      const wsUrl = `${proto}//${host}/ws/terminal?${wsParams.toString()}`;
+      const wsUrl = websocketURL("/ws/terminal", wsParams);
+      let connectAttempts = 0;
+      let connectedOnce = false;
 
       const connect = () => {
         if (disposedRef.current) return;
+        connectAttempts += 1;
         const socket = new WebSocket(wsUrl);
         wsRef.current = socket;
         socket.binaryType = "arraybuffer";
 
         socket.onopen = () => {
+          connectedOnce = true;
+          connectAttempts = 0;
           for (const chunk of inputBuf.current) {
             socket.send(chunk);
           }
@@ -407,13 +407,18 @@ export function XtermInstance({
 
         socket.onerror = () => {
           if (disposedRef.current) return;
-          term!.write("\r\n\x1b[31m[WebSocket connection failed]\x1b[0m\r\n");
+          if (!connectedOnce && connectAttempts >= 3) {
+            term!.write(`\r\n\x1b[31m[WebSocket connection failed: ${wsUrl}]\x1b[0m\r\n`);
+          }
         };
 
         socket.onclose = () => {
           if (disposedRef.current) return;
-          term!.write("\r\n\x1b[33m[Connection closed, reconnecting...]\x1b[0m\r\n");
-          reconnectTimerRef.current = window.setTimeout(connect, 1000);
+          if (connectedOnce) {
+            term!.write("\r\n\x1b[33m[Connection closed, reconnecting...]\x1b[0m\r\n");
+          }
+          const delay = Math.min(5000, 300 * connectAttempts);
+          reconnectTimerRef.current = window.setTimeout(connect, delay);
         };
       };
 

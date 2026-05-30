@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Pocket Studio
+Exec=pocket-studio
+Icon=pocket-studio
+Categories=Development;
+Terminal=false

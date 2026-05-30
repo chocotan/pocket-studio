@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pocket Studio — 专为远程开发打造的 IDE</title>
+    <meta name="description" content="Pocket Studio 是专为远程开发、多终端和多任务打造的远程 IDE。" />
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #fafafa;
+        --panel: #ffffff;
+        --ink: #0a0a0a;
+        --muted: #737373;
+        --line: #e5e5e5;
+        --primary: #000000;
+        --primary-hover: #262626;
+        --radius: 12px;
+        --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+        --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+      }
+
+      * { box-sizing: border-box; }
+      html, body { min-height: 100%; margin: 0; }
+      body {
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background-color: var(--bg);
+        background-image: radial-gradient(#e5e5e5 1px, transparent 1px);
+        background-size: 24px 24px;
+        color: var(--ink);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* Base */
+      button, input { font: inherit; outline: none; }
+      button { cursor: pointer; border: none; background: none; }
+      a { color: inherit; text-decoration: none; }
+      
+      /* Layout */
+      .shell { min-height: 100dvh; display: flex; flex-direction: column; }
+      
+      /* Topbar */
+      .topbar {
+        position: sticky; top: 0; z-index: 50;
+        height: 56px; display: flex; align-items: center; justify-content: space-between;
+        padding: 0 24px;
+        background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(12px);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+      }
+      .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 16px; letter-spacing: -0.02em; }
+      .brand-mark { 
+        width: 28px; height: 28px; border-radius: 8px; 
+        background: linear-gradient(135deg, #111, #444); 
+        color: white; display: grid; place-items: center; font-size: 14px; font-weight: 800;
+        box-shadow: var(--shadow-sm);
+      }
+      .nav-actions { display: flex; align-items: center; gap: 12px; }
+
+      /* Buttons */
+      .btn {
+        height: 36px; padding: 0 16px; border-radius: 8px; font-size: 13px; font-weight: 600;
+        display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+        transition: all 0.15s ease;
+      }
+      .btn-primary { background: var(--primary); color: white; box-shadow: var(--shadow-sm); }
+      .btn-primary:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: var(--shadow-md); }
+      .btn-secondary { background: white; border: 1px solid var(--line); color: var(--ink); box-shadow: var(--shadow-sm); }
+      .btn-secondary:hover { background: #fafafa; border-color: #d4d4d4; }
+      .btn-ghost { color: var(--muted); }
+      .btn-ghost:hover { color: var(--ink); background: rgba(0,0,0,0.05); }
+
+      /* Views */
+      .view { display: none; }
+      .view.active { display: block; animation: fadeIn 0.3s ease; }
+      @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+      /* Landing Hero */
+      .hero {
+        max-width: 1200px; margin: 0 auto; padding: 80px 24px;
+        display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: center;
+      }
+      .hero-copy { max-width: 540px; }
+      .pill {
+        display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px;
+        border-radius: 999px; border: 1px solid var(--line); background: white;
+        font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 24px;
+        box-shadow: var(--shadow-sm);
+      }
+      .pill-dot { width: 6px; height: 6px; border-radius: 50%; background: #10b981; box-shadow: 0 0 8px #10b981; }
+      .hero h1 {
+        font-size: clamp(40px, 5vw, 64px); line-height: 1.1; font-weight: 800; letter-spacing: -0.03em;
+        margin: 0 0 24px;
+        background: linear-gradient(to right bottom, #111, #555);
+        -webkit-background-clip: text; color: transparent;
+      }
+      .hero .lead { font-size: 18px; line-height: 1.6; color: var(--muted); margin: 0 0 32px; }
+      .hero-actions { display: flex; gap: 16px; margin-bottom: 48px; }
+      .hero-actions .btn { height: 44px; padding: 0 24px; font-size: 15px; }
+
+      .stats-row { display: flex; gap: 32px; border-top: 1px solid var(--line); padding-top: 32px; }
+      .stat-item strong { display: block; font-size: 24px; font-weight: 700; color: var(--ink); margin-bottom: 4px; }
+      .stat-item span { font-size: 13px; color: var(--muted); }
+
+      /* Product Frame (Mac Window) */
+      .product-visual { position: relative; }
+      .mac-window {
+        background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(20px);
+        border: 1px solid rgba(0,0,0,0.1); border-radius: 16px;
+        box-shadow: var(--shadow-xl); overflow: hidden;
+      }
+      .mac-header {
+        height: 40px; display: flex; align-items: center; padding: 0 16px;
+        border-bottom: 1px solid rgba(0,0,0,0.05); background: rgba(250,250,250,0.8);
+      }
+      .mac-dots { display: flex; gap: 8px; }
+      .mac-dots span { width: 10px; height: 10px; border-radius: 50%; }
+      .mac-dots span:nth-child(1) { background: #ff5f56; }
+      .mac-dots span:nth-child(2) { background: #ffbd2e; }
+      .mac-dots span:nth-child(3) { background: #27c93f; }
+      .mac-title { flex: 1; text-align: center; font-size: 12px; font-weight: 600; color: var(--muted); }
+      
+      .ide-layout { display: grid; grid-template-columns: 200px 1fr; height: 400px; }
+      .ide-sidebar { border-right: 1px solid rgba(0,0,0,0.05); padding: 12px; background: #fafafa; }
+      .ide-item { height: 24px; border-radius: 6px; background: rgba(0,0,0,0.03); margin-bottom: 8px; }
+      .ide-item.active { background: rgba(0,0,0,0.08); }
+      .ide-main { display: flex; flex-direction: column; }
+      .ide-tabs { display: flex; border-bottom: 1px solid rgba(0,0,0,0.05); }
+      .ide-tab { padding: 8px 16px; font-size: 12px; font-weight: 600; border-right: 1px solid rgba(0,0,0,0.05); background: white; }
+      .ide-tab.inactive { background: #fafafa; color: var(--muted); }
+      .ide-editor { flex: 1; padding: 24px; background: white; }
+      .code-line { height: 12px; border-radius: 4px; margin-bottom: 12px; background: #f0f0f0; }
+      .code-line.w-80 { width: 80%; } .code-line.w-60 { width: 60%; } .code-line.w-90 { width: 90%; } .code-line.w-40 { width: 40%; }
+      .code-line.indent { margin-left: 24px; }
+      .code-line.blue { background: #e0f2fe; } .code-line.purple { background: #f3e8ff; } .code-line.green { background: #dcfce7; }
+      
+      /* Floating Terminal */
+      .floating-terminal {
+        position: absolute; bottom: -20px; right: -20px; width: 320px;
+        background: #0a0a0a; border-radius: 12px; padding: 16px;
+        box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); border: 1px solid #262626;
+        color: #10b981; font-family: monospace; font-size: 12px; line-height: 1.6;
+      }
+      .term-header { display: flex; justify-content: space-between; color: #737373; margin-bottom: 12px; border-bottom: 1px solid #262626; padding-bottom: 8px;}
+      .term-text span { color: #facc15; }
+
+      /* Features */
+      .features { max-width: 1200px; margin: 0 auto; padding: 64px 24px 120px; }
+      .features-header { text-align: center; margin-bottom: 64px; }
+      .features-header h2 { font-size: 36px; font-weight: 800; margin: 0 0 16px; letter-spacing: -0.02em; }
+      .features-header p { font-size: 18px; color: var(--muted); max-width: 600px; margin: 0 auto; }
+      
+      .bento-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
+      .bento-card {
+        background: white; border: 1px solid var(--line); border-radius: 20px;
+        padding: 32px; box-shadow: var(--shadow-sm); transition: box-shadow 0.3s ease;
+      }
+      .bento-card:hover { box-shadow: var(--shadow-lg); }
+      .bento-icon {
+        width: 48px; height: 48px; border-radius: 12px; background: #f5f5f5;
+        display: flex; align-items: center; justify-content: center; margin-bottom: 24px;
+        font-size: 20px;
+      }
+      .bento-card h3 { font-size: 20px; font-weight: 700; margin: 0 0 12px; }
+      .bento-card p { font-size: 15px; color: var(--muted); line-height: 1.6; margin: 0; }
+
+      /* Auth & Home Styles */
+      .auth-layout { min-height: calc(100dvh - 56px); display: grid; place-items: center; padding: 24px; }
+      .auth-card {
+        width: 100%; max-width: 400px; background: white; border: 1px solid var(--line);
+        border-radius: 16px; box-shadow: var(--shadow-xl); padding: 32px;
+      }
+      .auth-card h2 { font-size: 24px; font-weight: 800; margin: 0 0 8px; text-align: center; }
+      .auth-card p { color: var(--muted); font-size: 14px; text-align: center; margin: 0 0 32px; }
+      
+      .field { margin-bottom: 20px; }
+      label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--ink); }
+      input {
+        width: 100%; height: 44px; padding: 0 16px; border: 1px solid var(--line);
+        border-radius: 8px; font-size: 15px; transition: border-color 0.2s;
+      }
+      input:focus { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+      
+      .full-w { width: 100%; height: 44px; margin-top: 8px; }
+      .divider { display: flex; align-items: center; margin: 24px 0; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+      .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+      .divider::before { margin-right: 12px; } .divider::after { margin-left: 12px; }
+      .auth-switch { text-align: center; margin-top: 24px; font-size: 14px; color: var(--muted); }
+      .text-link { color: var(--primary); font-weight: 600; }
+      
+      .code-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+      .code-grid input { text-align: center; padding: 0; font-size: 20px; font-weight: 700; }
+
+      /* Dashboard Home */
+      .home-layout {
+        max-width: 1200px; margin: 32px auto; padding: 0 24px;
+        display: grid; grid-template-columns: 240px 1fr; gap: 32px;
+      }
+      .side-nav { display: flex; flex-direction: column; gap: 4px; }
+      .side-item {
+        display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+        border-radius: 8px; font-size: 14px; font-weight: 600; color: var(--muted);
+      }
+      .side-item.active { background: white; color: var(--ink); box-shadow: var(--shadow-sm); border: 1px solid var(--line); }
+      .side-item:hover:not(.active) { background: rgba(0,0,0,0.03); color: var(--ink); }
+
+      .dash-header { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 32px; }
+      .dash-header h1 { font-size: 28px; font-weight: 800; margin: 0 0 8px; }
+      .dash-header p { color: var(--muted); font-size: 15px; margin: 0; }
+      
+      .dash-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px; }
+      .dash-stat-card {
+        background: white; border: 1px solid var(--line); border-radius: 12px;
+        padding: 24px; box-shadow: var(--shadow-sm);
+      }
+      .dash-stat-card .val { font-size: 32px; font-weight: 800; margin-bottom: 4px; }
+      .dash-stat-card .lbl { font-size: 13px; color: var(--muted); font-weight: 600; }
+      
+      .project-list { background: white; border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-sm); overflow: hidden; }
+      .project-list-header { padding: 16px 24px; border-bottom: 1px solid var(--line); font-size: 14px; font-weight: 700; background: #fafafa; }
+      .project-row {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 16px 24px; border-bottom: 1px solid var(--line);
+      }
+      .project-row:last-child { border-bottom: none; }
+      .project-info strong { display: block; font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+      .project-info span { font-size: 13px; color: var(--muted); font-family: monospace; }
+      
+      /* Toast */
+      .toast {
+        position: fixed; bottom: 24px; right: 24px; z-index: 100;
+        background: #101828; color: white; padding: 12px 20px;
+        border-radius: 8px; font-size: 14px; font-weight: 500;
+        box-shadow: var(--shadow-xl);
+        transform: translateY(100px); opacity: 0; transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      }
+      .toast.show { transform: translateY(0); opacity: 1; }
+
+      @media (max-width: 900px) {
+        .hero { grid-template-columns: 1fr; padding: 48px 24px; text-align: center; }
+        .hero-copy { margin: 0 auto; }
+        .hero-actions { justify-content: center; }
+        .stats-row { justify-content: center; }
+        .product-visual { margin-top: 32px; }
+        .bento-grid { grid-template-columns: 1fr; }
+        .home-layout { grid-template-columns: 1fr; }
+        .side-nav { flex-direction: row; overflow-x: auto; padding-bottom: 8px; }
+        .dash-stats { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="#landing" data-view-link="landing">
+          <div class="brand-mark">P</div>
+          <span>Pocket Studio</span>
+        </a>
+        <div class="nav-actions">
+          <button class="btn btn-ghost" data-view-link="login">登录</button>
+          <button class="btn btn-primary" data-view-link="register">免费注册</button>
+        </div>
+      </header>
+
+      <main>
+        <!-- Landing View -->
+        <section id="landing" class="view active" data-view="landing">
+          <div class="hero">
+            <div class="hero-copy">
+              <div class="pill"><span class="pill-dot"></span> v2.0 is now live</div>
+              <h1>远程开发环境。<br/>一触即达。</h1>
+              <p class="lead">专为浏览器访问、多终端管理打造的远程 IDE。在任何设备上连接你的开发机，享受顺滑、本地般的编码体验。</p>
+              <div class="hero-actions">
+                <button class="btn btn-primary" data-view-link="register">开始使用</button>
+                <button class="btn btn-secondary" data-view-link="login">进入工作区</button>
+              </div>
+              <div class="stats-row">
+                <div class="stat-item"><strong>10ms</strong><span>超低延迟</span></div>
+                <div class="stat-item"><strong>99.9%</strong><span>持久化运行</span></div>
+                <div class="stat-item"><strong>∞</strong><span>自由布局</span></div>
+              </div>
+            </div>
+
+            <div class="product-visual">
+              <div class="mac-window">
+                <div class="mac-header">
+                  <div class="mac-dots"><span></span><span></span><span></span></div>
+                  <div class="mac-title">pocket-studio.local — workspace</div>
+                </div>
+                <div class="ide-layout">
+                  <div class="ide-sidebar">
+                    <div class="ide-item active" style="width: 100%"></div>
+                    <div class="ide-item" style="width: 80%"></div>
+                    <div class="ide-item" style="width: 90%"></div>
+                    <div class="ide-item" style="width: 60%"></div>
+                  </div>
+                  <div class="ide-main">
+                    <div class="ide-tabs">
+                      <div class="ide-tab">server.ts</div>
+                      <div class="ide-tab inactive">package.json</div>
+                    </div>
+                    <div class="ide-editor">
+                      <div class="code-line w-80 purple"></div>
+                      <div class="code-line w-60 blue indent"></div>
+                      <div class="code-line w-90 blue indent"></div>
+                      <div class="code-line w-40 indent"></div>
+                      <div class="code-line w-80 green"></div>
+                      <div class="code-line w-60 indent"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="floating-terminal">
+                <div class="term-header">
+                  <span>TERMINAL</span>
+                  <span>zsh</span>
+                </div>
+                <div class="term-text">
+                  <div>$ pocket connect dev-box</div>
+                  <div><span>[info]</span> daemon online</div>
+                  <div><span>[info]</span> restored 3 active terminals</div>
+                  <div>$ npm run dev</div>
+                  <div>> pocket-studio@2.0 dev</div>
+                  <div>> starting compiler...</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="features">
+            <div class="features-header">
+              <h2>专为沉浸式开发设计</h2>
+              <p>不仅仅是浏览器里的编辑器，而是重构远程工作流的利器。终端、文件、代码随心排列。</p>
+            </div>
+            <div class="bento-grid">
+              <div class="bento-card">
+                <div class="bento-icon">🎛️</div>
+                <h3>无界限布局</h3>
+                <p>打破传统 IDE 的固定面板限制。终端、文件树、编辑器均可作为独立标签，自由拖拽、组合与拆分，定制你的专属工作台。</p>
+              </div>
+              <div class="bento-card">
+                <div class="bento-icon">⚡️</div>
+                <h3>原生级体验</h3>
+                <p>基于先进的 Web 技术栈构建，提供媲美本地桌面的响应速度。代码高亮、智能补全、快捷键绑定一应俱全。</p>
+              </div>
+              <div class="bento-card">
+                <div class="bento-icon">🔄</div>
+                <h3>现场秒级恢复</h3>
+                <p>自动记录并保存工作区状态。无论你在哪里登录，上次打开的项目、运行的终端、切分的屏幕布局都会瞬间恢复。</p>
+              </div>
+              <div class="bento-card">
+                <div class="bento-icon">🔐</div>
+                <h3>安全可靠的连接</h3>
+                <p>所有数据通信经过端到端加密。支持私有化部署你的守护进程，确保代码资产绝对掌握在自己手中。</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Register View -->
+        <section id="register" class="view" data-view="register">
+          <div class="auth-layout">
+            <div class="auth-card">
+              <h2>创建账号</h2>
+              <p>开始使用 Pocket Studio 搭建远程环境</p>
+              <form id="register-form">
+                <div class="field">
+                  <label for="reg-name">姓名</label>
+                  <input id="reg-name" type="text" required />
+                </div>
+                <div class="field">
+                  <label for="reg-email">工作邮箱</label>
+                  <input id="reg-email" type="email" required />
+                </div>
+                <div class="field">
+                  <label for="reg-team">团队名称</label>
+                  <input id="reg-team" type="text" required />
+                </div>
+                <button type="submit" class="btn btn-primary full-w">获取验证码</button>
+              </form>
+              <div class="divider">或者</div>
+              <button class="btn btn-secondary full-w" data-view-link="login">已有账号？去登录</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Login View -->
+        <section id="login" class="view" data-view="login">
+          <div class="auth-layout">
+            <div class="auth-card">
+              <h2>欢迎回来</h2>
+              <p>使用邮箱验证码安全登录</p>
+              <form id="login-form">
+                <div class="field">
+                  <label for="log-email">邮箱地址</label>
+                  <div style="display: flex; gap: 8px;">
+                    <input id="log-email" type="email" required />
+                    <button type="button" id="btn-send-code" class="btn btn-secondary" style="height: 44px; white-space: nowrap;">发送</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label>6位验证码</label>
+                  <div class="code-grid">
+                    <input type="text" maxlength="1" required />
+                    <input type="text" maxlength="1" required />
+                    <input type="text" maxlength="1" required />
+                    <input type="text" maxlength="1" required />
+                    <input type="text" maxlength="1" required />
+                    <input type="text" maxlength="1" required />
+                  </div>
+                </div>
+                <button type="submit" class="btn btn-primary full-w">验证并登录</button>
+              </form>
+              <div class="auth-switch">
+                还没有账号？ <button class="text-link" data-view-link="register">免费注册</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Dashboard View -->
+        <section id="home" class="view" data-view="home">
+          <div class="home-layout">
+            <aside>
+              <nav class="side-nav">
+                <button class="side-item active">总览</button>
+                <button class="side-item">工作区</button>
+                <button class="side-item">设备管理</button>
+                <button class="side-item">设置</button>
+              </nav>
+            </aside>
+            <div class="home-main">
+              <div class="dash-header">
+                <div>
+                  <h1>下午好，开发者</h1>
+                  <p>您有 2 台设备在线，3 个工作区处于活跃状态。</p>
+                </div>
+                <button class="btn btn-primary">+ 新建工作区</button>
+              </div>
+              
+              <div class="dash-stats">
+                <div class="dash-stat-card">
+                  <div class="val">2</div>
+                  <div class="lbl">在线设备</div>
+                </div>
+                <div class="dash-stat-card">
+                  <div class="val">14</div>
+                  <div class="lbl">保存的布局</div>
+                </div>
+                <div class="dash-stat-card">
+                  <div class="val">4</div>
+                  <div class="lbl">运行中的终端</div>
+                </div>
+              </div>
+
+              <div class="project-list">
+                <div class="project-list-header">最近使用的工作区</div>
+                <div class="project-row">
+                  <div class="project-info">
+                    <strong>pocket-studio-web</strong>
+                    <span>~/workspace/pocket-studio/web</span>
+                  </div>
+                  <button class="btn btn-secondary">打开</button>
+                </div>
+                <div class="project-row">
+                  <div class="project-info">
+                    <strong>agent-bridge-api</strong>
+                    <span>/var/www/agent-bridge</span>
+                  </div>
+                  <button class="btn btn-secondary">打开</button>
+                </div>
+                <div class="project-row">
+                  <div class="project-info">
+                    <strong>rusty-tools</strong>
+                    <span>~/projects/rusty-tools</span>
+                  </div>
+                  <button class="btn btn-secondary">打开</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast">操作成功</div>
+
+    <script>
+      const views = document.querySelectorAll('.view');
+      const toast = document.getElementById('toast');
+      let toastTimer;
+
+      function showToast(msg) {
+        toast.textContent = msg;
+        toast.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toast.classList.remove('show'), 3000);
+      }
+
+      function switchView(viewId) {
+        views.forEach(v => {
+          if (v.dataset.view === viewId) {
+            v.classList.add('active');
+          } else {
+            v.classList.remove('active');
+          }
+        });
+        window.location.hash = viewId;
+        window.scrollTo(0, 0);
+      }
+
+      document.querySelectorAll('[data-view-link]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          switchView(btn.dataset.viewLink);
+        });
+      });
+
+      // Handle URL Hash
+      function handleHash() {
+        const hash = window.location.hash.slice(1);
+        if (['landing', 'register', 'login', 'home'].includes(hash)) {
+          switchView(hash);
+        } else {
+          switchView('landing');
+        }
+      }
+      window.addEventListener('hashchange', handleHash);
+      handleHash();
+
+      // Form interactions
+      document.getElementById('register-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const email = document.getElementById('reg-email').value;
+        document.getElementById('log-email').value = email;
+        showToast('已发送验证码至 ' + email);
+        switchView('login');
+      });
+
+      document.getElementById('btn-send-code').addEventListener('click', () => {
+        const email = document.getElementById('log-email').value;
+        if (!email) {
+          showToast('请先填写邮箱地址');
+          return;
+        }
+        showToast('验证码已发送至 ' + email);
+        document.querySelector('.code-grid input').focus();
+      });
+
+      document.getElementById('login-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        showToast('登录成功，欢迎回来！');
+        switchView('home');
+      });
+
+      // Code Grid Logic
+      const codeInputs = document.querySelectorAll('.code-grid input');
+      codeInputs.forEach((input, idx) => {
+        input.addEventListener('input', (e) => {
+          input.value = input.value.replace(/[^0-9]/g, '');
+          if (input.value && idx < codeInputs.length - 1) {
+            codeInputs[idx + 1].focus();
+          }
+        });
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Backspace' && !input.value && idx > 0) {
+            codeInputs[idx - 1].focus();
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

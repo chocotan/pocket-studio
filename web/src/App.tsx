@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { StudioDashboard, type Project } from "./components/studio/studio-dashboard";
 import { StudioWorkspace } from "./components/studio/studio-workspace";
 import type { Device } from "./lib/types";
+import { getJSON, loadClientConfig } from "./lib/api";
 
 export default function App() {
   const initialProjectId = projectIdFromPath();
@@ -13,7 +14,7 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string>(initialProjectId);
 
   useEffect(() => {
-    refreshAll();
+    void loadClientConfig().finally(refreshAll);
   }, []);
 
   useEffect(() => {
@@ -37,47 +38,21 @@ export default function App() {
 
   async function refreshAll() {
     try {
-      const host = window.location.host ? "" : "http://localhost:18080";
-
-      const devRes = await fetch(`${host}/api/state`);
-      if (devRes.ok) {
-        const data = await devRes.json();
-        if (data && data.devices) {
-          setDevices(data.devices);
-        } else if (Array.isArray(data)) {
-          setDevices(data);
-        }
+      const stateData = await getJSON<any>("/api/state");
+      if (stateData && stateData.devices) {
+        setDevices(stateData.devices);
+      } else if (Array.isArray(stateData)) {
+        setDevices(stateData);
       }
 
-      const projRes = await fetch(`${host}/api/project/list`);
-      if (projRes.ok) {
-        const data = await projRes.json();
-        if (Array.isArray(data)) {
-          setProjects(data);
-        } else if (data && data.projects) {
-          setProjects(data.projects);
-        }
+      const projectData = await getJSON<any>("/api/project/list");
+      if (Array.isArray(projectData)) {
+        setProjects(projectData);
+      } else if (projectData && projectData.projects) {
+        setProjects(projectData.projects);
       }
     } catch (err) {
       console.error("failed to fetch devices/projects:", err);
-      // Fallback mock data for demo
-      setDevices([
-        {
-          id: "dev_local",
-          name: window.location.hostname || "localhost",
-          workspaces: [{ id: "ws-1", name: "Agent", path: "/home/choco/Agent" }],
-        },
-      ]);
-      setProjects([
-        {
-          id: "proj-99856689",
-          name: "test-project",
-          device_id: "dev_local",
-          workspace_path: "/home/choco/Agent",
-          agent_ids: [],
-          tmux_ids: [],
-        },
-      ]);
     }
   }
 

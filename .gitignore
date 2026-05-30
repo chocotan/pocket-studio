@@ -1,5 +1,7 @@
 /daemon
 /server
+/main
+/dist/
 web/node_modules/
 web/dist/
 web/tsconfig.tsbuildinfo
