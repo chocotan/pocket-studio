@@ -2,7 +2,10 @@
 /server
 /main
 /dist/
-web/node_modules/
-web/dist/
-web/tsconfig.tsbuildinfo
+studio-frontend/node_modules/
+studio-frontend/dist/
+studio-frontend/tsconfig.tsbuildinfo
+user-frontend/node_modules/
+user-frontend/dist/
+user-frontend/tsconfig.tsbuildinfo
 *.log

@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,7 +23,8 @@ type DeviceConfig struct {
 }
 
 type ServerConfig struct {
-	URL string `json:"url"`
+	URL   string `json:"url"`
+	Token string `json:"token,omitempty"`
 }
 
 type ClaudeConfig struct {
@@ -41,15 +41,7 @@ type ACPXConfig struct {
 	Args        []string `json:"args"`
 }
 
-func LoadConfig(path string) (Config, error) {
-	var cfg Config
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cfg, err
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, err
-	}
+func NormalizeConfig(cfg Config) (Config, error) {
 	if cfg.Device.ID == "" {
 		return cfg, fmt.Errorf("device.id is required")
 	}
@@ -96,7 +88,7 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
-func ExampleConfig() Config {
+func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
 		Device: DeviceConfig{
@@ -125,13 +117,4 @@ func ExampleConfig() Config {
 			},
 		},
 	}
-}
-
-func WriteExampleConfig(path string) error {
-	cfg := ExampleConfig()
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0o600)
 }

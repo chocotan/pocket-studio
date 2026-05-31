@@ -9,27 +9,55 @@ import (
 	"path/filepath"
 	"strings"
 
+	"remote-agent/internal/auth"
 	"remote-agent/internal/server"
 )
 
+type serverConfig struct {
+	addr              string
+	adminToken        string
+	authEnabled       bool
+	authDB            string
+	authAllowRegister bool
+}
+
 func main() {
-	addr := flag.String("addr", ":8080", "HTTP listen address")
+	cfg := serverConfig{}
+	flag.StringVar(&cfg.addr, "server.addr", ":8080", "HTTP listen address")
+	flag.StringVar(&cfg.adminToken, "server.admin-token", "", "admin token for open/admin mode")
+	flag.BoolVar(&cfg.authEnabled, "server.auth.enabled", false, "enable user registration/login and token auth")
+	flag.StringVar(&cfg.authDB, "server.auth.db", defaultAuthDBPath(), "auth sqlite database path")
+	flag.BoolVar(&cfg.authAllowRegister, "server.auth.allow-register", true, "allow user registration when auth is enabled")
 	flag.Parse()
 
-	hub := server.NewHub()
+	authManager, err := newAuthManager(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer authManager.Close()
+
+	hub := server.NewHub(authManager)
 	mux := http.NewServeMux()
 	if distDir, ok := findWebDist(); ok {
-		mux.Handle("/", spaHandler(http.Dir(distDir)))
+		mux.Handle("/studio/", http.StripPrefix("/studio", spaHandler(http.Dir(distDir))))
 	} else {
-		mux.HandleFunc("/", server.ServeIndex)
+		log.Fatal("studio-frontend/dist not found; run `cd studio-frontend && npm run build` before starting the server")
 	}
+	if userDistDir, ok := findUserWebDist(); ok {
+		mux.Handle("/user/", http.StripPrefix("/user", spaHandler(http.Dir(userDistDir))))
+		mux.Handle("/", spaHandler(http.Dir(userDistDir)))
+	}
+	authHTTP := auth.HTTP{Manager: authManager, AllowRegister: cfg.authAllowRegister}
+	mux.Handle("/api/auth/", authHTTP)
+	mux.Handle("/api/tokens", authHTTP)
+	mux.Handle("/api/tokens/", authHTTP)
 	mux.HandleFunc("/ws/web", hub.ServeWebSocket)
 	mux.HandleFunc("/ws/daemon", hub.ServeDaemonSocket)
 	mux.HandleFunc("/ws/terminal", hub.ServeTerminalWebSocket)
 	mux.HandleFunc("/api/", hub.ServeAPI)
 
 	handler := corsMiddleware(mux)
-	ln, err := net.Listen("tcp", *addr)
+	ln, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -39,6 +67,29 @@ func main() {
 	}
 }
 
+func newAuthManager(cfg serverConfig) (*auth.Manager, error) {
+	if cfg.authEnabled {
+		return auth.NewSQLite(cfg.authDB, cfg.adminToken)
+	}
+	return auth.NewOpen(cfg.adminToken), nil
+}
+
+func defaultAuthDBPath() string {
+	if dir := strings.TrimSpace(os.Getenv("POCKET_STUDIO_AUTH_DIR")); dir != "" {
+		return filepath.Join(dir, "server-auth.sqlite")
+	}
+	if dir := strings.TrimSpace(os.Getenv("POCKET_STUDIO_CONFIG_DIR")); dir != "" {
+		return filepath.Join(dir, "server-auth.sqlite")
+	}
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "pocket-studio", "server-auth.sqlite")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".config", "pocket-studio", "server-auth.sqlite")
+	}
+	return filepath.Join(".pocket-studio", "server-auth.sqlite")
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -46,7 +97,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -68,16 +120,36 @@ func allowedOrigin(origin string) bool {
 		strings.HasPrefix(origin, "http://[::1]:")
 }
 
-func findWebDist() (string, bool) {
-	candidates := []string{filepath.Join("web", "dist")}
+func findUserWebDist() (string, bool) {
+	candidates := []string{filepath.Join("user-frontend", "dist")}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
 		candidates = append(candidates,
-			filepath.Join(dir, "..", "web", "dist"),
-			filepath.Join(dir, "web", "dist"),
-			filepath.Join(dir, "..", "..", "web", "dist"),
-			filepath.Join(dir, "..", "resources", "web", "dist"),
-			filepath.Join(dir, "..", "..", "resources", "web", "dist"),
+			filepath.Join(dir, "..", "user-ui", "dist"),
+			filepath.Join(dir, "user-ui", "dist"),
+			filepath.Join(dir, "..", "..", "user-ui", "dist"),
+			filepath.Join(dir, "..", "resources", "user-ui", "dist"),
+			filepath.Join(dir, "..", "..", "resources", "user-ui", "dist"),
+		)
+	}
+	for _, dir := range candidates {
+		if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
+			return dir, true
+		}
+	}
+	return "", false
+}
+
+func findWebDist() (string, bool) {
+	candidates := []string{filepath.Join("studio-frontend", "dist")}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(dir, "..", "ui", "dist"),
+			filepath.Join(dir, "ui", "dist"),
+			filepath.Join(dir, "..", "..", "ui", "dist"),
+			filepath.Join(dir, "..", "resources", "ui", "dist"),
+			filepath.Join(dir, "..", "..", "resources", "ui", "dist"),
 		)
 	}
 	for _, dir := range candidates {

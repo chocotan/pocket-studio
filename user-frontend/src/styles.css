@@ -1,0 +1,406 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #172033;
+  background: #eef2f7;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.topbar,
+.panel,
+.auth-panel {
+  border: 1px solid #d8e0eb;
+  background: #ffffff;
+  box-shadow: 0 16px 40px rgb(26 35 52 / 8%);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 68px;
+  padding: 0 18px;
+  border-radius: 8px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-mark,
+.auth-mark {
+  display: grid;
+  place-items: center;
+  color: #ffffff;
+  background: #3858d8;
+}
+
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+.brand h1 {
+  font-size: 16px;
+}
+
+.brand p,
+.panel-header p {
+  margin-top: 3px;
+  color: #68748a;
+  font-size: 12px;
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.panel {
+  min-width: 0;
+  border-radius: 8px;
+  padding: 18px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.panel-header h2 {
+  font-size: 15px;
+}
+
+.icon-button,
+.danger-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 34px;
+  border: 1px solid #d8e0eb;
+  border-radius: 7px;
+  color: #59667a;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.icon-button:hover {
+  color: #172033;
+  background: #f5f7fb;
+}
+
+.danger-button:hover {
+  color: #b42318;
+  background: #fff2f0;
+}
+
+.auth-page {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.auth-panel {
+  width: min(420px, 100%);
+  border-radius: 8px;
+  padding: 24px;
+}
+
+.auth-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.auth-panel h1 {
+  font-size: 20px;
+  margin-bottom: 16px;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 8px;
+  background: #eef2f7;
+  margin-bottom: 18px;
+}
+
+.segmented button {
+  height: 34px;
+  border: 0;
+  border-radius: 6px;
+  color: #59667a;
+  background: transparent;
+  cursor: pointer;
+}
+
+.segmented .active {
+  color: #172033;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgb(26 35 52 / 10%);
+}
+
+label {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 14px;
+  color: #59667a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+input {
+  width: 100%;
+  height: 40px;
+  border: 1px solid #cfd8e6;
+  border-radius: 7px;
+  padding: 0 11px;
+  color: #172033;
+  background: #ffffff;
+}
+
+input:focus {
+  border-color: #3858d8;
+  outline: 3px solid rgb(56 88 216 / 14%);
+}
+
+.primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  height: 40px;
+  border: 0;
+  border-radius: 7px;
+  color: #ffffff;
+  background: #3858d8;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.primary-button:hover {
+  background: #2948c5;
+}
+
+.primary-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.compact {
+  width: auto;
+  padding: 0 14px;
+}
+
+.token-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.token-card strong {
+  display: block;
+  font-size: 13px;
+}
+
+code {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  color: #17623a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.token-list {
+  display: grid;
+  gap: 8px;
+}
+
+.token-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #e0e6ef;
+  border-radius: 8px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.token-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.token-card-header span {
+  display: block;
+  color: #68748a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.token-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.revoked {
+  opacity: 0.55;
+}
+
+.empty,
+.form-error,
+.toast {
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 13px;
+}
+
+.empty {
+  color: #68748a;
+  background: #f5f7fb;
+  text-align: center;
+}
+
+.form-error,
+.toast {
+  color: #b42318;
+  border: 1px solid #ffd1cc;
+  background: #fff2f0;
+}
+
+.form-error {
+  margin-bottom: 14px;
+}
+
+.toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+}
+
+.usage-panel {
+  align-self: start;
+}
+
+.studio-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 40px;
+  margin-bottom: 14px;
+  border-radius: 7px;
+  color: #ffffff;
+  background: #3858d8;
+  font-size: 13px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.studio-link:hover {
+  background: #2948c5;
+}
+
+.inline-link {
+  width: auto;
+  height: 34px;
+  margin-bottom: 0;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.hint {
+  margin-bottom: 14px;
+  border: 1px solid #d8e0eb;
+  border-radius: 8px;
+  padding: 12px;
+  color: #59667a;
+  background: #f7f9fc;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.compact-hint {
+  margin-bottom: 0;
+  padding: 9px 10px;
+}
+
+.snippet {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.snippet span {
+  color: #59667a;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+pre {
+  margin: 0;
+  overflow-x: auto;
+  border: 1px solid #d8e0eb;
+  border-radius: 8px;
+  padding: 12px;
+  color: #172033;
+  background: #f7f9fc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 800px) {
+  .app-shell {
+    padding: 12px;
+  }
+
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .token-form {
+    grid-template-columns: 1fr;
+  }
+}

@@ -2,10 +2,5 @@
 set -eu
 
 HERE="$(dirname "$(readlink -f "$0")")"
-export POCKET_STUDIO_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pocket-studio"
-mkdir -p "$POCKET_STUDIO_CONFIG_DIR"
 
-exec "$HERE/usr/bin/pocket-studio-client" \
-  -config "$POCKET_STUDIO_CONFIG_DIR/client.json" \
-  -daemon-config "$POCKET_STUDIO_CONFIG_DIR/daemon.json" \
-  "$@"
+exec "$HERE/usr/bin/pocket-studio-client" "$@"

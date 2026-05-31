@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -31,12 +33,14 @@ import (
 type Daemon struct {
 	cfg Config
 
-	mu           sync.Mutex
-	tasks        map[string]*runningTask
-	history      map[string]protocol.TaskRecord
-	send         chan protocol.Envelope
-	termMu       sync.Mutex
-	terminalPTYs map[string]*runningPTY
+	mu            sync.Mutex
+	tasks         map[string]*runningTask
+	history       map[string]protocol.TaskRecord
+	projects      map[string]protocol.Project
+	projectStates map[string]json.RawMessage
+	send          chan protocol.Envelope
+	termMu        sync.Mutex
+	terminalPTYs  map[string]*runningPTY
 }
 
 type runningTask struct {
@@ -54,15 +58,23 @@ type runningTask struct {
 
 func New(cfg Config) *Daemon {
 	return &Daemon{
-		cfg:          cfg,
-		tasks:        make(map[string]*runningTask),
-		history:      make(map[string]protocol.TaskRecord),
-		send:         make(chan protocol.Envelope, 128),
-		terminalPTYs: make(map[string]*runningPTY),
+		cfg:           cfg,
+		tasks:         make(map[string]*runningTask),
+		history:       make(map[string]protocol.TaskRecord),
+		projects:      make(map[string]protocol.Project),
+		projectStates: make(map[string]json.RawMessage),
+		send:          make(chan protocol.Envelope, 128),
+		terminalPTYs:  make(map[string]*runningPTY),
 	}
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
+	if err := d.loadProjectStore(); err != nil {
+		log.Printf("load daemon projects: %v", err)
+	}
+	if err := d.loadProjectStates(); err != nil {
+		log.Printf("load daemon project states: %v", err)
+	}
 	for {
 		if err := d.runOnce(ctx); err != nil {
 			log.Printf("daemon connection closed: %v", err)
@@ -80,7 +92,11 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), nil)
+	header := http.Header{}
+	if token := strings.TrimSpace(d.cfg.Server.Token); token != "" {
+		header.Set("Authorization", "Bearer "+token)
+	}
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), header)
 	if err != nil {
 		return err
 	}
@@ -102,15 +118,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		}
 	}()
 
-	d.send <- protocol.NewEnvelope(protocol.TypeDaemonHello, "daemon", protocol.DaemonHello{
-		DeviceID:      d.cfg.Device.ID,
-		DeviceName:    hostinfo.ResolveDeviceName(d.cfg.Device.Name),
-		DaemonVersion: "0.1.0",
-		Agent:         d.agentName(),
-		AgentLabel:    d.agentLabel(),
-		Agents:        d.agentCapabilities(),
-		Workspaces:    d.cfg.Workspaces,
-	})
+	d.sendHello()
 	d.sendSnapshot()
 
 	go func() {
@@ -158,6 +166,144 @@ func (d *Daemon) agentName() string {
 		return d.cfg.ACPX.Agent
 	}
 	return "claude_code"
+}
+
+func daemonConfigDir() string {
+	if dir := strings.TrimSpace(os.Getenv("POCKET_STUDIO_DAEMON_CONFIG_DIR")); dir != "" {
+		return dir
+	}
+	if dir := strings.TrimSpace(os.Getenv("POCKET_STUDIO_CONFIG_DIR")); dir != "" {
+		return dir
+	}
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "pocket-studio")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".config", "pocket-studio")
+	}
+	return ".pocket-studio"
+}
+
+func daemonProjectsPath() string {
+	return filepath.Join(daemonConfigDir(), "projects.json")
+}
+
+func daemonProjectStatesPath() string {
+	return filepath.Join(daemonConfigDir(), "project-states.json")
+}
+
+func (d *Daemon) loadProjectStore() error {
+	raw, err := os.ReadFile(daemonProjectsPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var projects []protocol.Project
+	if err := json.Unmarshal(raw, &projects); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, project := range projects {
+		if project.ID == "" || project.WorkspacePath == "" {
+			continue
+		}
+		project.DeviceID = d.cfg.Device.ID
+		if project.AgentIDs == nil {
+			project.AgentIDs = []string{}
+		}
+		if project.TmuxIDs == nil {
+			project.TmuxIDs = []string{}
+		}
+		if len(project.StudioState) > 0 {
+			if _, exists := d.projectStates[project.ID]; !exists {
+				d.projectStates[project.ID] = append(json.RawMessage(nil), project.StudioState...)
+			}
+		}
+		d.projects[project.ID] = project
+	}
+	return nil
+}
+
+func (d *Daemon) saveProjectStoreLocked() error {
+	projects := make([]protocol.Project, 0, len(d.projects))
+	for _, project := range d.projects {
+		project.DeviceID = d.cfg.Device.ID
+		projects = append(projects, project)
+	}
+	sort.Slice(projects, func(i, j int) bool {
+		return projects[i].Name < projects[j].Name
+	})
+	if err := os.MkdirAll(daemonConfigDir(), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(projects, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(daemonProjectsPath(), append(raw, '\n'), 0o600)
+}
+
+func (d *Daemon) loadProjectStates() error {
+	raw, err := os.ReadFile(daemonProjectStatesPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var states map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &states); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for id, state := range states {
+		if id == "" || len(state) == 0 {
+			continue
+		}
+		d.projectStates[id] = append(json.RawMessage(nil), state...)
+	}
+	return nil
+}
+
+func (d *Daemon) saveProjectStatesLocked() error {
+	if err := os.MkdirAll(daemonConfigDir(), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(d.projectStates, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(daemonProjectStatesPath(), append(raw, '\n'), 0o600)
+}
+
+func (d *Daemon) workspacesSnapshot() []protocol.Workspace {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	workspaces := make([]protocol.Workspace, 0, len(d.cfg.Workspaces)+len(d.projects))
+	seen := make(map[string]bool)
+	for _, workspace := range d.cfg.Workspaces {
+		if workspace.Path == "" {
+			continue
+		}
+		workspaces = append(workspaces, workspace)
+		seen[workspace.Path] = true
+	}
+	for _, project := range d.projects {
+		if project.WorkspacePath == "" || seen[project.WorkspacePath] {
+			continue
+		}
+		workspaces = append(workspaces, protocol.Workspace{
+			ID:   workspaceIDForPath(project.WorkspacePath),
+			Name: project.Name,
+			Path: project.WorkspacePath,
+		})
+		seen[project.WorkspacePath] = true
+	}
+	return workspaces
 }
 
 func (d *Daemon) agentLabel() string {
@@ -354,6 +500,27 @@ func (d *Daemon) handleEnvelope(ctx context.Context, env protocol.Envelope) {
 			return
 		}
 		go d.writeWorkspaceFile(request)
+	case protocol.TypeProjectCreate:
+		request, err := protocol.DecodePayload[protocol.ProjectCreateRequest](env)
+		if err != nil {
+			d.sendProjectError("", err.Error())
+			return
+		}
+		go d.createProject(request)
+	case protocol.TypeProjectStateGet:
+		request, err := protocol.DecodePayload[protocol.ProjectStateGetRequest](env)
+		if err != nil {
+			d.sendProjectError("", err.Error())
+			return
+		}
+		go d.getProjectState(request)
+	case protocol.TypeProjectStateSet:
+		request, err := protocol.DecodePayload[protocol.ProjectStateSetRequest](env)
+		if err != nil {
+			d.sendProjectError("", err.Error())
+			return
+		}
+		go d.setProjectState(request)
 	case protocol.TypeTerminalRun:
 		request, err := protocol.DecodePayload[protocol.TerminalRunRequest](env)
 		if err != nil {
@@ -1673,6 +1840,98 @@ func (d *Daemon) writeWorkspaceFile(request protocol.WorkspaceWriteRequest) {
 	d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Content: request.Content})
 }
 
+func (d *Daemon) createProject(request protocol.ProjectCreateRequest) {
+	name := strings.TrimSpace(request.Name)
+	if name == "" {
+		name = filepath.Base(request.WorkspacePath)
+	}
+	workspace, err := d.resolveWorkspacePath("", request.WorkspacePath)
+	if err != nil {
+		d.sendProjectError(request.RequestID, err.Error())
+		return
+	}
+	project := protocol.Project{
+		ID:            projectIDForWorkspace(d.cfg.Device.ID, workspace.Path),
+		Name:          name,
+		DeviceID:      d.cfg.Device.ID,
+		WorkspacePath: workspace.Path,
+		AgentIDs:      []string{},
+		TmuxIDs:       []string{},
+	}
+	d.mu.Lock()
+	d.projects[project.ID] = project
+	err = d.saveProjectStoreLocked()
+	d.mu.Unlock()
+	if err != nil {
+		d.sendProjectError(request.RequestID, err.Error())
+		return
+	}
+	d.sendProjectResult(protocol.ProjectResult{RequestID: request.RequestID, Project: &project})
+	d.sendHello()
+}
+
+func (d *Daemon) getProjectState(request protocol.ProjectStateGetRequest) {
+	projectID := request.ProjectID
+	if projectID == "" && request.WorkspacePath != "" {
+		projectID = projectIDForWorkspace(d.cfg.Device.ID, request.WorkspacePath)
+	}
+	d.mu.Lock()
+	state := append(json.RawMessage(nil), d.projectStates[projectID]...)
+	if len(state) == 0 {
+		if project, ok := d.projects[projectID]; ok && len(project.StudioState) > 0 {
+			state = append(json.RawMessage(nil), project.StudioState...)
+		}
+	}
+	if len(state) == 0 && request.WorkspacePath != "" {
+		for _, project := range d.projects {
+			if project.WorkspacePath != request.WorkspacePath {
+				continue
+			}
+			if stored := d.projectStates[project.ID]; len(stored) > 0 {
+				state = append(json.RawMessage(nil), stored...)
+				break
+			}
+			if len(project.StudioState) > 0 {
+				state = append(json.RawMessage(nil), project.StudioState...)
+				break
+			}
+		}
+	}
+	d.mu.Unlock()
+	d.sendProjectResult(protocol.ProjectResult{RequestID: request.RequestID, State: state})
+}
+
+func (d *Daemon) setProjectState(request protocol.ProjectStateSetRequest) {
+	projectID := request.ProjectID
+	if projectID == "" && request.WorkspacePath != "" {
+		projectID = projectIDForWorkspace(d.cfg.Device.ID, request.WorkspacePath)
+	}
+	if projectID == "" {
+		d.sendProjectError(request.RequestID, "project_id is required")
+		return
+	}
+	state := append(json.RawMessage(nil), request.State...)
+	d.mu.Lock()
+	d.projectStates[projectID] = state
+	if project, ok := d.projects[projectID]; ok {
+		project.StudioState = state
+		project.TmuxIDs = collectTerminalTabIDsFromRaw(state)
+		d.projects[projectID] = project
+	}
+	stateErr := d.saveProjectStatesLocked()
+	projectErr := d.saveProjectStoreLocked()
+	d.mu.Unlock()
+	if stateErr != nil {
+		d.sendProjectError(request.RequestID, stateErr.Error())
+		return
+	}
+	if projectErr != nil {
+		d.sendProjectError(request.RequestID, projectErr.Error())
+		return
+	}
+	d.sendProjectResult(protocol.ProjectResult{RequestID: request.RequestID, State: state})
+}
+
 func (d *Daemon) runTerminalCommand(parent context.Context, request protocol.TerminalRunRequest) {
 	command := strings.TrimSpace(request.Command)
 	if command == "" {
@@ -1713,6 +1972,26 @@ func (d *Daemon) sendWorkspaceResult(result protocol.WorkspaceResult) {
 	d.send <- protocol.NewEnvelope(protocol.TypeWorkspaceResult, "daemon", result)
 }
 
+func (d *Daemon) sendProjectResult(result protocol.ProjectResult) {
+	d.send <- protocol.NewEnvelope(protocol.TypeProjectResult, "daemon", result)
+}
+
+func (d *Daemon) sendProjectError(requestID string, message string) {
+	d.sendProjectResult(protocol.ProjectResult{RequestID: requestID, Error: message})
+}
+
+func (d *Daemon) sendHello() {
+	d.send <- protocol.NewEnvelope(protocol.TypeDaemonHello, "daemon", protocol.DaemonHello{
+		DeviceID:      d.cfg.Device.ID,
+		DeviceName:    hostinfo.ResolveDeviceName(d.cfg.Device.Name),
+		DaemonVersion: "0.1.0",
+		Agent:         d.agentName(),
+		AgentLabel:    d.agentLabel(),
+		Agents:        d.agentCapabilities(),
+		Workspaces:    d.workspacesSnapshot(),
+	})
+}
+
 func (d *Daemon) sendWorkspaceError(requestID string, message string) {
 	d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: requestID, Error: message})
 }
@@ -1736,6 +2015,54 @@ func workspaceIDForPath(path string) string {
 		return id[len(id)-80:]
 	}
 	return id
+}
+
+func projectIDForWorkspace(deviceID string, workspacePath string) string {
+	sum := sha1.Sum([]byte(deviceID + "\x00" + workspacePath))
+	return "ws_" + fmt.Sprintf("%x", sum[:8])
+}
+
+func collectTerminalTabIDsFromRaw(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return []string{}
+	}
+	var state struct {
+		LayoutTree any `json:"layoutTree"`
+	}
+	if json.Unmarshal(raw, &state) != nil {
+		return []string{}
+	}
+	var ids []string
+	var walk func(any)
+	walk = func(value any) {
+		obj, ok := value.(map[string]any)
+		if !ok {
+			return
+		}
+		typ, _ := obj["type"].(string)
+		if typ == "panel" {
+			tabs, _ := obj["tabs"].([]any)
+			for _, tabValue := range tabs {
+				tab, ok := tabValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				if kind, _ := tab["kind"].(string); kind != "" && kind != "terminal" {
+					continue
+				}
+				if id, _ := tab["id"].(string); id != "" {
+					ids = append(ids, id)
+				}
+			}
+			return
+		}
+		children, _ := obj["children"].([]any)
+		for _, child := range children {
+			walk(child)
+		}
+	}
+	walk(state.LayoutTree)
+	return ids
 }
 
 func (d *Daemon) runningTaskIDs() []string {

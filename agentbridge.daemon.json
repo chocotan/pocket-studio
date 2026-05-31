@@ -4,7 +4,8 @@
     "name": ""
   },
   "server": {
-    "url": "ws://localhost:18080/ws/daemon"
+    "url": "ws://nas.local.javaer101.com:18080/ws/daemon",
+    "token": "ps_qUibCJpWEX38X0ZsuD79nrgCf03DLx9O3PPGTuYUs58"
   },
   "claude": {
     "command": "claude",
@@ -28,9 +29,9 @@
   },
   "workspaces": [
     {
-      "id": "agent-root",
-      "name": "Agent",
-      "path": "/home/choco/Agent"
+      "id": "pocket-studio",
+      "name": "pocket-studio",
+      "path": "/home/choco/Downloads/pocket-studio"
     }
   ]
 }

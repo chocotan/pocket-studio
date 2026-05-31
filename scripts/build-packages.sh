@@ -10,7 +10,12 @@ mkdir -p "$DIST"
 mkdir -p "$ELECTRON_RESOURCES/bin"
 
 (
-  cd "$ROOT/web"
+  cd "$ROOT/studio-frontend"
+  npm run build
+)
+
+(
+  cd "$ROOT/user-frontend"
   npm run build
 )
 
@@ -21,7 +26,7 @@ install -m 0755 "$DIST/pocket-studio-server-bin" "$ELECTRON_RESOURCES/bin/pocket
 install -m 0755 "$DIST/pocket-studio-daemon-bin" "$ELECTRON_RESOURCES/bin/pocket-studio-daemon"
 
 (
-  cd "$ROOT/web"
+  cd "$ROOT/studio-frontend"
   npm run build:electron
 )
 

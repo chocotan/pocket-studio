@@ -21,6 +21,10 @@ const (
 	TypeWorkspaceRead        = "workspace.read"
 	TypeWorkspaceWrite       = "workspace.write"
 	TypeWorkspaceResult      = "workspace.result"
+	TypeProjectCreate        = "project.create"
+	TypeProjectStateGet      = "project.state.get"
+	TypeProjectStateSet      = "project.state.set"
+	TypeProjectResult        = "project.result"
 	TypeTerminalRun          = "terminal.run"
 	TypeTerminalResult       = "terminal.result"
 	TypeServerError          = "server.error"
@@ -190,6 +194,43 @@ type WorkspaceResult struct {
 	Content       string          `json:"content,omitempty"`
 	Error         string          `json:"error,omitempty"`
 	Raw           json.RawMessage `json:"raw,omitempty"`
+}
+
+type Project struct {
+	ID            string          `json:"id"`
+	Name          string          `json:"name"`
+	DeviceID      string          `json:"device_id"`
+	WorkspacePath string          `json:"workspace_path"`
+	AgentIDs      []string        `json:"agent_ids"`
+	TmuxIDs       []string        `json:"tmux_ids"`
+	StudioState   json.RawMessage `json:"studio_state,omitempty"`
+}
+
+type ProjectCreateRequest struct {
+	RequestID     string `json:"request_id"`
+	Name          string `json:"name"`
+	DeviceID      string `json:"device_id,omitempty"`
+	WorkspacePath string `json:"workspace_path"`
+}
+
+type ProjectStateGetRequest struct {
+	RequestID     string `json:"request_id"`
+	ProjectID     string `json:"project_id"`
+	WorkspacePath string `json:"workspace_path,omitempty"`
+}
+
+type ProjectStateSetRequest struct {
+	RequestID     string          `json:"request_id"`
+	ProjectID     string          `json:"project_id"`
+	WorkspacePath string          `json:"workspace_path,omitempty"`
+	State         json.RawMessage `json:"state"`
+}
+
+type ProjectResult struct {
+	RequestID string          `json:"request_id"`
+	Project   *Project        `json:"project,omitempty"`
+	State     json.RawMessage `json:"state,omitempty"`
+	Error     string          `json:"error,omitempty"`
 }
 
 type FileEntry struct {

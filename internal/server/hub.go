@@ -1,15 +1,15 @@
 package server
 
 import (
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"math"
 	"mime"
 	"net/http"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -18,10 +18,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 
-	"remote-agent/internal/appconfig"
+	"remote-agent/internal/auth"
 	"remote-agent/internal/hostinfo"
 	"remote-agent/internal/protocol"
 )
@@ -29,8 +28,6 @@ import (
 var (
 	safeTerminalIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,96}$`)
 )
-
-const maxProjectFileReadSize = 8 * 1024 * 1024
 
 type Project struct {
 	ID            string          `json:"id"`
@@ -40,9 +37,35 @@ type Project struct {
 	AgentIDs      []string        `json:"agent_ids"`
 	TmuxIDs       []string        `json:"tmux_ids"`
 	StudioState   json.RawMessage `json:"studio_state,omitempty"`
+	UserID        string          `json:"-"`
+}
+
+func projectFromProtocol(project protocol.Project) Project {
+	return Project{
+		ID:            project.ID,
+		Name:          project.Name,
+		DeviceID:      project.DeviceID,
+		WorkspacePath: project.WorkspacePath,
+		AgentIDs:      project.AgentIDs,
+		TmuxIDs:       project.TmuxIDs,
+		StudioState:   project.StudioState,
+	}
+}
+
+func protocolProjectFromProject(project Project) protocol.Project {
+	return protocol.Project{
+		ID:            project.ID,
+		Name:          project.Name,
+		DeviceID:      project.DeviceID,
+		WorkspacePath: project.WorkspacePath,
+		AgentIDs:      project.AgentIDs,
+		TmuxIDs:       project.TmuxIDs,
+		StudioState:   project.StudioState,
+	}
 }
 
 type Hub struct {
+	auth          *auth.Manager
 	mu            sync.RWMutex
 	daemons       map[string]*daemonConn
 	webs          map[*webConn]struct{}
@@ -51,13 +74,12 @@ type Hub struct {
 	taskRecords   map[string]protocol.TaskRecord
 	pending       map[string]chan protocol.Envelope
 	projects      map[string]Project
-	projectStates map[string]string // projectId -> JSON string
 	termMu        sync.RWMutex
 	terminalConns map[string]*terminalConn
-	configDir     string
 }
 
 type daemonConn struct {
+	userID     string
 	deviceID   string
 	deviceName string
 	agent      string
@@ -70,8 +92,9 @@ type daemonConn struct {
 }
 
 type webConn struct {
-	conn *websocket.Conn
-	send chan protocol.Envelope
+	userID string
+	conn   *websocket.Conn
+	send   chan protocol.Envelope
 }
 
 type terminalConn struct {
@@ -95,8 +118,9 @@ type StateView struct {
 	Tasks   []protocol.TaskRecord `json:"tasks"`
 }
 
-func NewHub() *Hub {
+func NewHub(authManager *auth.Manager) *Hub {
 	h := &Hub{
+		auth:          authManager,
 		daemons:       make(map[string]*daemonConn),
 		webs:          make(map[*webConn]struct{}),
 		taskDevices:   make(map[string]string),
@@ -104,98 +128,113 @@ func NewHub() *Hub {
 		taskRecords:   make(map[string]protocol.TaskRecord),
 		pending:       make(map[string]chan protocol.Envelope),
 		projects:      make(map[string]Project),
-		projectStates: make(map[string]string),
 		terminalConns: make(map[string]*terminalConn),
-	}
-	h.configDir = pocketStudioConfigDir()
-	if err := h.loadProjects(); err != nil {
-		log.Printf("load projects: %v", err)
 	}
 	return h
 }
 
-func pocketStudioConfigDir() string {
-	if dir := strings.TrimSpace(os.Getenv("POCKET_STUDIO_CONFIG_DIR")); dir != "" {
-		return dir
+func scopedKey(userID string, id string) string {
+	if userID == "" {
+		userID = auth.OwnerAdmin
 	}
-	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
-		return filepath.Join(dir, "pocket-studio")
-	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".config", "pocket-studio")
-	}
-	return ".pocket-studio"
+	return userID + "\x00" + id
 }
 
-func (h *Hub) projectsPath() string {
-	return filepath.Join(h.configDir, "projects.json")
+func daemonKey(userID string, deviceID string) string {
+	return scopedKey(userID, deviceID)
 }
 
-func (h *Hub) loadProjects() error {
-	raw, err := os.ReadFile(h.projectsPath())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	var projects []Project
-	if err := json.Unmarshal(raw, &projects); err != nil {
-		return err
-	}
-	for _, project := range projects {
-		if project.ID == "" {
-			continue
-		}
-		if project.AgentIDs == nil {
-			project.AgentIDs = []string{}
-		}
-		if project.TmuxIDs == nil {
-			project.TmuxIDs = []string{}
-		}
-		if len(project.StudioState) > 0 {
-			h.projectStates[project.ID] = string(project.StudioState)
-		}
-		h.projects[project.ID] = project
-	}
-	return nil
+func terminalKey(userID string, projectID string, terminalID string) string {
+	return userID + "\x00" + projectID + "\x00" + terminalID
 }
 
-func (h *Hub) saveProjectsLocked() error {
-	projects := make([]Project, 0, len(h.projects))
-	for _, project := range h.projects {
-		projects = append(projects, project)
-	}
-	sort.Slice(projects, func(i, j int) bool {
-		return projects[i].Name < projects[j].Name
-	})
-	if err := os.MkdirAll(h.configDir, 0o755); err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(projects, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(h.projectsPath(), append(raw, '\n'), 0o644)
-}
-
-func (h *Hub) newProjectIDLocked() string {
-	for {
-		id := protocol.NewUUIDNoDash()
-		if _, exists := h.projects[id]; !exists {
-			return id
-		}
-	}
-}
-
-func (h *Hub) projectByID(projectID string) (Project, bool) {
+func (h *Hub) projectByID(userID string, projectID string) (Project, bool) {
 	if projectID == "" {
 		return Project{}, false
 	}
 	h.mu.RLock()
-	project, ok := h.projects[projectID]
+	project, ok := h.projects[scopedKey(userID, projectID)]
+	if !ok {
+		project, ok = h.daemonWorkspaceProjectByIDLocked(userID, projectID)
+	}
 	h.mu.RUnlock()
 	return project, ok
+}
+
+func daemonWorkspaceProjectID(deviceID string, workspace protocol.Workspace) string {
+	sum := sha1.Sum([]byte(deviceID + "\x00" + workspace.Path))
+	return "ws_" + fmt.Sprintf("%x", sum[:8])
+}
+
+func projectNameForWorkspace(workspace protocol.Workspace) string {
+	if name := strings.TrimSpace(workspace.Name); name != "" {
+		return name
+	}
+	if base := filepath.Base(workspace.Path); base != "." && base != "/" && base != "" {
+		return base
+	}
+	return workspace.Path
+}
+
+func projectFromDaemonWorkspace(userID string, deviceID string, workspace protocol.Workspace) Project {
+	return Project{
+		ID:            daemonWorkspaceProjectID(deviceID, workspace),
+		Name:          projectNameForWorkspace(workspace),
+		DeviceID:      deviceID,
+		WorkspacePath: workspace.Path,
+		AgentIDs:      []string{},
+		TmuxIDs:       []string{},
+		UserID:        userID,
+	}
+}
+
+func (h *Hub) daemonWorkspaceProjectByIDLocked(userID string, projectID string) (Project, bool) {
+	for _, dc := range h.daemons {
+		if dc.userID != userID {
+			continue
+		}
+		for _, workspace := range dc.workspaces {
+			project := projectFromDaemonWorkspace(userID, dc.deviceID, workspace)
+			if project.ID == projectID {
+				return project, true
+			}
+		}
+	}
+	return Project{}, false
+}
+
+func (h *Hub) listProjectsLocked(userID string) []Project {
+	list := make([]Project, 0, len(h.projects))
+	seen := make(map[string]bool)
+	for _, project := range h.projects {
+		if project.UserID != userID {
+			continue
+		}
+		list = append(list, project)
+		seen[project.DeviceID+"\x00"+project.WorkspacePath] = true
+	}
+	for _, dc := range h.daemons {
+		if dc.userID != userID {
+			continue
+		}
+		for _, workspace := range dc.workspaces {
+			if workspace.Path == "" {
+				continue
+			}
+			key := dc.deviceID + "\x00" + workspace.Path
+			if seen[key] {
+				continue
+			}
+			project := projectFromDaemonWorkspace(userID, dc.deviceID, workspace)
+			list = append(list, project)
+			seen[key] = true
+		}
+	}
+	return list
+}
+
+func (h *Hub) projectHasOnlineDaemonLocked(project Project) bool {
+	return h.daemons[daemonKey(project.UserID, project.DeviceID)] != nil
 }
 
 func collectTerminalTabIDs(node any) []string {
@@ -278,71 +317,64 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+func (h *Hub) authenticate(w http.ResponseWriter, r *http.Request) (string, bool) {
+	userID, err := h.auth.AuthenticateRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, protocol.ServerError{Code: "unauthorized", Message: "invalid or missing token"})
+		return "", false
+	}
+	return userID, true
+}
+
 func (h *Hub) ServeWebSocket(w http.ResponseWriter, r *http.Request) {
+	userID, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("upgrade web: %v", err)
 		return
 	}
-	wc := &webConn{conn: conn, send: make(chan protocol.Envelope, 64)}
+	wc := &webConn{userID: userID, conn: conn, send: make(chan protocol.Envelope, 64)}
 	h.mu.Lock()
 	h.webs[wc] = struct{}{}
 	h.mu.Unlock()
 
 	go writeLoop(conn, wc.send)
-	wc.send <- protocol.NewEnvelope("server.state", "server", h.stateView())
+	wc.send <- protocol.NewEnvelope("server.state", "server", h.stateView(userID))
 	h.readWebLoop(wc)
 }
 
 func (h *Hub) ServeDaemonSocket(w http.ResponseWriter, r *http.Request) {
+	userID, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("upgrade daemon: %v", err)
 		return
 	}
 
-	dc := &daemonConn{conn: conn, send: make(chan protocol.Envelope, 64), lastSeen: time.Now()}
+	dc := &daemonConn{userID: userID, conn: conn, send: make(chan protocol.Envelope, 64), lastSeen: time.Now()}
 	go writeLoop(conn, dc.send)
 	h.readDaemonLoop(dc)
 }
 
 func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/api/state" && r.Method == http.MethodGet {
-		writeJSON(w, http.StatusOK, h.stateView())
+	userID, ok := h.authenticate(w, r)
+	if !ok {
 		return
 	}
-	if r.URL.Path == "/api/config" {
-		if r.Method == http.MethodGet {
-			cfg, err := appconfig.Load("")
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, protocol.ServerError{Code: "config_load_failed", Message: err.Error()})
-				return
-			}
-			writeJSON(w, http.StatusOK, cfg)
-			return
-		}
-		if r.Method == http.MethodPost {
-			var cfg appconfig.Config
-			if !decodeJSON(w, r, &cfg) {
-				return
-			}
-			if err := appconfig.Save("", cfg); err != nil {
-				writeJSON(w, http.StatusInternalServerError, protocol.ServerError{Code: "config_save_failed", Message: err.Error()})
-				return
-			}
-			saved, _ := appconfig.Load("")
-			writeJSON(w, http.StatusOK, saved)
-			return
-		}
-		writeJSON(w, http.StatusMethodNotAllowed, protocol.ServerError{Code: "method_not_allowed", Message: "unsupported method"})
+	r = r.WithContext(auth.WithUserID(r.Context(), userID))
+	if r.URL.Path == "/api/state" && r.Method == http.MethodGet {
+		writeJSON(w, http.StatusOK, h.stateView(userID))
 		return
 	}
 	if r.URL.Path == "/api/project/list" && r.Method == http.MethodGet {
 		h.mu.RLock()
-		list := make([]Project, 0, len(h.projects))
-		for _, p := range h.projects {
-			list = append(list, p)
-		}
+		list := h.listProjectsLocked(userID)
 		h.mu.RUnlock()
 
 		sort.Slice(list, func(i, j int) bool {
@@ -361,24 +393,19 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "name, device_id, and workspace_path are required"})
 			return
 		}
-
-		h.mu.Lock()
-		req.ID = h.newProjectIDLocked()
-		if req.AgentIDs == nil {
-			req.AgentIDs = []string{}
-		}
-		if req.TmuxIDs == nil {
-			req.TmuxIDs = []string{}
-		}
-		h.projects[req.ID] = req
-		if err := h.saveProjectsLocked(); err != nil {
+		requestID := protocol.NewID("req")
+		env, err := h.requestDaemonForDevice(r, req.DeviceID, protocol.TypeProjectCreate, req.WorkspacePath, requestID, protocol.ProjectCreateRequest{
+			RequestID:     requestID,
+			Name:          req.Name,
+			DeviceID:      req.DeviceID,
+			WorkspacePath: req.WorkspacePath,
+		})
+		writeProjectResult(w, env, err, true, func(project Project) {
+			project.UserID = userID
+			h.mu.Lock()
+			h.projects[scopedKey(userID, project.ID)] = project
 			h.mu.Unlock()
-			writeJSON(w, http.StatusInternalServerError, protocol.ServerError{Code: "save_failed", Message: err.Error()})
-			return
-		}
-		h.mu.Unlock()
-
-		writeJSON(w, http.StatusOK, req)
+		})
 		return
 	}
 	if r.URL.Path == "/api/project/state" {
@@ -388,30 +415,18 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "project_id is required"})
 				return
 			}
-
-			h.mu.RLock()
-			state, ok := h.projectStates[projID]
-			h.mu.RUnlock()
-
+			project, ok := h.projectByID(userID, projID)
 			if !ok {
-				if project, exists := h.projects[projID]; exists && len(project.StudioState) > 0 {
-					state = string(project.StudioState)
-					ok = true
-				}
-			}
-
-			if !ok {
-				writeJSON(w, http.StatusOK, map[string]any{
-					"layoutTree":      nil,
-					"focusedId":       "",
-					"newTerminalType": "bash",
-				})
+				writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
 				return
 			}
-
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(state))
+			requestID := protocol.NewID("req")
+			env, err := h.requestDaemonForDevice(r, project.DeviceID, protocol.TypeProjectStateGet, project.WorkspacePath, requestID, protocol.ProjectStateGetRequest{
+				RequestID:     requestID,
+				ProjectID:     project.ID,
+				WorkspacePath: project.WorkspacePath,
+			})
+			writeProjectStateResult(w, env, err)
 			return
 		} else if r.Method == http.MethodPost {
 			var req struct {
@@ -432,31 +447,19 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_payload", Message: err.Error()})
 				return
 			}
-
-			h.mu.Lock()
-			h.projectStates[req.ProjectID] = string(rawState)
-
-			if proj, ok := h.projects[req.ProjectID]; ok {
-				proj.StudioState = append(proj.StudioState[:0], rawState...)
-				var parsedState struct {
-					FocusedID  string `json:"focusedId"`
-					LayoutTree any    `json:"layoutTree"`
-				}
-				if json.Unmarshal(rawState, &parsedState) == nil {
-					if parsedState.FocusedID != "" {
-						proj.TmuxIDs = collectTerminalTabIDs(parsedState.LayoutTree)
-					}
-				}
-				h.projects[req.ProjectID] = proj
-			}
-			if err := h.saveProjectsLocked(); err != nil {
-				h.mu.Unlock()
-				writeJSON(w, http.StatusInternalServerError, protocol.ServerError{Code: "save_failed", Message: err.Error()})
+			project, ok := h.projectByID(userID, req.ProjectID)
+			if !ok {
+				writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
 				return
 			}
-			h.mu.Unlock()
-
-			writeJSON(w, http.StatusOK, map[string]any{"success": true})
+			requestID := protocol.NewID("req")
+			env, err := h.requestDaemonForDevice(r, project.DeviceID, protocol.TypeProjectStateSet, project.WorkspacePath, requestID, protocol.ProjectStateSetRequest{
+				RequestID:     requestID,
+				ProjectID:     project.ID,
+				WorkspacePath: project.WorkspacePath,
+				State:         rawState,
+			})
+			writeProjectResult(w, env, err, false, nil)
 			return
 		}
 	}
@@ -472,29 +475,18 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "project_id is required"})
 			return
 		}
-		h.mu.RLock()
-		project, ok := h.projects[req.ProjectID]
-		h.mu.RUnlock()
+		project, ok := h.projectByID(userID, req.ProjectID)
 		if !ok {
 			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
 			return
 		}
-		if project.DeviceID != "dev_local" {
-			requestID := protocol.NewID("req")
-			env, err := h.requestDaemon(r, protocol.TypeWorkspaceList, project.WorkspacePath, requestID, protocol.WorkspaceListRequest{
-				RequestID:     requestID,
-				WorkspacePath: project.WorkspacePath,
-				Path:          req.Path,
-			})
-			writeAPIEnvelope(w, env, err)
-			return
-		}
-		res, _ := h.handleLocalWorkspaceList(protocol.WorkspaceListRequest{
-			RequestID:     protocol.NewID("req"),
+		requestID := protocol.NewID("req")
+		env, err := h.requestDaemonForDevice(r, project.DeviceID, protocol.TypeWorkspaceList, project.WorkspacePath, requestID, protocol.WorkspaceListRequest{
+			RequestID:     requestID,
 			WorkspacePath: project.WorkspacePath,
 			Path:          req.Path,
 		})
-		writeJSON(w, http.StatusOK, res)
+		writeAPIEnvelope(w, env, err)
 		return
 	}
 	if r.URL.Path == "/api/project/search-files" && r.Method == http.MethodPost {
@@ -506,16 +498,12 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		project, ok := h.projectByID(req.ProjectID)
+		_, ok := h.projectByID(userID, req.ProjectID)
 		if !ok {
 			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
 			return
 		}
-		if project.DeviceID != "dev_local" {
-			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "unsupported", Message: "remote file search is not supported yet"})
-			return
-		}
-		writeJSON(w, http.StatusOK, h.handleLocalProjectFileSearch(project, req.Query, req.Limit))
+		writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "unsupported", Message: "file search is not supported by the daemon protocol yet"})
 		return
 	}
 	if r.URL.Path == "/api/project/file/read" && r.Method == http.MethodPost {
@@ -526,22 +514,18 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		project, ok := h.projectByID(req.ProjectID)
+		project, ok := h.projectByID(userID, req.ProjectID)
 		if !ok {
 			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
 			return
 		}
-		if project.DeviceID != "dev_local" {
-			requestID := protocol.NewID("req")
-			env, err := h.requestDaemon(r, protocol.TypeWorkspaceRead, project.WorkspacePath, requestID, protocol.WorkspaceReadRequest{
-				RequestID:     requestID,
-				WorkspacePath: project.WorkspacePath,
-				Path:          req.Path,
-			})
-			writeAPIEnvelope(w, env, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, h.handleLocalProjectFileRead(project, req.Path))
+		requestID := protocol.NewID("req")
+		env, err := h.requestDaemonForDevice(r, project.DeviceID, protocol.TypeWorkspaceRead, project.WorkspacePath, requestID, protocol.WorkspaceReadRequest{
+			RequestID:     requestID,
+			WorkspacePath: project.WorkspacePath,
+			Path:          req.Path,
+		})
+		writeProjectFileReadEnvelope(w, req.Path, env, err)
 		return
 	}
 	if r.URL.Path == "/api/project/file/write" && r.Method == http.MethodPost {
@@ -553,23 +537,19 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		project, ok := h.projectByID(req.ProjectID)
+		project, ok := h.projectByID(userID, req.ProjectID)
 		if !ok {
 			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
 			return
 		}
-		if project.DeviceID != "dev_local" {
-			requestID := protocol.NewID("req")
-			env, err := h.requestDaemon(r, protocol.TypeWorkspaceWrite, project.WorkspacePath, requestID, protocol.WorkspaceWriteRequest{
-				RequestID:     requestID,
-				WorkspacePath: project.WorkspacePath,
-				Path:          req.Path,
-				Content:       req.Content,
-			})
-			writeAPIEnvelope(w, env, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, h.handleLocalProjectFileWrite(project, req.Path, req.Content))
+		requestID := protocol.NewID("req")
+		env, err := h.requestDaemonForDevice(r, project.DeviceID, protocol.TypeWorkspaceWrite, project.WorkspacePath, requestID, protocol.WorkspaceWriteRequest{
+			RequestID:     requestID,
+			WorkspacePath: project.WorkspacePath,
+			Path:          req.Path,
+			Content:       req.Content,
+		})
+		writeProjectFileReadEnvelope(w, req.Path, env, err)
 		return
 	}
 	if r.URL.Path == "/api/project/file/action" && r.Method == http.MethodPost {
@@ -582,27 +562,17 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		project, ok := h.projectByID(req.ProjectID)
+		_, ok := h.projectByID(userID, req.ProjectID)
 		if !ok {
 			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
 			return
 		}
-		if project.DeviceID != "dev_local" {
-			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "unsupported", Message: "remote file actions are not supported yet"})
-			return
-		}
-		writeJSON(w, http.StatusOK, h.handleLocalProjectFileAction(project, req.Action, req.Path, req.Target))
+		writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "unsupported", Message: "file actions are not supported by the daemon protocol yet"})
 		return
 	}
 	if r.URL.Path == "/api/workspace/list" && r.Method == http.MethodPost {
 		var req protocol.WorkspaceListRequest
 		if !decodeJSON(w, r, &req) {
-			return
-		}
-		deviceID := r.URL.Query().Get("device_id")
-		if deviceID == "dev_local" {
-			res, _ := h.handleLocalWorkspaceList(req)
-			writeJSON(w, http.StatusOK, res)
 			return
 		}
 		env, err := h.requestDaemon(r, protocol.TypeWorkspaceList, req.WorkspacePath, req.RequestID, req)
@@ -614,12 +584,6 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		deviceID := r.URL.Query().Get("device_id")
-		if deviceID == "dev_local" {
-			res, _ := h.handleLocalWorkspaceRead(req)
-			writeJSON(w, http.StatusOK, res)
-			return
-		}
 		env, err := h.requestDaemon(r, protocol.TypeWorkspaceRead, req.WorkspacePath, req.RequestID, req)
 		writeAPIEnvelope(w, env, err)
 		return
@@ -627,12 +591,6 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/workspace/write" && r.Method == http.MethodPost {
 		var req protocol.WorkspaceWriteRequest
 		if !decodeJSON(w, r, &req) {
-			return
-		}
-		deviceID := r.URL.Query().Get("device_id")
-		if deviceID == "dev_local" {
-			res, _ := h.handleLocalWorkspaceWrite(req)
-			writeJSON(w, http.StatusOK, res)
 			return
 		}
 		env, err := h.requestDaemon(r, protocol.TypeWorkspaceWrite, req.WorkspacePath, req.RequestID, req)
@@ -660,7 +618,7 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "project_id and terminal_id are required"})
 			return
 		}
-		h.closeTerminal(req.ProjectID, req.TerminalID)
+		h.closeTerminal(userID, req.ProjectID, req.TerminalID)
 		writeJSON(w, http.StatusOK, map[string]any{"success": true})
 		return
 	}
@@ -694,11 +652,11 @@ func (h *Hub) readWebLoop(wc *webConn) {
 				continue
 			}
 			h.mu.Lock()
-			dc := h.daemons[deviceID]
+			dc := h.daemons[daemonKey(wc.userID, deviceID)]
 			if dc != nil {
-				h.taskDevices[session.TaskID] = deviceID
+				h.taskDevices[scopedKey(wc.userID, session.TaskID)] = deviceID
 				now := time.Now().Unix()
-				record := h.taskRecords[session.TaskID]
+				record := h.taskRecords[scopedKey(wc.userID, session.TaskID)]
 				if record.TaskID == "" {
 					record.TaskID = session.TaskID
 					record.StartedAt = now
@@ -711,7 +669,7 @@ func (h *Hub) readWebLoop(wc *webConn) {
 				record.Prompt = ""
 				record.Status = "created"
 				record.UpdatedAt = now
-				h.taskRecords[session.TaskID] = record
+				h.taskRecords[scopedKey(wc.userID, session.TaskID)] = record
 			}
 			h.mu.Unlock()
 			if dc == nil {
@@ -736,11 +694,11 @@ func (h *Hub) readWebLoop(wc *webConn) {
 				continue
 			}
 			h.mu.Lock()
-			dc := h.daemons[deviceID]
+			dc := h.daemons[daemonKey(wc.userID, deviceID)]
 			if dc != nil {
-				h.taskDevices[task.TaskID] = deviceID
+				h.taskDevices[scopedKey(wc.userID, task.TaskID)] = deviceID
 				now := time.Now().Unix()
-				record := h.taskRecords[task.TaskID]
+				record := h.taskRecords[scopedKey(wc.userID, task.TaskID)]
 				if record.TaskID == "" {
 					record.TaskID = task.TaskID
 					record.StartedAt = now
@@ -770,7 +728,7 @@ func (h *Hub) readWebLoop(wc *webConn) {
 					}
 					record.Events = appendBounded(record.Events, userEvent, 1000)
 				}
-				h.taskRecords[task.TaskID] = record
+				h.taskRecords[scopedKey(wc.userID, task.TaskID)] = record
 			}
 			h.mu.Unlock()
 			if dc == nil {
@@ -790,8 +748,8 @@ func (h *Hub) readWebLoop(wc *webConn) {
 				continue
 			}
 			h.mu.RLock()
-			deviceID := h.taskDevices[stop.TaskID]
-			dc := h.daemons[deviceID]
+			deviceID := h.taskDevices[scopedKey(wc.userID, stop.TaskID)]
+			dc := h.daemons[daemonKey(wc.userID, deviceID)]
 			h.mu.RUnlock()
 			if dc == nil {
 				wc.send <- serverError("task_not_routable", "task has no connected daemon")
@@ -811,8 +769,8 @@ func (h *Hub) readWebLoop(wc *webConn) {
 				continue
 			}
 			h.mu.RLock()
-			deviceID := h.taskDevices[change.TaskID]
-			dc := h.daemons[deviceID]
+			deviceID := h.taskDevices[scopedKey(wc.userID, change.TaskID)]
+			dc := h.daemons[daemonKey(wc.userID, deviceID)]
 			h.mu.RUnlock()
 			if dc == nil {
 				wc.send <- serverError("task_not_routable", "task has no connected daemon")
@@ -834,9 +792,9 @@ func (h *Hub) readWebLoop(wc *webConn) {
 			h.mu.RLock()
 			deviceID := env.To.DeviceID
 			if deviceID == "" {
-				deviceID = h.taskDevices[remove.TaskID]
+				deviceID = h.taskDevices[scopedKey(wc.userID, remove.TaskID)]
 			}
-			dc := h.daemons[deviceID]
+			dc := h.daemons[daemonKey(wc.userID, deviceID)]
 			h.mu.RUnlock()
 			if dc == nil {
 				wc.send <- serverError("task_not_routable", "session has no connected daemon")
@@ -852,7 +810,7 @@ func (h *Hub) readWebLoop(wc *webConn) {
 				continue
 			}
 			h.mu.RLock()
-			dc := h.daemons[deviceID]
+			dc := h.daemons[daemonKey(wc.userID, deviceID)]
 			h.mu.RUnlock()
 			if dc == nil {
 				wc.send <- serverError("device_offline", "target device is offline")
@@ -870,8 +828,8 @@ func (h *Hub) readWebLoop(wc *webConn) {
 	}
 }
 
-func (h *Hub) closeTerminal(projectID string, terminalID string) {
-	key := projectID + "::" + terminalID
+func (h *Hub) closeTerminal(userID string, projectID string, terminalID string) {
+	key := terminalKey(userID, projectID, terminalID)
 	h.termMu.Lock()
 	if wc := h.terminalConns[key]; wc != nil {
 		_ = wc.conn.Close()
@@ -880,10 +838,13 @@ func (h *Hub) closeTerminal(projectID string, terminalID string) {
 	h.termMu.Unlock()
 
 	h.mu.RLock()
-	project, ok := h.projects[projectID]
+	project, ok := h.projects[scopedKey(userID, projectID)]
+	if !ok {
+		project, ok = h.daemonWorkspaceProjectByIDLocked(userID, projectID)
+	}
 	var dc *daemonConn
 	if ok {
-		dc = h.daemons[project.DeviceID]
+		dc = h.daemons[daemonKey(userID, project.DeviceID)]
 	}
 	h.mu.RUnlock()
 
@@ -894,19 +855,16 @@ func (h *Hub) closeTerminal(projectID string, terminalID string) {
 		})
 		return
 	}
-
-	sessionName := "pocket-studio-" + projectID + "-" + terminalID
-	_ = exec.Command("tmux", "kill-session", "-t", sessionName).Run()
 }
 
 func (h *Hub) readDaemonLoop(dc *daemonConn) {
 	defer func() {
 		h.mu.Lock()
-		if dc.deviceID != "" && h.daemons[dc.deviceID] == dc {
-			delete(h.daemons, dc.deviceID)
+		if dc.deviceID != "" && h.daemons[daemonKey(dc.userID, dc.deviceID)] == dc {
+			delete(h.daemons, daemonKey(dc.userID, dc.deviceID))
 		}
 		h.mu.Unlock()
-		h.broadcast(protocol.NewEnvelope("server.state", "server", h.stateView()))
+		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
 		close(dc.send)
 		_ = dc.conn.Close()
 	}()
@@ -931,15 +889,16 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			dc.workspaces = hello.Workspaces
 			dc.lastSeen = time.Now()
 			h.mu.Lock()
-			if old := h.daemons[hello.DeviceID]; old != nil && old != dc {
+			key := daemonKey(dc.userID, hello.DeviceID)
+			if old := h.daemons[key]; old != nil && old != dc {
 				_ = old.conn.Close()
 			}
-			h.daemons[hello.DeviceID] = dc
+			h.daemons[key] = dc
 			h.mu.Unlock()
-			h.broadcast(protocol.NewEnvelope("server.state", "server", h.stateView()))
+			h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
 		case protocol.TypeDaemonHeartbeat, protocol.TypeDaemonSnapshot:
 			dc.lastSeen = time.Now()
-			h.broadcast(protocol.NewEnvelope("server.state", "server", h.stateView()))
+			h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
 		case protocol.TypeTaskSnapshot:
 			snapshot, err := protocol.DecodePayload[protocol.TaskSnapshot](env)
 			if err != nil {
@@ -949,12 +908,16 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			h.mu.Lock()
 			seen := make(map[string]struct{}, len(snapshot.Tasks))
 			for _, record := range snapshot.Tasks {
-				seen[record.TaskID] = struct{}{}
-				h.taskDevices[record.TaskID] = snapshot.DeviceID
+				taskKey := scopedKey(dc.userID, record.TaskID)
+				seen[taskKey] = struct{}{}
+				h.taskDevices[taskKey] = snapshot.DeviceID
 				record.DeviceID = snapshot.DeviceID
-				h.taskRecords[record.TaskID] = record
+				h.taskRecords[taskKey] = record
 			}
 			for taskID, deviceID := range h.taskDevices {
+				if !strings.HasPrefix(taskID, dc.userID+"\x00") {
+					continue
+				}
 				if deviceID != snapshot.DeviceID {
 					continue
 				}
@@ -966,16 +929,17 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 				delete(h.taskEvents, taskID)
 			}
 			h.mu.Unlock()
-			h.broadcast(protocol.NewEnvelope("server.state", "server", h.stateView()))
+			h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
 		case protocol.TypeTaskEvent:
 			taskEvent, err := protocol.DecodePayload[protocol.TaskEvent](env)
 			if err == nil && taskEvent.TaskID != "" {
 				h.mu.Lock()
+				taskKey := scopedKey(dc.userID, taskEvent.TaskID)
 				if dc.deviceID != "" {
-					h.taskDevices[taskEvent.TaskID] = dc.deviceID
+					h.taskDevices[taskKey] = dc.deviceID
 				}
-				h.taskEvents[taskEvent.TaskID] = appendBounded(h.taskEvents[taskEvent.TaskID], env, 1000)
-				record := h.taskRecords[taskEvent.TaskID]
+				h.taskEvents[taskKey] = appendBounded(h.taskEvents[taskKey], env, 1000)
+				record := h.taskRecords[taskKey]
 				record.TaskID = taskEvent.TaskID
 				if sessionID := extractSessionID(taskEvent); sessionID != "" {
 					record.SessionID = sessionID
@@ -992,16 +956,16 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 					taskEvent.Timestamp = record.UpdatedAt
 				}
 				record.Events = appendBounded(record.Events, taskEvent, 1000)
-				h.taskRecords[taskEvent.TaskID] = record
+				h.taskRecords[taskKey] = record
 				h.mu.Unlock()
 			}
 			forward := env
 			forward.From = "server"
-			h.broadcast(forward)
+			h.broadcastToUser(dc.userID, forward)
 		case protocol.TypeTerminalStreamData:
 			streamData, err := protocol.DecodePayload[protocol.TerminalStreamData](env)
 			if err == nil {
-				key := streamData.ProjectID + "::" + streamData.TerminalID
+				key := terminalKey(dc.userID, streamData.ProjectID, streamData.TerminalID)
 				h.termMu.RLock()
 				wc := h.terminalConns[key]
 				h.termMu.RUnlock()
@@ -1014,7 +978,7 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 		case protocol.TypeTerminalStreamTitle:
 			streamTitle, err := protocol.DecodePayload[protocol.TerminalStreamTitle](env)
 			if err == nil {
-				key := streamTitle.ProjectID + "::" + streamTitle.TerminalID
+				key := terminalKey(dc.userID, streamTitle.ProjectID, streamTitle.TerminalID)
 				h.termMu.RLock()
 				wc := h.terminalConns[key]
 				h.termMu.RUnlock()
@@ -1031,7 +995,7 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 		case protocol.TypeTerminalStreamExit:
 			streamExit, err := protocol.DecodePayload[protocol.TerminalStreamExit](env)
 			if err == nil {
-				key := streamExit.ProjectID + "::" + streamExit.TerminalID
+				key := terminalKey(dc.userID, streamExit.ProjectID, streamExit.TerminalID)
 				h.termMu.Lock()
 				wc := h.terminalConns[key]
 				delete(h.terminalConns, key)
@@ -1040,27 +1004,26 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 					_ = wc.conn.Close()
 				}
 			}
-		case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult:
-			if h.resolvePending(env) {
+		case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult, protocol.TypeProjectResult:
+			if h.resolvePending(dc.userID, env) {
 				continue
 			}
 			forward := env
 			forward.From = "server"
-			h.broadcast(forward)
+			h.broadcastToUser(dc.userID, forward)
 		default:
 			log.Printf("daemon %s sent unsupported type %s", dc.deviceID, env.Type)
 		}
 	}
 }
 
-func (h *Hub) stateView() StateView {
+func (h *Hub) stateView(userID string) StateView {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	devices := make([]DeviceView, 0, len(h.daemons)+1)
-	hasLocalDaemon := false
+	devices := make([]DeviceView, 0, len(h.daemons))
 	for _, dc := range h.daemons {
-		if dc.deviceID == "dev_local" {
-			hasLocalDaemon = true
+		if dc.userID != userID {
+			continue
 		}
 		devices = append(devices, DeviceView{
 			ID:         dc.deviceID,
@@ -1074,47 +1037,12 @@ func (h *Hub) stateView() StateView {
 		})
 	}
 
-	localWorkspaces := []protocol.Workspace{}
-	localWorkspacesSeen := make(map[string]bool)
-	for _, proj := range h.projects {
-		if proj.DeviceID == "dev_local" && proj.WorkspacePath != "" {
-			if !localWorkspacesSeen[proj.WorkspacePath] {
-				localWorkspacesSeen[proj.WorkspacePath] = true
-				localWorkspaces = append(localWorkspaces, protocol.Workspace{
-					ID:   "ws-" + proj.ID,
-					Name: proj.Name,
-					Path: proj.WorkspacePath,
-				})
-			}
-		}
-	}
-	if len(localWorkspaces) == 0 {
-		localWorkspaces = append(localWorkspaces, protocol.Workspace{
-			ID:   "local-agent",
-			Name: "Agent",
-			Path: "/home/choco/Agent",
-		})
-	}
-
-	if !hasLocalDaemon {
-		devices = append(devices, DeviceView{
-			ID:         "dev_local",
-			Name:       hostinfo.DisplayName(),
-			Status:     "online",
-			Agent:      "claude",
-			AgentLabel: "Claude Code",
-			Agents: []protocol.AgentCapability{
-				{Name: "claude", Label: "Claude Code"},
-				{Name: "bash", Label: "Standard Bash"},
-				{Name: "gemini", Label: "Gemini CLI"},
-			},
-			LastSeenAt: time.Now().Unix(),
-			Workspaces: localWorkspaces,
-		})
-	}
-
 	tasks := make([]protocol.TaskRecord, 0, len(h.taskRecords))
-	for _, record := range h.taskRecords {
+	prefix := userID + "\x00"
+	for key, record := range h.taskRecords {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
 		tasks = append(tasks, record)
 	}
 	sort.Slice(tasks, func(i, j int) bool {
@@ -1124,6 +1052,11 @@ func (h *Hub) stateView() StateView {
 }
 
 func (h *Hub) requestDaemon(r *http.Request, messageType string, workspacePath string, requestID string, payload any) (protocol.Envelope, error) {
+	return h.requestDaemonForDevice(r, r.URL.Query().Get("device_id"), messageType, workspacePath, requestID, payload)
+}
+
+func (h *Hub) requestDaemonForDevice(r *http.Request, deviceID string, messageType string, workspacePath string, requestID string, payload any) (protocol.Envelope, error) {
+	userID := auth.UserIDFromContext(r.Context())
 	if requestID == "" {
 		requestID = protocol.NewID("req")
 		switch typed := payload.(type) {
@@ -1136,33 +1069,44 @@ func (h *Hub) requestDaemon(r *http.Request, messageType string, workspacePath s
 		case protocol.WorkspaceWriteRequest:
 			typed.RequestID = requestID
 			payload = typed
+		case protocol.ProjectCreateRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.ProjectStateGetRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.ProjectStateSetRequest:
+			typed.RequestID = requestID
+			payload = typed
 		case protocol.TerminalRunRequest:
 			typed.RequestID = requestID
 			payload = typed
 		}
 	}
-	deviceID := r.URL.Query().Get("device_id")
 	h.mu.RLock()
 	if deviceID == "" {
 		for _, dc := range h.daemons {
+			if dc.userID != userID {
+				continue
+			}
 			if workspacePath == "" || daemonHasWorkspace(dc, workspacePath) {
 				deviceID = dc.deviceID
 				break
 			}
 		}
 	}
-	dc := h.daemons[deviceID]
+	dc := h.daemons[daemonKey(userID, deviceID)]
 	h.mu.RUnlock()
 	if dc == nil {
 		return protocol.Envelope{}, errors.New("target device is offline")
 	}
 	response := make(chan protocol.Envelope, 1)
 	h.mu.Lock()
-	h.pending[requestID] = response
+	h.pending[scopedKey(userID, requestID)] = response
 	h.mu.Unlock()
 	defer func() {
 		h.mu.Lock()
-		delete(h.pending, requestID)
+		delete(h.pending, scopedKey(userID, requestID))
 		h.mu.Unlock()
 	}()
 	env := protocol.NewEnvelope(messageType, "server", payload)
@@ -1178,13 +1122,13 @@ func (h *Hub) requestDaemon(r *http.Request, messageType string, workspacePath s
 	}
 }
 
-func (h *Hub) resolvePending(env protocol.Envelope) bool {
+func (h *Hub) resolvePending(userID string, env protocol.Envelope) bool {
 	requestID := requestIDFromEnvelope(env)
 	if requestID == "" {
 		return false
 	}
 	h.mu.RLock()
-	ch := h.pending[requestID]
+	ch := h.pending[scopedKey(userID, requestID)]
 	h.mu.RUnlock()
 	if ch == nil {
 		return false
@@ -1214,10 +1158,13 @@ func daemonHasWorkspace(dc *daemonConn, workspacePath string) bool {
 	return false
 }
 
-func (h *Hub) broadcast(env protocol.Envelope) {
+func (h *Hub) broadcastToUser(userID string, env protocol.Envelope) {
 	h.mu.RLock()
 	webs := make([]*webConn, 0, len(h.webs))
 	for wc := range h.webs {
+		if wc.userID != userID {
+			continue
+		}
 		webs = append(webs, wc)
 	}
 	h.mu.RUnlock()
@@ -1271,6 +1218,116 @@ func writeAPIEnvelope(w http.ResponseWriter, env protocol.Envelope, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(env.Payload)
+}
+
+type projectFileReadResult struct {
+	Path     string `json:"path"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+	Content  string `json:"content,omitempty"`
+	DataURL  string `json:"data_url,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+func writeProjectFileReadEnvelope(w http.ResponseWriter, requestedPath string, env protocol.Envelope, err error) {
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "daemon_request_failed", Message: err.Error()})
+		return
+	}
+	result, decodeErr := protocol.DecodePayload[protocol.WorkspaceResult](env)
+	if decodeErr != nil {
+		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "bad_daemon_payload", Message: decodeErr.Error()})
+		return
+	}
+	if result.Error != "" {
+		writeJSON(w, http.StatusOK, projectFileReadResult{Path: requestedPath, Name: filepath.Base(requestedPath), Error: result.Error})
+		return
+	}
+	path := result.Path
+	if path == "" {
+		path = requestedPath
+	}
+	content := []byte(result.Content)
+	mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if mimeType == "" {
+		mimeType = http.DetectContentType(content)
+	}
+	response := projectFileReadResult{
+		Path:     filepath.ToSlash(path),
+		Name:     filepath.Base(path),
+		Kind:     "text",
+		Content:  result.Content,
+		MimeType: mimeType,
+		Size:     int64(len(content)),
+	}
+	if strings.HasPrefix(mimeType, "image/") {
+		response.Kind = "image"
+		response.Content = ""
+		response.DataURL = "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(content)
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func writeProjectResult(w http.ResponseWriter, env protocol.Envelope, err error, includeProject bool, onProject func(Project)) {
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "daemon_request_failed", Message: err.Error()})
+		return
+	}
+	result, decodeErr := protocol.DecodePayload[protocol.ProjectResult](env)
+	if decodeErr != nil {
+		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "bad_daemon_payload", Message: decodeErr.Error()})
+		return
+	}
+	if result.Error != "" {
+		writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "project_request_failed", Message: result.Error})
+		return
+	}
+	if includeProject {
+		if result.Project == nil {
+			writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "bad_daemon_payload", Message: "project result is missing project"})
+			return
+		}
+		project := projectFromProtocol(*result.Project)
+		if onProject != nil {
+			onProject(project)
+		}
+		writeJSON(w, http.StatusOK, project)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+func writeProjectStateResult(w http.ResponseWriter, env protocol.Envelope, err error) {
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "daemon_request_failed", Message: err.Error()})
+		return
+	}
+	result, decodeErr := protocol.DecodePayload[protocol.ProjectResult](env)
+	if decodeErr != nil {
+		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "bad_daemon_payload", Message: decodeErr.Error()})
+		return
+	}
+	if result.Error != "" {
+		writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "project_request_failed", Message: result.Error})
+		return
+	}
+	if len(result.State) == 0 {
+		writeJSON(w, http.StatusOK, defaultStudioState())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(result.State)
+}
+
+func defaultStudioState() map[string]any {
+	return map[string]any{
+		"layoutTree":      nil,
+		"focusedId":       "",
+		"newTerminalType": "bash",
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
@@ -1372,6 +1429,10 @@ func MarshalPayload(v any) json.RawMessage {
 }
 
 func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
+	userID, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
 	projID := r.URL.Query().Get("project_id")
 	if projID == "" {
 		http.Error(w, "project_id is required", http.StatusBadRequest)
@@ -1389,9 +1450,7 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	initialCols := parseTerminalDimension(r.URL.Query().Get("cols"))
 	initialRows := parseTerminalDimension(r.URL.Query().Get("rows"))
 
-	h.mu.RLock()
-	proj, ok := h.projects[projID]
-	h.mu.RUnlock()
+	proj, ok := h.projectByID(userID, projID)
 	if !ok {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
@@ -1407,121 +1466,37 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	h.mu.RLock()
-	dc := h.daemons[deviceID]
+	dc := h.daemons[daemonKey(userID, deviceID)]
 	h.mu.RUnlock()
 
-	if dc != nil {
-		key := projID + "::" + terminalID
-		terminal := &terminalConn{conn: conn}
-		h.termMu.Lock()
-		h.terminalConns[key] = terminal
-		h.termMu.Unlock()
-
-		defer func() {
-			h.termMu.Lock()
-			if h.terminalConns[key] == terminal {
-				delete(h.terminalConns, key)
-			}
-			h.termMu.Unlock()
-		}()
-
-		startPayload := protocol.TerminalStreamStart{
-			ProjectID:     projID,
-			TerminalID:    terminalID,
-			WorkspacePath: workspacePath,
-			Command:       command,
-			InitialTitle:  initialTerminalTitle(command),
-			Cols:          initialCols,
-			Rows:          initialRows,
-		}
-		dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamStart, "server", startPayload)
-
-		for {
-			msgType, payload, err := conn.ReadMessage()
-			if err != nil {
-				break
-			}
-			if msgType == websocket.BinaryMessage || msgType == websocket.TextMessage {
-				var resizeMsg struct {
-					Type string `json:"type"`
-					Cols uint16 `json:"cols"`
-					Rows uint16 `json:"rows"`
-				}
-				if err := json.Unmarshal(payload, &resizeMsg); err == nil && resizeMsg.Type == "resize" {
-					resizePayload := protocol.TerminalStreamResize{
-						ProjectID:  projID,
-						TerminalID: terminalID,
-						Cols:       resizeMsg.Cols,
-						Rows:       resizeMsg.Rows,
-					}
-					dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamResize, "server", resizePayload)
-				} else {
-					dataPayload := protocol.TerminalStreamData{
-						ProjectID:  projID,
-						TerminalID: terminalID,
-						Data:       payload,
-					}
-					dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "server", dataPayload)
-				}
-			}
-		}
+	if dc == nil {
+		_ = conn.WriteJSON(map[string]string{"type": "error", "message": "target device is offline"})
 		return
 	}
 
-	resolvedPath := resolveLocalPath(workspacePath)
-	_ = os.MkdirAll(resolvedPath, 0o755)
-
-	sessionName := "pocket-studio-" + projID + "-" + terminalID
-	initialTitle := initialTerminalTitle(command)
-	var cmd *exec.Cmd
-	if command != "" {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", resolvedPath, command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
-	} else {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", resolvedPath, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
-	}
-	cmd.Env = terminalEnv()
-
-	ptyFile, err := pty.Start(cmd)
-	if err != nil {
-		log.Printf("failed to start tmux: %v. falling back to bash.", err)
-		if command != "" {
-			cmd = exec.Command("bash", "-c", command)
-		} else {
-			cmd = exec.Command("bash")
+	key := terminalKey(userID, projID, terminalID)
+	terminal := &terminalConn{conn: conn}
+	h.termMu.Lock()
+	h.terminalConns[key] = terminal
+	h.termMu.Unlock()
+	defer func() {
+		h.termMu.Lock()
+		if h.terminalConns[key] == terminal {
+			delete(h.terminalConns, key)
 		}
-		cmd.Dir = resolvedPath
-		cmd.Env = terminalEnv()
-		ptyFile, err = pty.Start(cmd)
-		if err != nil {
-			log.Printf("failed to start fallback shell: %v", err)
-			return
-		}
-	}
-	applyTerminalSize(ptyFile, initialCols, initialRows)
-	resizeTmuxSession(sessionName, initialCols, initialRows)
-	defer ptyFile.Close()
-	titleDone := make(chan struct{})
-	defer close(titleDone)
-	var writeMu sync.Mutex
-	go watchLocalTerminalTitle(conn, sessionName, titleDone, &writeMu)
-	writeLocalTerminalSnapshot(conn, sessionName, &writeMu)
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := ptyFile.Read(buf)
-			if err != nil {
-				break
-			}
-			writeMu.Lock()
-			if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-				writeMu.Unlock()
-				break
-			}
-			writeMu.Unlock()
-		}
+		h.termMu.Unlock()
 	}()
 
+	startPayload := protocol.TerminalStreamStart{
+		ProjectID:     projID,
+		TerminalID:    terminalID,
+		WorkspacePath: workspacePath,
+		Command:       command,
+		InitialTitle:  initialTerminalTitle(command),
+		Cols:          initialCols,
+		Rows:          initialRows,
+	}
+	dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamStart, "server", startPayload)
 	for {
 		msgType, payload, err := conn.ReadMessage()
 		if err != nil {
@@ -1534,10 +1509,20 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 				Rows uint16 `json:"rows"`
 			}
 			if err := json.Unmarshal(payload, &resizeMsg); err == nil && resizeMsg.Type == "resize" {
-				applyTerminalSize(ptyFile, resizeMsg.Cols, resizeMsg.Rows)
-				resizeTmuxSession(sessionName, resizeMsg.Cols, resizeMsg.Rows)
+				resizePayload := protocol.TerminalStreamResize{
+					ProjectID:  projID,
+					TerminalID: terminalID,
+					Cols:       resizeMsg.Cols,
+					Rows:       resizeMsg.Rows,
+				}
+				dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamResize, "server", resizePayload)
 			} else {
-				_, _ = ptyFile.Write(payload)
+				dataPayload := protocol.TerminalStreamData{
+					ProjectID:  projID,
+					TerminalID: terminalID,
+					Data:       payload,
+				}
+				dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "server", dataPayload)
 			}
 		}
 	}
@@ -1549,106 +1534,6 @@ func parseTerminalDimension(value string) uint16 {
 		return 0
 	}
 	return uint16(n)
-}
-
-func terminalEnv() []string {
-	return append(os.Environ(),
-		"TERM=xterm-256color",
-		"COLORTERM=truecolor",
-		"TERM_PROGRAM=PocketStudio",
-		"FORCE_COLOR=1",
-	)
-}
-
-func applyTerminalSize(ptyFile *os.File, cols uint16, rows uint16) {
-	if ptyFile == nil || cols == 0 || rows == 0 {
-		return
-	}
-	_ = pty.Setsize(ptyFile, &pty.Winsize{Cols: cols, Rows: rows})
-}
-
-func resizeTmuxSession(sessionName string, cols uint16, rows uint16) {
-	if sessionName == "" || cols == 0 || rows == 0 {
-		return
-	}
-	_ = exec.Command("tmux", "resize-window", "-t", sessionName, "-x", strconv.Itoa(int(cols)), "-y", strconv.Itoa(int(rows))).Run()
-}
-
-func writeLocalTerminalSnapshot(conn *websocket.Conn, sessionName string, writeMu *sync.Mutex) {
-	if data := tmuxCapturePane(sessionName); len(data) > 0 {
-		writeMu.Lock()
-		_ = conn.WriteMessage(websocket.BinaryMessage, data)
-		writeMu.Unlock()
-	}
-	title, command := tmuxTerminalInfo(sessionName)
-	if title != "" {
-		writeMu.Lock()
-		_ = conn.WriteJSON(map[string]string{
-			"type":    "title",
-			"title":   title,
-			"command": command,
-		})
-		writeMu.Unlock()
-	}
-}
-
-func watchLocalTerminalTitle(conn *websocket.Conn, sessionName string, done <-chan struct{}, writeMu *sync.Mutex) {
-	ticker := time.NewTicker(1200 * time.Millisecond)
-	defer ticker.Stop()
-	lastTitle := ""
-	lastCommand := ""
-	for {
-		title, command := tmuxTerminalInfo(sessionName)
-		if title != "" && (title != lastTitle || command != lastCommand) {
-			lastTitle = title
-			lastCommand = command
-			writeMu.Lock()
-			err := conn.WriteJSON(map[string]string{
-				"type":    "title",
-				"title":   title,
-				"command": command,
-			})
-			writeMu.Unlock()
-			if err != nil {
-				return
-			}
-		}
-		select {
-		case <-done:
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
-func tmuxTerminalInfo(sessionName string) (string, string) {
-	cmd := exec.Command("tmux", "display-message", "-p", "-t", sessionName, "#{window_name}\t#{pane_current_command}")
-	raw, err := cmd.Output()
-	if err != nil {
-		return "", ""
-	}
-	parts := strings.SplitN(strings.TrimSpace(string(raw)), "\t", 2)
-	title := strings.TrimSpace(parts[0])
-	command := ""
-	if len(parts) > 1 {
-		command = strings.TrimSpace(parts[1])
-	}
-	if title == "" {
-		title = command
-	}
-	return title, command
-}
-
-func tmuxCapturePane(sessionName string) []byte {
-	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", sessionName)
-	raw, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	if len(raw) == 0 {
-		return nil
-	}
-	return append(raw, '\r')
 }
 
 func initialTerminalTitle(command string) string {
@@ -1669,305 +1554,5 @@ func initialTerminalTitle(command string) string {
 		return "Antigravity"
 	default:
 		return command
-	}
-}
-
-func resolveLocalPath(path string) string {
-	if strings.HasPrefix(path, "~") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			return filepath.Join(home, strings.TrimPrefix(path, "~"))
-		}
-	}
-	abs, err := filepath.Abs(path)
-	if err == nil {
-		return abs
-	}
-	return path
-}
-
-func (h *Hub) handleLocalWorkspaceList(req protocol.WorkspaceListRequest) (protocol.WorkspaceResult, error) {
-	target := resolveLocalPath(req.WorkspacePath)
-	if req.Path != "" && req.Path != "." {
-		target = filepath.Join(target, req.Path)
-	}
-	entries, err := os.ReadDir(target)
-	if err != nil {
-		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: err.Error()}, nil
-	}
-	var items []protocol.FileEntry
-	for _, entry := range entries {
-		name := entry.Name()
-		if shouldSkipFileTreeName(name) {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		childPath := name
-		if req.Path != "" && req.Path != "." {
-			childPath = filepath.ToSlash(filepath.Join(req.Path, name))
-		}
-		items = append(items, protocol.FileEntry{
-			Name:     name,
-			Path:     childPath,
-			IsDir:    entry.IsDir(),
-			Size:     info.Size(),
-			Modified: info.ModTime().Unix(),
-		})
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].IsDir != items[j].IsDir {
-			return items[i].IsDir
-		}
-		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
-	})
-	return protocol.WorkspaceResult{
-		RequestID:     req.RequestID,
-		WorkspacePath: req.WorkspacePath,
-		Path:          req.Path,
-		Entries:       items,
-	}, nil
-}
-
-func (h *Hub) handleLocalWorkspaceRead(req protocol.WorkspaceReadRequest) (protocol.WorkspaceResult, error) {
-	target := filepath.Join(resolveLocalPath(req.WorkspacePath), req.Path)
-	info, err := os.Stat(target)
-	if err != nil {
-		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: err.Error()}, nil
-	}
-	if info.IsDir() {
-		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: "cannot read directory"}, nil
-	}
-	content, err := os.ReadFile(target)
-	if err != nil {
-		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: err.Error()}, nil
-	}
-	return protocol.WorkspaceResult{
-		RequestID:     req.RequestID,
-		WorkspacePath: req.WorkspacePath,
-		Path:          req.Path,
-		Content:       string(content),
-	}, nil
-}
-
-func (h *Hub) handleLocalWorkspaceWrite(req protocol.WorkspaceWriteRequest) (protocol.WorkspaceResult, error) {
-	target := filepath.Join(resolveLocalPath(req.WorkspacePath), req.Path)
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: err.Error()}, nil
-	}
-	if err := os.WriteFile(target, []byte(req.Content), 0o644); err != nil {
-		return protocol.WorkspaceResult{RequestID: req.RequestID, Error: err.Error()}, nil
-	}
-	return protocol.WorkspaceResult{
-		RequestID:     req.RequestID,
-		WorkspacePath: req.WorkspacePath,
-		Path:          req.Path,
-		Content:       req.Content,
-	}, nil
-}
-
-type projectFileSearchResult struct {
-	Entries []protocol.FileEntry `json:"entries"`
-	Error   string               `json:"error,omitempty"`
-}
-
-type projectFileReadResult struct {
-	Path     string `json:"path"`
-	Name     string `json:"name"`
-	Kind     string `json:"kind"`
-	Content  string `json:"content,omitempty"`
-	DataURL  string `json:"data_url,omitempty"`
-	MimeType string `json:"mime_type,omitempty"`
-	Size     int64  `json:"size,omitempty"`
-	Error    string `json:"error,omitempty"`
-}
-
-type projectFileActionResult struct {
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
-}
-
-func (h *Hub) handleLocalProjectFileSearch(project Project, query string, limit int) projectFileSearchResult {
-	query = strings.TrimSpace(strings.ToLower(query))
-	if query == "" {
-		return projectFileSearchResult{Entries: []protocol.FileEntry{}}
-	}
-	if limit <= 0 || limit > 200 {
-		limit = 80
-	}
-	root := resolveLocalPath(project.WorkspacePath)
-	var entries []protocol.FileEntry
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		name := entry.Name()
-		if entry.IsDir() && shouldSkipFileTreeName(name) && path != root {
-			return filepath.SkipDir
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if !strings.Contains(strings.ToLower(rel), query) {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil
-		}
-		entries = append(entries, protocol.FileEntry{
-			Name:     name,
-			Path:     rel,
-			IsDir:    false,
-			Size:     info.Size(),
-			Modified: info.ModTime().Unix(),
-		})
-		if len(entries) >= limit {
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	if err != nil {
-		return projectFileSearchResult{Error: err.Error()}
-	}
-	return projectFileSearchResult{Entries: entries}
-}
-
-func (h *Hub) handleLocalProjectFileRead(project Project, path string) projectFileReadResult {
-	target, ok := safeProjectPath(project.WorkspacePath, path)
-	if !ok {
-		return projectFileReadResult{Path: path, Error: "invalid path"}
-	}
-	info, err := os.Stat(target)
-	if err != nil {
-		return projectFileReadResult{Path: path, Error: err.Error()}
-	}
-	if info.IsDir() {
-		return projectFileReadResult{Path: path, Error: "cannot read directory"}
-	}
-	if info.Size() > maxProjectFileReadSize {
-		return projectFileReadResult{Path: path, Name: filepath.Base(path), Size: info.Size(), Error: "file is too large to preview"}
-	}
-	content, err := os.ReadFile(target)
-	if err != nil {
-		return projectFileReadResult{Path: path, Error: err.Error()}
-	}
-	mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(target)))
-	if mimeType == "" {
-		mimeType = http.DetectContentType(content)
-	}
-	result := projectFileReadResult{
-		Path:     filepath.ToSlash(path),
-		Name:     filepath.Base(path),
-		MimeType: mimeType,
-		Size:     info.Size(),
-	}
-	if strings.HasPrefix(mimeType, "image/") {
-		result.Kind = "image"
-		result.DataURL = "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(content)
-		return result
-	}
-	result.Kind = "text"
-	result.Content = string(content)
-	return result
-}
-
-func (h *Hub) handleLocalProjectFileWrite(project Project, path string, content string) projectFileReadResult {
-	target, ok := safeProjectPath(project.WorkspacePath, path)
-	if !ok {
-		return projectFileReadResult{Path: path, Error: "invalid path"}
-	}
-	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
-		return projectFileReadResult{Path: path, Error: err.Error()}
-	}
-	return h.handleLocalProjectFileRead(project, path)
-}
-
-func (h *Hub) handleLocalProjectFileAction(project Project, action string, path string, target string) projectFileActionResult {
-	switch action {
-	case "mkdir":
-		targetPath, ok := safeProjectPath(project.WorkspacePath, path)
-		if !ok {
-			return projectFileActionResult{Error: "invalid path"}
-		}
-		if err := os.MkdirAll(targetPath, 0o755); err != nil {
-			return projectFileActionResult{Error: err.Error()}
-		}
-	case "create_file":
-		targetPath, ok := safeProjectPath(project.WorkspacePath, path)
-		if !ok {
-			return projectFileActionResult{Error: "invalid path"}
-		}
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-			return projectFileActionResult{Error: err.Error()}
-		}
-		file, err := os.OpenFile(targetPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
-		if err != nil {
-			return projectFileActionResult{Error: err.Error()}
-		}
-		_ = file.Close()
-	case "delete":
-		targetPath, ok := safeProjectPath(project.WorkspacePath, path)
-		if !ok {
-			return projectFileActionResult{Error: "invalid path"}
-		}
-		if err := os.RemoveAll(targetPath); err != nil {
-			return projectFileActionResult{Error: err.Error()}
-		}
-	case "move":
-		sourcePath, ok := safeProjectPath(project.WorkspacePath, path)
-		if !ok {
-			return projectFileActionResult{Error: "invalid source path"}
-		}
-		targetPath, ok := safeProjectPath(project.WorkspacePath, target)
-		if !ok {
-			return projectFileActionResult{Error: "invalid target path"}
-		}
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-			return projectFileActionResult{Error: err.Error()}
-		}
-		if err := os.Rename(sourcePath, targetPath); err != nil {
-			return projectFileActionResult{Error: err.Error()}
-		}
-	default:
-		return projectFileActionResult{Error: "unknown action"}
-	}
-	return projectFileActionResult{Success: true}
-}
-
-func safeProjectPath(root string, rel string) (string, bool) {
-	root = resolveLocalPath(root)
-	cleanRel := filepath.Clean(rel)
-	if cleanRel == "." || strings.HasPrefix(cleanRel, ".."+string(filepath.Separator)) || cleanRel == ".." || filepath.IsAbs(cleanRel) {
-		return "", false
-	}
-	target := filepath.Join(root, cleanRel)
-	absTarget, err := filepath.Abs(target)
-	if err != nil {
-		return "", false
-	}
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return "", false
-	}
-	if absTarget != absRoot && !strings.HasPrefix(absTarget, absRoot+string(filepath.Separator)) {
-		return "", false
-	}
-	return absTarget, true
-}
-
-func shouldSkipFileTreeName(name string) bool {
-	switch name {
-	case ".git", "node_modules", ".next", "dist", "build", "target", ".idea":
-		return true
-	default:
-		return false
 	}
 }
