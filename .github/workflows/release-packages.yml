@@ -1,6 +1,9 @@
 name: Release Packages
 
 on:
+  push:
+    tags:
+      - '*'
   release:
     types: [published]
 
@@ -41,7 +44,7 @@ jobs:
 
       - name: Rename release artifacts
         env:
-          TAG_NAME: ${{ github.event.release.tag_name }}
+          TAG_NAME: ${{ github.event.release.tag_name || github.ref_name }}
         run: |
           mkdir -p dist/release
           cp dist/pocket-studio-server-bin "dist/release/pocket-studio-server-linux-x86_64-${TAG_NAME}"
@@ -51,4 +54,5 @@ jobs:
       - name: Upload artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
           files: dist/release/*
