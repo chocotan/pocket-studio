@@ -56,6 +56,11 @@ function resourcePath(...parts) {
   return path.join(base, ...parts);
 }
 
+function bundledBinary(name) {
+  const extension = process.platform === "win32" ? ".exe" : "";
+  return resourcePath("bin", `${name}${extension}`);
+}
+
 function configDir() {
   return path.join(app.getPath("appData"), "pocket-studio");
 }
@@ -262,11 +267,7 @@ function restartDaemon(serverURL, token) {
     log("restart daemon");
     daemonRuntime.child.kill();
   }
-  daemonRuntime.child = spawnManaged(
-    resourcePath("bin", "pocket-studio-daemon"),
-    args,
-    daemonRuntime.env,
-  );
+  daemonRuntime.child = spawnManaged(bundledBinary("pocket-studio-daemon"), args, daemonRuntime.env);
 }
 
 function daemonConfigFromURL(rawURL) {
@@ -313,7 +314,7 @@ async function startModules() {
     const localServerURL = `http://127.0.0.1:${port}`;
     appRuntime.localServerURL = localServerURL;
     log("server listen", localServerURL);
-    spawnManaged(resourcePath("bin", "pocket-studio-server"), ["-server.addr", addr], env);
+    spawnManaged(bundledBinary("pocket-studio-server"), ["-server.addr", addr], env);
     serverReadyPromise = waitForHTTP(localServerURL)
       .then(() => {
         log("server ready", localServerURL);

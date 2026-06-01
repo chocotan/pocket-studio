@@ -11,9 +11,31 @@ permissions:
   contents: write
 
 jobs:
-  package-linux:
-    name: Build Linux release artifacts
-    runs-on: ubuntu-latest
+  package:
+    name: Build ${{ matrix.label }} release artifacts
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux
+            os: ubuntu-latest
+            platform: linux
+            artifact-os: linux
+            artifact-arch: x86_64
+            binary-ext: ''
+          - label: macOS
+            os: macos-latest
+            platform: mac
+            artifact-os: macos
+            artifact-arch: arm64
+            binary-ext: ''
+          - label: Windows
+            os: windows-latest
+            platform: win
+            artifact-os: windows
+            artifact-arch: x86_64
+            binary-ext: '.exe'
 
     steps:
       - name: Checkout
@@ -39,20 +61,78 @@ jobs:
           npm ci --prefix studio-frontend
           npm ci --prefix user-frontend
 
+      - name: Set up MSYS2
+        if: matrix.platform == 'win'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+
       - name: Build packages
-        run: bash scripts/build-packages.sh
+        if: matrix.platform != 'win'
+        shell: bash
+        run: bash scripts/build-packages.sh "${{ matrix.platform }}"
+
+      - name: Build packages
+        if: matrix.platform == 'win'
+        shell: msys2 {0}
+        env:
+          CGO_ENABLED: "1"
+        run: bash scripts/build-packages.sh "${{ matrix.platform }}"
 
       - name: Rename release artifacts
+        shell: bash
         env:
           TAG_NAME: ${{ github.event.release.tag_name || github.ref_name }}
+          PLATFORM: ${{ matrix.platform }}
+          ARTIFACT_OS: ${{ matrix.artifact-os }}
+          ARTIFACT_ARCH: ${{ matrix.artifact-arch }}
+          BINARY_EXT: ${{ matrix.binary-ext }}
         run: |
           mkdir -p dist/release
-          cp dist/pocket-studio-server-bin "dist/release/pocket-studio-server-linux-x86_64-${TAG_NAME}"
-          cp dist/pocket-studio-daemon-bin "dist/release/pocket-studio-daemon-linux-x86_64-${TAG_NAME}"
-          cp dist/electron/*.AppImage "dist/release/pocket-studio-linux-x86_64-${TAG_NAME}.AppImage"
+          cp "dist/pocket-studio-server-bin${BINARY_EXT}" "dist/release/pocket-studio-server-${ARTIFACT_OS}-${ARTIFACT_ARCH}-${TAG_NAME}${BINARY_EXT}"
+          cp "dist/pocket-studio-daemon-bin${BINARY_EXT}" "dist/release/pocket-studio-daemon-${ARTIFACT_OS}-${ARTIFACT_ARCH}-${TAG_NAME}${BINARY_EXT}"
+
+          case "$PLATFORM" in
+            linux)
+              cp dist/electron/*.AppImage "dist/release/pocket-studio-linux-${ARTIFACT_ARCH}-${TAG_NAME}.AppImage"
+              ;;
+            mac)
+              cp dist/electron/*.dmg "dist/release/pocket-studio-macos-${ARTIFACT_ARCH}-${TAG_NAME}.dmg"
+              ;;
+            win)
+              cp dist/electron/*-setup.exe "dist/release/pocket-studio-windows-${ARTIFACT_ARCH}-${TAG_NAME}-setup.exe"
+              ;;
+            *)
+              echo "unsupported platform: $PLATFORM" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact-os }}-${{ matrix.artifact-arch }}
+          path: dist/release/*
+          if-no-files-found: error
+
+  publish:
+    name: Upload artifacts to GitHub Release
+    runs-on: ubuntu-latest
+    needs: package
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/release
+          pattern: release-*
+          merge-multiple: true
 
       - name: Upload artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+          overwrite_files: true
           files: dist/release/*
