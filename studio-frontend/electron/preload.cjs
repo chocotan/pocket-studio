@@ -7,4 +7,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   switchToLocalMode() {
     return ipcRenderer.invoke("app:local-mode");
   },
+  setZoom(zoom) {
+    return ipcRenderer.invoke("app:set-zoom", zoom);
+  },
 });

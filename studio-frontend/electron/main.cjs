@@ -238,7 +238,7 @@ function registerAppProtocol() {
   log("app protocol", rootDir);
 }
 
-function registerDaemonIPC() {
+function registerAppIPC() {
   ipcMain.handle("daemon:sync-config", (_event, cfg) => {
     if (!cfg || typeof cfg !== "object") return { ok: false };
     const serverURL = typeof cfg.server_url === "string" ? cfg.server_url : "";
@@ -253,6 +253,18 @@ function registerDaemonIPC() {
     }
     restartDaemon(appRuntime.localServerURL, "");
     return { ok: true, server_url: appRuntime.localServerURL };
+  });
+  ipcMain.handle("app:set-zoom", (event, zoomPercent) => {
+    const zoom = Number(zoomPercent);
+    if (!Number.isFinite(zoom) || zoom < 50 || zoom > 200) {
+      return { ok: false, error: "invalid zoom" };
+    }
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) {
+      return { ok: false, error: "window is not available" };
+    }
+    window.webContents.setZoomFactor(zoom / 100);
+    return { ok: true };
   });
 }
 
@@ -449,7 +461,7 @@ app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   log("ready", { packaged: app.isPackaged, resources: process.resourcesPath });
   registerAppProtocol();
-  registerDaemonIPC();
+  registerAppIPC();
   const { modules, uiServerURL, uiServerURLSource } = await startModules();
   if (modules.has("ui")) {
     await createWindow(uiServerURL, uiServerURLSource);

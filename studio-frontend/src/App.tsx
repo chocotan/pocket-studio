@@ -3,6 +3,7 @@ import { StudioDashboard, type Project } from "./components/studio/studio-dashbo
 import { StudioWorkspace } from "./components/studio/studio-workspace";
 import type { Device } from "./lib/types";
 import { getJSON, loadClientConfig } from "./lib/api";
+import { applyZoom, loadZoom, saveZoom, type PageZoom } from "./lib/zoom";
 
 export default function App() {
   const initialProjectId = projectIdFromPath();
@@ -12,6 +13,12 @@ export default function App() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>(initialProjectId);
+  const [pageZoom, setPageZoom] = useState<PageZoom>(() => loadZoom());
+
+  useEffect(() => {
+    applyZoom(pageZoom);
+    saveZoom(pageZoom);
+  }, [pageZoom]);
 
   useEffect(() => {
     void loadClientConfig().then((cfg) => {
@@ -74,12 +81,16 @@ export default function App() {
           projects={projects}
           onSelectProject={handleSelectProject}
           onRefreshProjects={refreshAll}
+          pageZoom={pageZoom}
+          onPageZoomChange={setPageZoom}
         />
       ) : (
         activeProject && (
           <StudioWorkspace
             projectId={selectedProjectId}
             project={activeProject}
+            pageZoom={pageZoom}
+            onPageZoomChange={setPageZoom}
             onBackToDashboard={() => {
               refreshAll();
               setView("studio_dashboard");

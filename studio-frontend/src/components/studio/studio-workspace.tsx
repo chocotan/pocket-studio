@@ -33,10 +33,14 @@ import {
   type TerminalTitleSource,
 } from "./terminal-types";
 import { getJSON, postJSON } from "@/lib/api";
+import { ZoomSelect } from "./zoom-select";
+import type { PageZoom } from "@/lib/zoom";
 
 interface StudioWorkspaceProps {
   projectId: string;
   project: Project;
+  pageZoom: PageZoom;
+  onPageZoomChange: (zoom: PageZoom) => void;
   onBackToDashboard: () => void;
 }
 
@@ -62,6 +66,8 @@ const Columns3Icon = (props: React.SVGProps<SVGSVGElement>) => (
 export function StudioWorkspace({
   projectId,
   project,
+  pageZoom,
+  onPageZoomChange,
   onBackToDashboard,
 }: StudioWorkspaceProps) {
   const initialState = initialStudioState(project);
@@ -851,6 +857,7 @@ export function StudioWorkspace({
         </div>
 
         <div className="flex items-center gap-3">
+          <ZoomSelect value={pageZoom} onChange={onPageZoomChange} />
           {/* Preset Layout Buttons */}
           <div className="flex items-center bg-slate-150/40 p-0.5 rounded-lg border border-slate-200/55 dark:bg-slate-800/40 dark:border-slate-700/60 mr-2">
             {/* Preset 1: Full workspace */}

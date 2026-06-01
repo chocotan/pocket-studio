@@ -30,6 +30,8 @@ import {
   DialogFooter,
   DialogClose,
 } from "@/components/ui/dialog";
+import { ZoomSelect } from "./zoom-select";
+import type { PageZoom } from "@/lib/zoom";
 
 export interface Project {
   id: string;
@@ -46,6 +48,8 @@ interface StudioDashboardProps {
   projects: Project[];
   onSelectProject: (projectId: string) => void;
   onRefreshProjects: () => void;
+  pageZoom: PageZoom;
+  onPageZoomChange: (zoom: PageZoom) => void;
 }
 
 interface FileEntry {
@@ -87,6 +91,8 @@ export function StudioDashboard({
   projects,
   onSelectProject,
   onRefreshProjects,
+  pageZoom,
+  onPageZoomChange,
 }: StudioDashboardProps) {
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
   const [createOpen, setCreateOpen] = useState(false);
@@ -323,6 +329,7 @@ export function StudioDashboard({
         </div>
 
         <div className="flex items-center gap-3">
+          <ZoomSelect value={pageZoom} onChange={onPageZoomChange} />
           <button
             type="button"
             onClick={onRefreshProjects}
