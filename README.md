@@ -3,7 +3,7 @@
 Pocket Studio 由三部分组成：
 
 - `server`：提供 Web 页面、用户/token 管理，并转发 Studio 和 daemon 消息。
-- `daemon`：运行在开发机器上，连接 server，上报工作区并执行 agent。
+- `daemon`：运行在开发机器上，连接 server，上报项目目录并执行 agent。
 - `AppImage`：桌面端入口，可以单机运行，也可以连接远程 server。
 
 所有配置都通过命令行参数传入：server 使用 `-server.*`，daemon 使用 `-daemon.*`，AppImage 使用 `--server.*`、`--daemon.*`、`--ui.*`。
@@ -66,7 +66,7 @@ http://<server-host>:18080/studio/?server_url=http://<server-host>:18080&token=p
   -daemon.workspace ~/Agent
 ```
 
-多个工作区可以重复传 `-daemon.workspace`：
+多个项目目录可以重复传 `-daemon.workspace`：
 
 ```bash
 ./dist/pocket-studio-daemon-bin \
@@ -156,15 +156,9 @@ http://<server-host>:18080/
 | `-daemon.device.name` | 当前主机名 | Studio 中显示的设备名称。 |
 | `-daemon.server.url` | `ws://localhost:8080/ws/daemon` | daemon 连接的 server WebSocket 地址。 |
 | `-daemon.server.token` | 空 | 连接 server 使用的 token。 |
-| `-daemon.workspace` | `~/Agent` | 工作区路径，可重复传。支持 `id:name:path` 格式。 |
-| `-daemon.acpx.enabled` | `true` | 是否使用 acpx 管理 agent 会话。 |
-| `-daemon.acpx.command` | `acpx` | acpx 命令路径。 |
-| `-daemon.acpx.agent` | `claude` | 默认 agent 名称，例如 `claude`、`codex`。 |
-| `-daemon.acpx.session-name` | 空 | 默认 acpx session 名称。 |
-| `-daemon.acpx.ttl-seconds` | `300` | acpx session TTL。 |
-| `-daemon.acpx.args` | `--format,json,--approve-all` | 传给 acpx 的全局参数，逗号分隔。 |
-| `-daemon.claude.command` | `claude` | 不使用 acpx 时的 Claude 命令路径。 |
-| `-daemon.claude.args` | `--output-format,stream-json,--verbose` | 不使用 acpx 时传给 Claude 的参数，逗号分隔。 |
+| `-daemon.workspace` | `~/Agent` | 项目目录，可重复传。支持 `id:name:path` 格式，其中 `id` 是内部标识，`name` 是页面显示名，`path` 是本机项目路径。 |
+| `-daemon.claude.command` | `claude` | Claude 命令路径。 |
+| `-daemon.claude.args` | `--output-format,stream-json,--verbose` | 传给 Claude 的参数，逗号分隔。 |
 
 ### AppImage 常用参数
 
@@ -177,4 +171,4 @@ http://<server-host>:18080/
 | `--server.addr` | 内置 server 监听地址。 |
 | `--daemon.server.url` | 内置 daemon 连接的 server WebSocket 地址。 |
 | `--daemon.server.token` | 内置 daemon 连接 server 使用的 token。 |
-| `--daemon.workspace` | 内置 daemon 使用的工作区。 |
+| `--daemon.workspace` | 内置 daemon 使用的项目目录。 |
