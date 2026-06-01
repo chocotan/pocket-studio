@@ -421,7 +421,6 @@ export function StudioWorkspace({
       const tabs = node.tabs.map((tab) => {
         if (tab.id !== tabId) return tab;
         if (tab.kind !== "terminal") return tab;
-        if (source === "terminal" && tab.titleSource === "tmux") return tab;
         const nextCommand = command || tab.activeCommand || "";
         const cleanedTitle = cleanTerminalTitle(title, terminalType(tab.termType).title, tab.termType);
         const placeholderTitle = isPlaceholderTerminalTitle(cleanedTitle, nextCommand);
