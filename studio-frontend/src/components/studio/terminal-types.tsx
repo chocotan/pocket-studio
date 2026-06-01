@@ -19,7 +19,7 @@ export interface TerminalTypeDefinition {
 }
 
 export const TERMINAL_TYPES: TerminalTypeDefinition[] = [
-  { value: "bash", label: "普通终端", title: "Shell", command: "bash", accent: "indigo", logo: <TerminalIcon className="h-3 w-3" /> },
+  { value: "bash", label: "普通终端", title: "Shell", command: "", accent: "indigo", logo: <TerminalIcon className="h-3 w-3" /> },
   { value: "claude", label: "Claude Code", title: "Claude Code", command: "claude", accent: "violet", logo: <ClaudeCode width={14} height={14} /> },
   { value: "codex", label: "Codex", title: "Codex", command: "codex", accent: "emerald", logo: <Codex width={14} height={14} /> },
   { value: "opencode", label: "OpenCode", title: "OpenCode", command: "opencode", accent: "amber", logo: <OpenCode width={14} height={14} /> },

@@ -1,5 +1,5 @@
 const { app, BrowserWindow, Menu, dialog, protocol, net: electronNet, ipcMain } = require("electron");
-const { spawn } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
@@ -59,6 +59,38 @@ function resourcePath(...parts) {
 function bundledBinary(name) {
   const extension = process.platform === "win32" ? ".exe" : "";
   return resourcePath("bin", `${name}${extension}`);
+}
+
+function appEnvironment(extra = {}) {
+  const env = { ...process.env, ...extra };
+  if (process.platform === "darwin") {
+    const shellPath = env.SHELL || "/bin/zsh";
+    try {
+      const shellPATH = execFileSync(shellPath, ["-lic", "printf %s \"$PATH\""], {
+        env,
+        encoding: "utf8",
+        timeout: 3000,
+      }).trim();
+      if (shellPATH) {
+        env.PATH = shellPATH;
+      }
+    } catch {
+      // macOS GUI apps start with a sparse launchd environment; the static fallback below is still useful.
+    }
+    const pathParts = [
+      "/opt/homebrew/bin",
+      "/opt/homebrew/sbin",
+      "/usr/local/bin",
+      "/usr/local/sbin",
+      "/usr/bin",
+      "/bin",
+      "/usr/sbin",
+      "/sbin",
+      env.PATH || "",
+    ].filter(Boolean);
+    env.PATH = Array.from(new Set(pathParts.flatMap((value) => value.split(":")).filter(Boolean))).join(":");
+  }
+  return env;
 }
 
 function configDir() {
@@ -227,7 +259,7 @@ function registerDaemonIPC() {
 function spawnManaged(command, args, env) {
   log("spawn", command, args.join(" "));
   const child = spawn(command, args, {
-    env: { ...process.env, ...env },
+    env: appEnvironment(env),
     stdio: "inherit",
   });
   children.push(child);

@@ -19,3 +19,7 @@ func killProcess(cmd *exec.Cmd) {
 	}
 	_ = cmd.Process.Kill()
 }
+
+func loginShellFromPasswd() string {
+	return ""
+}

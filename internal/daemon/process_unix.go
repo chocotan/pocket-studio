@@ -4,6 +4,8 @@ package daemon
 
 import (
 	"os/exec"
+	"os/user"
+	"strings"
 	"syscall"
 )
 
@@ -23,4 +25,24 @@ func killProcess(cmd *exec.Cmd) {
 		return
 	}
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+}
+
+func loginShellFromPasswd() string {
+	current, err := user.Current()
+	if err != nil || current.Username == "" {
+		return ""
+	}
+	raw, err := exec.Command("sh", "-c", "getent passwd \"$1\" 2>/dev/null || dscl . -read \"/Users/$1\" UserShell 2>/dev/null", "sh", current.Username).Output()
+	if err != nil || len(raw) == 0 {
+		return ""
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) >= 2 && fields[0] == "UserShell:" {
+		return fields[1]
+	}
+	parts := strings.Split(strings.TrimSpace(string(raw)), ":")
+	if len(parts) >= 7 {
+		return strings.TrimSpace(parts[6])
+	}
+	return ""
 }

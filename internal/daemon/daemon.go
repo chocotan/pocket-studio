@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1944,8 +1945,10 @@ func (d *Daemon) runTerminalCommand(parent context.Context, request protocol.Ter
 	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
 	defer cancel()
 	started := time.Now()
-	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	shell := userShell()
+	cmd := exec.CommandContext(ctx, shell, "-lc", command)
 	cmd.Dir = workspace.Path
+	cmd.Env = terminalEnv()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -2670,17 +2673,17 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	if req.Command != "" {
 		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, req.Command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
 	} else {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, userShell(), "-l", ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
 	}
 	cmd.Env = terminalEnv()
 
 	ptyFile, err := pty.Start(cmd)
 	if err != nil {
-		log.Printf("daemon failed to start tmux: %v. falling back to bash.", err)
+		log.Printf("daemon failed to start tmux: %v. falling back to user shell.", err)
 		if req.Command != "" {
-			cmd = exec.Command("bash", "-c", req.Command)
+			cmd = exec.Command(userShell(), "-lc", req.Command)
 		} else {
-			cmd = exec.Command("bash")
+			cmd = exec.Command(userShell(), "-l")
 		}
 		cmd.Dir = workspace.Path
 		cmd.Env = terminalEnv()
@@ -2826,6 +2829,21 @@ func terminalEnv() []string {
 		"TERM_PROGRAM=PocketStudio",
 		"FORCE_COLOR=1",
 	)
+}
+
+func userShell() string {
+	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
+		return shell
+	}
+	if runtime.GOOS != "windows" {
+		if shell := loginShellFromPasswd(); shell != "" {
+			return shell
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return "cmd"
+	}
+	return "/bin/sh"
 }
 
 func applyTerminalSize(ptyFile *os.File, cols uint16, rows uint16) {
