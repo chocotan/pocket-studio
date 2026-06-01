@@ -39,14 +39,14 @@ flowchart LR
 下载 Linux AppImage 后直接启动：
 
 ```bash
-chmod +x pocket-studio-all-linux-x86_64-0.0.4.AppImage
-./pocket-studio-all-linux-x86_64-0.0.4.AppImage
+chmod +x pocket-studio.AppImage
+./pocket-studio.AppImage
 ```
 
 默认等价于同时启动：
 
 ```bash
-./pocket-studio-all-linux-x86_64-0.0.4.AppImage ui server daemon
+./pocket-studio.AppImage ui server daemon
 ```
 
 单机模式会在本机启动 UI、server、daemon。默认不启用用户注册登录，也不需要 token。
@@ -60,7 +60,7 @@ chmod +x pocket-studio-all-linux-x86_64-0.0.4.AppImage
 启动 server：
 
 ```bash
-./pocket-studio-server-linux-x86_64-0.0.4 \
+./server \
   -server.addr :18080 \
   -server.admin-token ps_admin_xxxxx
 ```
@@ -76,7 +76,7 @@ http://<server-host>:18080/studio/?server_url=http://<server-host>:18080&token=p
 在开发机器上启动 daemon：
 
 ```bash
-./pocket-studio-daemon-linux-x86_64-0.0.4 \
+./daemon \
   -daemon.server.url ws://<server-host>:18080/ws/daemon \
   -daemon.server.token ps_admin_xxxxx \
   -daemon.workspace ~/Agent
@@ -85,7 +85,7 @@ http://<server-host>:18080/studio/?server_url=http://<server-host>:18080&token=p
 多个项目目录可以重复传 `-daemon.workspace`：
 
 ```bash
-./pocket-studio-daemon-linux-x86_64-0.0.4 \
+./daemon \
   -daemon.server.url ws://<server-host>:18080/ws/daemon \
   -daemon.server.token ps_admin_xxxxx \
   -daemon.workspace main:Main:~/Agent \
@@ -97,7 +97,7 @@ http://<server-host>:18080/studio/?server_url=http://<server-host>:18080&token=p
 只打开 AppImage UI，并连接远程 server：
 
 ```bash
-./pocket-studio-all-linux-x86_64-0.0.4.AppImage ui \
+./pocket-studio.AppImage ui \
   --ui.server.url=http://<server-host>:18080
 ```
 
@@ -111,7 +111,7 @@ Access Token: ps_admin_xxxxx
 也可以直接用 AppImage 启动 daemon：
 
 ```bash
-./pocket-studio-all-linux-x86_64-0.0.4.AppImage daemon \
+./pocket-studio.AppImage daemon \
   --daemon.server.url=ws://<server-host>:18080/ws/daemon \
   --daemon.server.token=ps_admin_xxxxx \
   --daemon.workspace=~/Agent
@@ -126,7 +126,7 @@ Access Token: ps_admin_xxxxx
 启动开放注册 server：
 
 ```bash
-./pocket-studio-server-linux-x86_64-0.0.4 \
+./server \
   -server.addr :18080 \
   -server.auth.enabled \
   -server.auth.allow-register=true \
@@ -146,7 +146,7 @@ http://<server-host>:18080/
 使用用户自己的 token 启动 daemon：
 
 ```bash
-./pocket-studio-daemon-linux-x86_64-0.0.4 \
+./daemon \
   -daemon.server.url ws://<server-host>:18080/ws/daemon \
   -daemon.server.token ps_user_xxxxx \
   -daemon.workspace ~/Agent
