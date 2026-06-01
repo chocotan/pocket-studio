@@ -1,0 +1,54 @@
+name: Release Packages
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package-linux:
+    name: Build Linux release artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            studio-frontend/package-lock.json
+            user-frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: |
+          npm ci --prefix studio-frontend
+          npm ci --prefix user-frontend
+
+      - name: Build packages
+        run: bash scripts/build-packages.sh
+
+      - name: Rename release artifacts
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir -p dist/release
+          cp dist/pocket-studio-server-bin "dist/release/pocket-studio-server-linux-x86_64-${TAG_NAME}"
+          cp dist/pocket-studio-daemon-bin "dist/release/pocket-studio-daemon-linux-x86_64-${TAG_NAME}"
+          cp dist/electron/*.AppImage "dist/release/pocket-studio-linux-x86_64-${TAG_NAME}.AppImage"
+
+      - name: Upload artifacts to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/release/*
