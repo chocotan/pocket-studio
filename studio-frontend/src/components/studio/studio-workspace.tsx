@@ -24,13 +24,9 @@ import {
 } from "./studio-layout";
 import { TerminalPanelView } from "./terminal-panel-view";
 import {
-  cleanTerminalTitle,
-  isPlaceholderTerminalTitle,
   makeId,
-  terminalType,
   type SplitDirection,
   type TerminalKind,
-  type TerminalTitleSource,
 } from "./terminal-types";
 import { getJSON, postJSON } from "@/lib/api";
 import { ZoomSelect } from "./zoom-select";
@@ -100,7 +96,6 @@ export function StudioWorkspace({
   }, [theme]);
 
   const skipSaveRef = useRef(true);
-  const titleOnlyLayoutRef = useRef<LayoutNode | null>(null);
 
   function collectAllTabs(node: LayoutNode | null): StudioTab[] {
     if (!node) return [];
@@ -349,10 +344,6 @@ export function StudioWorkspace({
 
   useEffect(() => {
     if (!stateLoaded) return;
-    if (layoutTree && titleOnlyLayoutRef.current === layoutTree) {
-      titleOnlyLayoutRef.current = null;
-      return;
-    }
     if (skipSaveRef.current) {
       skipSaveRef.current = false;
       return;
@@ -413,38 +404,6 @@ export function StudioWorkspace({
     if (node.type === "panel") return node;
     if (node.id === splitId) return { ...node, sizes: normalizeSizes(sizes, node.children.length) };
     return { ...node, children: node.children.map((child) => updateSplitSizes(child, splitId, sizes)) };
-  }
-
-  function updateTabTitle(node: LayoutNode, tabId: string, title: string, command?: string, source: TerminalTitleSource = "tmux"): LayoutNode {
-    if (node.type === "panel") {
-      let changed = false;
-      const tabs = node.tabs.map((tab) => {
-        if (tab.id !== tabId) return tab;
-        if (tab.kind !== "terminal") return tab;
-        const nextCommand = command || tab.activeCommand || "";
-        const cleanedTitle = cleanTerminalTitle(title, terminalType(tab.termType).title, tab.termType);
-        const placeholderTitle = isPlaceholderTerminalTitle(cleanedTitle, nextCommand);
-        const shouldKeepTitle = source === "tmux" && (
-          placeholderTitle ||
-          (tab.titleSource === "terminal" && cleanedTitle === tab.title)
-        );
-        const nextTitle = shouldKeepTitle
-          ? tab.title
-          : cleanedTitle;
-        const nextTitleSource = shouldKeepTitle ? tab.titleSource : source;
-        if (tab.title === nextTitle && tab.activeCommand === nextCommand) return tab;
-        changed = true;
-        return { ...tab, title: nextTitle, activeCommand: nextCommand, titleSource: nextTitleSource };
-      });
-      return changed ? { ...node, tabs } : node;
-    }
-    let changed = false;
-    const children = node.children.map((child) => {
-      const nextChild = updateTabTitle(child, tabId, title, command, source);
-      if (nextChild !== child) changed = true;
-      return nextChild;
-    });
-    return changed ? { ...node, children } : node;
   }
 
   function addTabToPanel(node: LayoutNode, panelId: string, tab: StudioTab, insertIndex?: number): LayoutNode {
@@ -731,17 +690,6 @@ export function StudioWorkspace({
     }, 0);
   }
 
-  function handleTerminalTitle(tabId: string, title: string, command?: string, source?: TerminalTitleSource) {
-    setLayoutTree((prev) => {
-      if (!prev) return prev;
-      const next = updateTabTitle(prev, tabId, title, command, source);
-      if (next !== prev) {
-        titleOnlyLayoutRef.current = next;
-      }
-      return next;
-    });
-  }
-
   function handleCreateInitialPanel(kind: TerminalKind) {
     const panel = createTerminalPanel(kind);
     setLayoutTree(panel);
@@ -795,7 +743,6 @@ export function StudioWorkspace({
             setIsDraggingTab(false);
           }}
           onClosePanel={handleClosePanel}
-          onTitleChange={handleTerminalTitle}
           layoutVersion={layoutVersion}
           theme={theme}
         />

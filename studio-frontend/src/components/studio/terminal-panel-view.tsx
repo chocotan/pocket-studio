@@ -42,9 +42,14 @@ interface TerminalPanelViewProps {
   onTabDragEnd: (fromPanelId: string, tabId: string, clientX: number, clientY: number, fallbackIndex: number) => void;
   onTabDragCancel: () => void;
   onClosePanel: (id: string) => void;
-  onTitleChange: (id: string, title: string, command?: string, source?: TerminalTitleSource) => void;
   layoutVersion: number;
   theme?: StudioTheme;
+}
+
+interface TerminalTitleState {
+  title: string;
+  command: string;
+  source: TerminalTitleSource;
 }
 
 function TerminalPanelViewComponent({
@@ -67,7 +72,6 @@ function TerminalPanelViewComponent({
   onTabDragEnd,
   onTabDragCancel,
   onClosePanel,
-  onTitleChange,
   layoutVersion,
   theme = "light",
 }: TerminalPanelViewProps) {
@@ -76,6 +80,7 @@ function TerminalPanelViewComponent({
   const pointerDragRef = useRef<{ panelId: string; tabId: string; pointerId: number; startX: number; startY: number; dragging: boolean } | null>(null);
   const [scrollState, setScrollState] = useState({ canLeft: false, canRight: false });
   const [dropIndex, setDropIndex] = useState<number | null>(null);
+  const [terminalTitles, setTerminalTitles] = useState<Record<string, TerminalTitleState>>({});
   const isFocused = panel.focus;
   const splitActions = [
     { dir: "left" as const, Icon: SplitLeftIcon, label: "向左分割" },
@@ -183,6 +188,26 @@ function TerminalPanelViewComponent({
     }
   }
 
+  function handleTerminalTitle(tabId: string, title: string, command?: string, source: TerminalTitleSource = "tmux") {
+    setTerminalTitles((prev) => {
+      const tab = panel.tabs.find((item) => item.id === tabId);
+      if (!tab || tab.kind !== "terminal") return prev;
+      const previous = prev[tabId];
+      const nextCommand = command || previous?.command || tab.activeCommand || "";
+      const cleanedTitle = cleanTerminalTitle(title, terminalType(tab.termType).title, tab.termType);
+      if (!cleanedTitle) return prev;
+      if (previous?.title === cleanedTitle && previous.command === nextCommand && previous.source === source) return prev;
+      return {
+        ...prev,
+        [tabId]: {
+          title: cleanedTitle,
+          command: nextCommand,
+          source,
+        },
+      };
+    });
+  }
+
   useEffect(() => {
     updateScrollState();
     const scroller = tabScrollerRef.current;
@@ -201,6 +226,22 @@ function TerminalPanelViewComponent({
     activeTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
     updateScrollState();
   }, [panel.activeTabId, panel.tabs.length]);
+
+  useEffect(() => {
+    const tabIds = new Set(panel.tabs.map((tab) => tab.id));
+    setTerminalTitles((prev) => {
+      let changed = false;
+      const next: Record<string, TerminalTitleState> = {};
+      Object.entries(prev).forEach(([id, value]) => {
+        if (tabIds.has(id)) {
+          next[id] = value;
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [panel.tabs]);
 
   const visibleDropIndex = dragTarget
     ? dragTarget.panelId === panel.id ? dragTarget.insertIndex : null
@@ -248,10 +289,12 @@ function TerminalPanelViewComponent({
           {panel.tabs.map((tab) => {
             const isFileExplorer = tab.kind === "file_explorer";
             const isFileViewer = tab.kind === "file_viewer";
-            const displayType = terminalType(terminalTypeFromCommand(tab.activeCommand || "", tab.termType));
+            const liveTitle = terminalTitles[tab.id];
+            const activeCommand = liveTitle?.command || tab.activeCommand || "";
+            const displayType = terminalType(terminalTypeFromCommand(activeCommand, tab.termType));
             const displayTitle = isFileExplorer || isFileViewer
               ? isFileExplorer ? "文件" : tab.title
-              : cleanTerminalTitle(tab.title, terminalType(tab.termType).title, tab.termType);
+              : cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType);
             const active = tab.id === panel.activeTabId;
             const tabIndex = panel.tabs.indexOf(tab);
             return (
@@ -508,7 +551,7 @@ function TerminalPanelViewComponent({
                     isActive={isFocused && active}
                     layoutVersion={layoutVersion}
                     theme={theme}
-                    onTitleChange={(title, command, source) => onTitleChange(tab.id, title, command, source)}
+                    onTitleChange={(title, command, source) => handleTerminalTitle(tab.id, title, command, source)}
                   />
                 )}
               </div>
