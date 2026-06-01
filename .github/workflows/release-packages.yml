@@ -97,13 +97,13 @@ jobs:
 
           case "$PLATFORM" in
             linux)
-              cp dist/electron/*.AppImage "dist/release/pocket-studio-linux-${ARTIFACT_ARCH}-${TAG_NAME}.AppImage"
+              cp dist/electron/*.AppImage "dist/release/pocket-studio-all-linux-${ARTIFACT_ARCH}-${TAG_NAME}.AppImage"
               ;;
             mac)
-              cp dist/electron/*.dmg "dist/release/pocket-studio-macos-${ARTIFACT_ARCH}-${TAG_NAME}.dmg"
+              cp dist/electron/*.dmg "dist/release/pocket-studio-all-macos-${ARTIFACT_ARCH}-${TAG_NAME}.dmg"
               ;;
             win)
-              cp dist/electron/*-setup.exe "dist/release/pocket-studio-windows-${ARTIFACT_ARCH}-${TAG_NAME}-setup.exe"
+              cp dist/electron/*-setup.exe "dist/release/pocket-studio-all-windows-${ARTIFACT_ARCH}-${TAG_NAME}-setup.exe"
               ;;
             *)
               echo "unsupported platform: $PLATFORM" >&2
