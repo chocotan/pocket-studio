@@ -19,7 +19,7 @@
     "directories": {
       "output": "../dist/electron"
     },
-    "compression": "maximum",
+    "compression": "normal",
     "electronLanguages": [
       "en-US",
       "zh-CN"
