@@ -2671,9 +2671,9 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	initialTitle := initialTerminalTitle(req.Command, req.InitialTitle)
 	var cmd *exec.Cmd
 	if req.Command != "" {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, req.Command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, req.Command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "off", ";", "set-window-option", "-g", "automatic-rename", "off")
 	} else {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
+		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "off", ";", "set-window-option", "-g", "automatic-rename", "off")
 	}
 	cmd.Env = terminalEnv()
 
@@ -2709,6 +2709,16 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	d.termMu.Unlock()
 	go d.watchTerminalTitle(parent, req.ProjectID, req.TerminalID, sessionName, done)
 	d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-parent.Done():
+			return
+		case <-time.After(250 * time.Millisecond):
+			d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
+		}
+	}()
 
 	go func() {
 		defer func() {
