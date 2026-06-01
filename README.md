@@ -68,7 +68,7 @@ chmod +x pocket-studio.AppImage
 访问：
 
 ```text
-http://<server-host>:18080/studio/?server_url=http://<server-host>:18080&token=ps_admin_xxxxx
+http://<server-host>:18080/studio/
 ```
 
 ### 2.2 daemon 示例启动参数
@@ -82,23 +82,12 @@ http://<server-host>:18080/studio/?server_url=http://<server-host>:18080&token=p
   -daemon.workspace ~/Agent
 ```
 
-多个项目目录可以重复传 `-daemon.workspace`：
-
-```bash
-./daemon \
-  -daemon.server.url ws://<server-host>:18080/ws/daemon \
-  -daemon.server.token ps_admin_xxxxx \
-  -daemon.workspace main:Main:~/Agent \
-  -daemon.workspace work:Work:~/Work
-```
-
 ### 2.3 自用模式 AppImage 如何配置 server 地址
 
 只打开 AppImage UI，并连接远程 server：
 
 ```bash
-./pocket-studio.AppImage ui \
-  --ui.server.url=http://<server-host>:18080
+./pocket-studio.AppImage
 ```
 
 打开后在设置里填写：
@@ -106,15 +95,6 @@ http://<server-host>:18080/studio/?server_url=http://<server-host>:18080&token=p
 ```text
 Server URL: http://<server-host>:18080
 Access Token: ps_admin_xxxxx
-```
-
-也可以直接用 AppImage 启动 daemon：
-
-```bash
-./pocket-studio.AppImage daemon \
-  --daemon.server.url=ws://<server-host>:18080/ws/daemon \
-  --daemon.server.token=ps_admin_xxxxx \
-  --daemon.workspace=~/Agent
 ```
 
 ## 3. 快速开始 - 开放注册模式
