@@ -6,6 +6,14 @@ DIST="$ROOT/dist"
 ELECTRON_RESOURCES="$DIST/electron-resources"
 PLATFORM="${1:-linux}"
 
+case "$PLATFORM" in
+  linux|mac|win) ;;
+  *)
+    echo "usage: $0 [linux|mac|win]" >&2
+    exit 2
+    ;;
+esac
+
 rm -rf "$ELECTRON_RESOURCES" "$DIST/electron"
 mkdir -p "$DIST"
 mkdir -p "$ELECTRON_RESOURCES/bin"

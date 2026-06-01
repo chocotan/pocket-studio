@@ -57,14 +57,13 @@
         "dmg"
       ],
       "category": "public.app-category.developer-tools",
-      "icon": "../packaging/appimage/pocket-studio.svg",
       "artifactName": "PocketStudio-${version}-${arch}.dmg"
     },
     "win": {
       "target": [
         "nsis"
       ],
-      "icon": "../packaging/appimage/pocket-studio.svg",
+      "icon": "../packaging/appimage/pocket-studio.ico",
       "artifactName": "PocketStudio-${version}-${arch}-setup.exe"
     },
     "nsis": {
