@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Tree, type NodeRendererProps } from "react-arborist";
 import {
@@ -58,7 +58,7 @@ interface FileExplorerTabProps {
   theme?: StudioTheme;
 }
 
-export function FileExplorerTab({ projectId, workspacePath, active, layoutVersion, onOpenFile, theme = "light" }: FileExplorerTabProps) {
+function FileExplorerTabView({ projectId, workspacePath, active, layoutVersion, onOpenFile, theme = "light" }: FileExplorerTabProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   void theme;
   const [treeData, setTreeData] = useState<FileTreeNode[]>([]);
@@ -352,6 +352,8 @@ export function FileExplorerTab({ projectId, workspacePath, active, layoutVersio
     </div>
   );
 }
+
+export const FileExplorerTab = memo(FileExplorerTabView);
 
 function FileTreeRow({
   node,

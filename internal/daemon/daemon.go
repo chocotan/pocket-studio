@@ -2776,7 +2776,7 @@ func (d *Daemon) sendTerminalSnapshot(projectID string, terminalID string, sessi
 }
 
 func (d *Daemon) watchTerminalTitle(ctx context.Context, projectID string, terminalID string, sessionName string, done <-chan struct{}) {
-	ticker := time.NewTicker(1200 * time.Millisecond)
+	ticker := time.NewTicker(2500 * time.Millisecond)
 	defer ticker.Stop()
 	lastTitle := ""
 	lastCommand := ""

@@ -100,6 +100,7 @@ export function StudioWorkspace({
   }, [theme]);
 
   const skipSaveRef = useRef(true);
+  const titleOnlyLayoutRef = useRef<LayoutNode | null>(null);
 
   function collectAllTabs(node: LayoutNode | null): StudioTab[] {
     if (!node) return [];
@@ -348,6 +349,10 @@ export function StudioWorkspace({
 
   useEffect(() => {
     if (!stateLoaded) return;
+    if (layoutTree && titleOnlyLayoutRef.current === layoutTree) {
+      titleOnlyLayoutRef.current = null;
+      return;
+    }
     if (skipSaveRef.current) {
       skipSaveRef.current = false;
       return;
@@ -434,7 +439,13 @@ export function StudioWorkspace({
       });
       return changed ? { ...node, tabs } : node;
     }
-    return { ...node, children: node.children.map((child) => updateTabTitle(child, tabId, title, command, source)) };
+    let changed = false;
+    const children = node.children.map((child) => {
+      const nextChild = updateTabTitle(child, tabId, title, command, source);
+      if (nextChild !== child) changed = true;
+      return nextChild;
+    });
+    return changed ? { ...node, children } : node;
   }
 
   function addTabToPanel(node: LayoutNode, panelId: string, tab: StudioTab, insertIndex?: number): LayoutNode {
@@ -722,7 +733,14 @@ export function StudioWorkspace({
   }
 
   function handleTerminalTitle(tabId: string, title: string, command?: string, source?: TerminalTitleSource) {
-    setLayoutTree((prev) => prev ? updateTabTitle(prev, tabId, title, command, source) : prev);
+    setLayoutTree((prev) => {
+      if (!prev) return prev;
+      const next = updateTabTitle(prev, tabId, title, command, source);
+      if (next !== prev) {
+        titleOnlyLayoutRef.current = next;
+      }
+      return next;
+    });
   }
 
   function handleCreateInitialPanel(kind: TerminalKind) {

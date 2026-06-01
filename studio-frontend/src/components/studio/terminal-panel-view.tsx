@@ -47,7 +47,7 @@ interface TerminalPanelViewProps {
   theme?: StudioTheme;
 }
 
-export function TerminalPanelView({
+function TerminalPanelViewComponent({
   panel,
   addMenuPanelId,
   dragTarget,
@@ -519,6 +519,8 @@ export function TerminalPanelView({
     </div>
   );
 }
+
+export const TerminalPanelView = React.memo(TerminalPanelViewComponent);
 
 function TerminalTypeMenu({
   align,
