@@ -1,6 +1,32 @@
 # Pocket Studio
 
-Pocket Studio 由三部分组成：
+Pocket Studio 是一个远程 AI 编程工作台。你可以把它理解成“浏览器里的开发控制台”：server 负责提供入口和转发消息，daemon 运行在你的开发机器上，真正访问项目目录并调用本机已安装的 agent，例如 Codex、Claude Code、OpenCode 等。
+
+它适合这些场景：
+
+- 在浏览器或桌面 App 里统一管理多台开发机器。
+- 把家里、公司、服务器上的项目目录接到同一个 Studio。
+- 让 agent 在真实开发机器上执行，而不是把代码上传到第三方环境。
+- 自己用固定 token 快速部署，也可以开放注册给多人使用。
+
+## 架构图
+
+```mermaid
+flowchart LR
+  user[用户浏览器 / AppImage UI]
+  server[Pocket Studio server<br/>Web UI / Token / 消息转发]
+  daemon[Pocket Studio daemon<br/>运行在开发机器上]
+  project[项目目录<br/>~/Agent / ~/Work]
+  agent[本机 Agent<br/>Codex / Claude Code / OpenCode]
+
+  user <-->|HTTP / WebSocket| server
+  daemon <-->|WebSocket + Token| server
+  daemon --> project
+  daemon --> agent
+  agent --> project
+```
+
+## 组件
 
 - `server`：提供 Web 页面、用户/token 管理，并转发 Studio 和 daemon 消息。
 - `daemon`：运行在开发机器上，连接 server，上报项目目录并执行 agent。
@@ -31,20 +57,10 @@ chmod +x pocket-studio-all-linux-x86_64-0.0.4.AppImage
 
 ### 2.1 server 示例启动参数
 
-先构建 server 和前端：
-
-```bash
-npm ci --prefix studio-frontend
-npm ci --prefix user-frontend
-npm run build --prefix studio-frontend
-npm run build --prefix user-frontend
-go build -trimpath -ldflags="-s -w" -o dist/pocket-studio-server-bin ./cmd/server
-```
-
 启动 server：
 
 ```bash
-./dist/pocket-studio-server-bin \
+./pocket-studio-server-linux-x86_64-0.0.4 \
   -server.addr :18080 \
   -server.admin-token ps_admin_xxxxx
 ```
@@ -60,7 +76,7 @@ http://<server-host>:18080/studio/?server_url=http://<server-host>:18080&token=p
 在开发机器上启动 daemon：
 
 ```bash
-./dist/pocket-studio-daemon-bin \
+./pocket-studio-daemon-linux-x86_64-0.0.4 \
   -daemon.server.url ws://<server-host>:18080/ws/daemon \
   -daemon.server.token ps_admin_xxxxx \
   -daemon.workspace ~/Agent
@@ -69,7 +85,7 @@ http://<server-host>:18080/studio/?server_url=http://<server-host>:18080&token=p
 多个项目目录可以重复传 `-daemon.workspace`：
 
 ```bash
-./dist/pocket-studio-daemon-bin \
+./pocket-studio-daemon-linux-x86_64-0.0.4 \
   -daemon.server.url ws://<server-host>:18080/ws/daemon \
   -daemon.server.token ps_admin_xxxxx \
   -daemon.workspace main:Main:~/Agent \
@@ -110,7 +126,7 @@ Access Token: ps_admin_xxxxx
 启动开放注册 server：
 
 ```bash
-./dist/pocket-studio-server-bin \
+./pocket-studio-server-linux-x86_64-0.0.4 \
   -server.addr :18080 \
   -server.auth.enabled \
   -server.auth.allow-register=true \
@@ -130,7 +146,7 @@ http://<server-host>:18080/
 使用用户自己的 token 启动 daemon：
 
 ```bash
-./dist/pocket-studio-daemon-bin \
+./pocket-studio-daemon-linux-x86_64-0.0.4 \
   -daemon.server.url ws://<server-host>:18080/ws/daemon \
   -daemon.server.token ps_user_xxxxx \
   -daemon.workspace ~/Agent
@@ -157,8 +173,6 @@ http://<server-host>:18080/
 | `-daemon.server.url` | `ws://localhost:8080/ws/daemon` | daemon 连接的 server WebSocket 地址。 |
 | `-daemon.server.token` | 空 | 连接 server 使用的 token。 |
 | `-daemon.workspace` | `~/Agent` | 项目目录，可重复传。支持 `id:name:path` 格式，其中 `id` 是内部标识，`name` 是页面显示名，`path` 是本机项目路径。 |
-| `-daemon.claude.command` | `claude` | Claude 命令路径。 |
-| `-daemon.claude.args` | `--output-format,stream-json,--verbose` | 传给 Claude 的参数，逗号分隔。 |
 
 ### AppImage 常用参数
 
