@@ -65,6 +65,7 @@ function appEnvironment(extra = {}) {
   const env = { ...process.env, ...extra };
   if (process.platform === "darwin") {
     const shellPath = env.SHELL || "/bin/zsh";
+    env.SHELL = shellPath;
     try {
       const shellPATH = execFileSync(shellPath, ["-lic", "printf %s \"$PATH\""], {
         env,

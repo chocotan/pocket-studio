@@ -2823,11 +2823,13 @@ func tmuxCapturePane(sessionName string) []byte {
 }
 
 func terminalEnv() []string {
+	shell := userShell()
 	return append(os.Environ(),
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"TERM_PROGRAM=PocketStudio",
 		"FORCE_COLOR=1",
+		"SHELL="+shell,
 	)
 }
 

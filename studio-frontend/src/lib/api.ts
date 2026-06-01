@@ -57,8 +57,13 @@ export async function loadClientConfig(): Promise<ClientConfig> {
   const storedConfig = loadConfigFromStorage();
   const urlConfig = configPatchFromURL();
   if (urlConfig) {
-    if (isAutoServerURLFromAppImage() && storedConfig?.server_url) {
-      const cfg = normalizeConfig(storedConfig);
+    if (isAutoServerURLFromAppImage()) {
+      const cfg = normalizeConfig({
+        ...storedConfig,
+        ...urlConfig,
+        local_mode: true,
+        access_token: "",
+      });
       applyClientConfig(cfg);
       saveConfigToStorage(cfg);
       return cfg;
