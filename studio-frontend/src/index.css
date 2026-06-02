@@ -138,45 +138,45 @@
 
 .theme-claude {
   /* Core surfaces */
-  --background:        oklch(0.972 0.010 82);
-  --foreground:        oklch(0.205 0.018 70);
+  --background:        oklch(0.955 0.024 78);
+  --foreground:        oklch(0.245 0.030 58);
 
   /* Cards & Popovers */
-  --card:              oklch(0.995 0.004 82);
-  --card-foreground:   oklch(0.205 0.018 70);
-  --popover:           oklch(0.995 0.004 82);
-  --popover-foreground:oklch(0.205 0.018 70);
+  --card:              oklch(0.975 0.018 76);
+  --card-foreground:   oklch(0.245 0.030 58);
+  --popover:           oklch(0.985 0.016 76);
+  --popover-foreground:oklch(0.245 0.030 58);
 
   /* Primary - Claude-like warm ochre */
-  --primary:           oklch(0.56 0.12 55);
-  --primary-foreground:oklch(0.99 0.004 82);
+  --primary:           oklch(0.54 0.125 48);
+  --primary-foreground:oklch(0.985 0.016 76);
 
   /* Secondary */
-  --secondary:         oklch(0.935 0.018 82);
-  --secondary-foreground:oklch(0.245 0.020 70);
+  --secondary:         oklch(0.920 0.030 76);
+  --secondary-foreground:oklch(0.300 0.035 56);
 
   /* Muted */
-  --muted:             oklch(0.925 0.016 82);
-  --muted-foreground:  oklch(0.47 0.025 70);
+  --muted:             oklch(0.900 0.028 76);
+  --muted-foreground:  oklch(0.500 0.032 58);
 
   /* Accent */
-  --accent:            oklch(0.910 0.040 62);
-  --accent-foreground: oklch(0.39 0.095 52);
+  --accent:            oklch(0.885 0.052 58);
+  --accent-foreground: oklch(0.405 0.100 46);
 
   /* Destructive */
   --destructive:       oklch(0.55 0.20 28);
 
   /* Strokes */
-  --border:            oklch(0.862 0.018 82);
-  --input:             oklch(0.862 0.018 82);
-  --ring:              oklch(0.56 0.12 55);
+  --border:            oklch(0.825 0.030 72);
+  --input:             oklch(0.825 0.030 72);
+  --ring:              oklch(0.54 0.125 48);
 
-  --indigo-50:   #f7efe6;
-  --indigo-100:  #ead9c5;
-  --indigo-200:  #d8b78e;
-  --indigo-500:  #b66a2c;
-  --indigo-600:  #9a5523;
-  --indigo-700:  #79401b;
+  --indigo-50:   #f8eadb;
+  --indigo-100:  #efd8bf;
+  --indigo-200:  #dfb98f;
+  --indigo-500:  #b35f2a;
+  --indigo-600:  #9b4f22;
+  --indigo-700:  #7c3f1b;
 }
 
 .theme-dark {
@@ -493,11 +493,15 @@
 
 .studio-square .studio-panel {
   border-radius: 0 !important;
-  box-shadow: 0 1px 3px rgb(15 23 42 / 0.06) !important;
+  box-shadow: var(--studio-panel-shadow, 0 1px 3px rgb(15 23 42 / 0.06)) !important;
 }
 
 .studio-square .studio-tabbar::after {
   content: none;
+}
+
+.studio-square .studio-tabbar {
+  background: color-mix(in oklch, var(--muted) 82%, var(--background)) !important;
 }
 
 .studio-square .studio-tab {
@@ -539,7 +543,7 @@
   border-bottom: 0 !important;
   border-bottom-color: transparent !important;
   border-radius: 7px 7px 0 0 !important;
-  height: 1.75rem;
+  height: 1.5rem;
   margin-bottom: 0;
 }
 

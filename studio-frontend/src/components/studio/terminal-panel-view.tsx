@@ -87,8 +87,8 @@ function TerminalPanelViewComponent({
     { dir: "bottom" as const, Icon: SplitBottomIcon, label: "向下分割" },
   ];
   const focusClasses = isFocused
-    ? "border-indigo-500/80 dark:border-indigo-400/85 shadow-[inset_0_0_0_1px_rgba(99,102,241,0.18)]"
-    : "border-border/60 hover:border-border/90 shadow-sm";
+    ? "border-2 border-indigo-500/90 dark:border-indigo-400/90 [--studio-panel-shadow:none]"
+    : "border-2 border-transparent hover:border-border/70 shadow-sm";
   const accentClasses = {
     indigo: "bg-indigo-100 text-indigo-600 ring-1 ring-indigo-200/70 dark:bg-indigo-400/18 dark:text-indigo-200 dark:ring-indigo-300/20",
     violet: "bg-violet-100 text-violet-600 ring-1 ring-violet-200/70 dark:bg-violet-400/18 dark:text-violet-200 dark:ring-violet-300/20",
@@ -224,16 +224,15 @@ function TerminalPanelViewComponent({
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
+        zIndex: isFocused ? 2 : 1,
       }}
-      className={`studio-panel border border-border bg-card text-card-foreground transition-all duration-200 ${focusClasses}`}
+      className={`studio-panel box-border bg-card text-card-foreground transition-[border-color,box-shadow] duration-150 ${focusClasses}`}
     >
       <div
         data-studio-tabbar="true"
         data-panel-id={panel.id}
         data-tab-count={panel.tabs.length}
-        className={`studio-tabbar relative flex h-8 shrink-0 items-end gap-0.5 overflow-visible border-b-0 px-1 pt-0.5 ${
-          isFocused ? "bg-slate-100/70 dark:bg-slate-900/60" : "bg-slate-200/50 dark:bg-slate-950/40"
-        }`}
+        className="studio-tabbar relative flex h-6 shrink-0 items-end gap-0.5 overflow-visible border-b-0 bg-muted px-1"
       >
         {scrollState.canLeft && (
           <button
@@ -295,7 +294,7 @@ function TerminalPanelViewComponent({
                         onPointerMove={handleTabPointerMove}
                         onPointerUp={handleTabPointerUp}
                         onPointerCancel={handleTabPointerCancel}
-                        className={`studio-tab group flex h-7 min-w-[72px] max-w-[220px] flex-[0_1_auto] items-center gap-1 rounded-t-md border px-1.5 text-left transition-colors ${
+                        className={`studio-tab group flex h-6 min-w-[72px] max-w-[220px] flex-[0_1_auto] items-center gap-1 rounded-t-md border px-1.5 text-left transition-colors ${
                           active
                             ? "studio-tab-active relative z-20 border-border bg-card text-foreground shadow-sm"
                             : "studio-tab-inactive relative border-border/50 bg-muted/40 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
@@ -306,7 +305,7 @@ function TerminalPanelViewComponent({
                             ? active ? "bg-sky-100 text-sky-700 ring-1 ring-sky-200/70 dark:bg-sky-400/16 dark:text-sky-200 dark:ring-sky-300/20" : "text-slate-400 dark:text-slate-600"
                             : isFileViewer
                               ? active ? "bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200/70 dark:bg-emerald-400/16 dark:text-emerald-200 dark:ring-emerald-300/20" : "text-slate-400 dark:text-slate-600"
-                            : active ? accentClasses[displayType.accent] : "text-slate-400 dark:text-slate-600"
+                              : active ? accentClasses[displayType.accent] : "text-slate-400 dark:text-slate-600"
                         }`}>
                           {isFileExplorer
                             ? <FolderTree className="h-3.5 w-3.5" />
@@ -352,7 +351,7 @@ function TerminalPanelViewComponent({
             );
           })}
           {visibleDropIndex === panel.tabs.length && <TabDropMarker panelId={panel.id} index={panel.tabs.length} />}
-          <div className="relative flex h-7 shrink-0 items-center pb-0.5">
+          <div className="relative flex h-6 shrink-0 items-center">
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -392,7 +391,7 @@ function TerminalPanelViewComponent({
         {addMenuPanelId === panel.id && (
           <TerminalTypeMenu
             align="left"
-            style={{ left: addMenuLeft, top: 34 }}
+            style={{ left: addMenuLeft, top: 26 }}
             onSelect={(kind) => onAddTab(panel.id, kind)}
             onFileExplorer={() => onAddFileExplorer(panel.id)}
           />
@@ -546,7 +545,7 @@ function TerminalTypeMenu({
 }) {
   return (
     <div
-      className={`absolute top-7 z-50 w-40 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
+      className={`absolute top-6 z-50 w-40 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
       style={style}
       onClick={(event) => event.stopPropagation()}
     >
@@ -583,7 +582,7 @@ function TabDropMarker({ panelId, index }: { panelId: string; index: number }) {
       data-studio-drop-marker="true"
       data-panel-id={panelId}
       data-drop-index={index}
-      className="mb-0.5 h-6 w-0.5 shrink-0 rounded-full bg-indigo-500 shadow-[0_0_0_2px_rgba(99,102,241,0.16)]"
+      className="h-5 w-0.5 shrink-0 rounded-full bg-indigo-500 shadow-[0_0_0_2px_rgba(99,102,241,0.16)]"
       aria-hidden="true"
     />
   );

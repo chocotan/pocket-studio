@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowLeft, CircleDot, LayoutGrid, Columns, Maximize, Palette, Check } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronUp, CircleDot, LayoutGrid, Columns, Maximize, Palette, Check } from "lucide-react";
 import { type StudioTheme } from "./terminal-types";
 import type { Project } from "./studio-dashboard";
 import { EmptyWorkspace } from "./empty-workspace";
@@ -36,6 +36,14 @@ import {
 import { getJSON, postJSON } from "@/lib/api";
 import { ZoomSelect } from "./zoom-select";
 import type { PageZoom } from "@/lib/zoom";
+import {
+  PANEL_DIRECTIONS,
+  loadShortcutConfig,
+  normalizeShortcut,
+  shortcutFromEvent,
+  type PanelDirection,
+  type ShortcutAction,
+} from "./shortcut-settings";
 
 interface StudioWorkspaceProps {
   projectId: string;
@@ -63,6 +71,17 @@ const Columns3Icon = (props: React.SVGProps<SVGSVGElement>) => (
     <path d="M15 3v18" />
   </svg>
 );
+
+const STUDIO_NAV_HIDDEN_KEY = "pocket-studio-nav-hidden";
+
+function editableTargetShouldKeepKeyboard(event: KeyboardEvent) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.closest(".xterm")) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select";
+}
 
 export function StudioWorkspace({
   projectId,
@@ -95,11 +114,20 @@ export function StudioWorkspace({
     return "light";
   });
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [navHidden, setNavHidden] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem(STUDIO_NAV_HIDDEN_KEY) === "true";
+  });
   const [stateLoaded, setStateLoaded] = useState(false);
 
   useEffect(() => {
     localStorage.setItem("pocket-studio-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem(STUDIO_NAV_HIDDEN_KEY, String(navHidden));
+    if (navHidden) setThemeMenuOpen(false);
+  }, [navHidden]);
 
   const skipSaveRef = useRef(true);
 
@@ -386,6 +414,28 @@ export function StudioWorkspace({
     });
   }, [layoutTree]);
 
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented || editableTargetShouldKeepKeyboard(event)) return;
+      const pressed = shortcutFromEvent(event);
+      const shortcuts = loadShortcutConfig();
+      const matched = (Object.keys(shortcuts) as ShortcutAction[]).find((action) => {
+        return normalizeShortcut(shortcuts[action]) === pressed;
+      });
+      if (!matched) return;
+      const handled = matched === "panel.newRight"
+        ? createPanelRightOfFocused()
+        : matched in PANEL_DIRECTIONS && focusPanelByDirection(PANEL_DIRECTIONS[matched as keyof typeof PANEL_DIRECTIONS]);
+      if (handled) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
+  }, [layoutTree, focusedId]);
+
   function performSplit(
     node: LayoutNode,
     targetId: string,
@@ -499,6 +549,91 @@ export function StudioWorkspace({
     const index = panels.findIndex((panel) => panel.id === panelId);
     if (index >= 0 && index + 1 < panels.length) return panels[index + 1].id;
     return panelId;
+  }
+
+  function findDirectionalPanelId(direction: PanelDirection): string {
+    if (!layoutTree || !focusedId) return "";
+    const current = document.querySelector<HTMLElement>(`[data-studio-panel="true"][data-panel-id="${CSS.escape(focusedId)}"]`);
+    if (!current) return "";
+    const currentRect = current.getBoundingClientRect();
+    const currentCenterX = currentRect.left + currentRect.width / 2;
+    const currentCenterY = currentRect.top + currentRect.height / 2;
+    const allPanels = Array.from(document.querySelectorAll<HTMLElement>("[data-studio-panel='true']"))
+      .map((panel) => {
+        const rect = panel.getBoundingClientRect();
+        return {
+          id: panel.dataset.panelId || "",
+          rect,
+          centerX: rect.left + rect.width / 2,
+          centerY: rect.top + rect.height / 2,
+        };
+      })
+      .filter((panel) => panel.id);
+    const candidates = allPanels
+      .filter((panel) => panel.id !== focusedId)
+      .map((panel) => {
+        const horizontalOverlap = Math.max(0, Math.min(currentRect.right, panel.rect.right) - Math.max(currentRect.left, panel.rect.left));
+        const verticalOverlap = Math.max(0, Math.min(currentRect.bottom, panel.rect.bottom) - Math.max(currentRect.top, panel.rect.top));
+        const primaryDistance = direction === "left"
+          ? currentRect.left - panel.rect.right
+          : direction === "right"
+            ? panel.rect.left - currentRect.right
+            : direction === "up"
+              ? currentRect.top - panel.rect.bottom
+              : panel.rect.top - currentRect.bottom;
+        const centerDistance = direction === "left" || direction === "right"
+          ? Math.abs(panel.centerY - currentCenterY)
+          : Math.abs(panel.centerX - currentCenterX);
+        const overlap = direction === "left" || direction === "right" ? verticalOverlap : horizontalOverlap;
+        return {
+          id: panel.id,
+          primaryDistance,
+          centerDistance,
+          overlap,
+        };
+      })
+      .filter((panel) => panel.primaryDistance >= -1);
+
+    if (candidates.length > 0) {
+      candidates.sort((a, b) => {
+        if (a.primaryDistance !== b.primaryDistance) return a.primaryDistance - b.primaryDistance;
+        if (a.overlap !== b.overlap) return b.overlap - a.overlap;
+        return a.centerDistance - b.centerDistance;
+      });
+      return candidates[0].id;
+    }
+
+    return findWrappedPanelId(allPanels, focusedId, direction);
+  }
+
+  function findWrappedPanelId(
+    panels: Array<{ id: string; rect: DOMRect; centerX: number; centerY: number }>,
+    currentPanelId: string,
+    direction: PanelDirection
+  ) {
+    const ordered = [...panels].sort((a, b) => {
+      if (Math.abs(a.rect.top - b.rect.top) > 8) return a.rect.top - b.rect.top;
+      return a.rect.left - b.rect.left;
+    });
+    const currentIndex = ordered.findIndex((panel) => panel.id === currentPanelId);
+    if (currentIndex < 0 || ordered.length <= 1) return "";
+    if (direction === "right" || direction === "down") {
+      return ordered[(currentIndex + 1) % ordered.length].id;
+    }
+    return ordered[(currentIndex - 1 + ordered.length) % ordered.length].id;
+  }
+
+  function focusPanelByDirection(direction: PanelDirection) {
+    const nextPanelId = findDirectionalPanelId(direction);
+    if (!nextPanelId) return false;
+    handleFocus(nextPanelId);
+    return true;
+  }
+
+  function createPanelRightOfFocused() {
+    if (!focusedId) return false;
+    handleSplit(focusedId, "right", newTerminalType);
+    return true;
   }
 
   function findTab(node: LayoutNode, panelId: string, tabId: string): TerminalTab | null {
@@ -850,7 +985,7 @@ export function StudioWorkspace({
               id={child.id}
               minSize={10}
               defaultSize={normalizeSizes(node.sizes || [], node.children.length)[i]}
-              style={{ position: "relative", overflow: "hidden", minWidth: 0, minHeight: 0 }}
+              style={{ position: "relative", overflow: "visible", minWidth: 0, minHeight: 0, zIndex: child.type === "panel" && child.focus ? 2 : 1 }}
             >
               {renderNode(child)}
             </Panel>
@@ -873,6 +1008,7 @@ export function StudioWorkspace({
         fontFamily: "var(--font-sans)",
       }}
     >
+      {!navHidden && (
       <header className="shrink-0 h-11 bg-white/95 border-b border-slate-200/70 flex items-center justify-between px-4 z-50 shadow-sm dark:bg-[#161d28]/95 dark:border-slate-800/80 transition-colors duration-150">
         <div className="flex min-w-0 items-center gap-3">
           <div className="h-6 w-6 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-500/25 flex-shrink-0">
@@ -931,6 +1067,18 @@ export function StudioWorkspace({
           </div>
 
           <div className="h-4 w-px bg-slate-200 dark:bg-slate-800 mr-1" />
+
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setNavHidden(true);
+            }}
+            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 dark:hover:bg-slate-800 dark:text-slate-400 dark:hover:text-slate-100 transition-colors cursor-pointer"
+            title="隐藏顶部栏"
+          >
+            <ChevronUp className="h-4 w-4" />
+          </button>
 
           {/* Theme Dropdown Selector */}
           <div className="relative">
@@ -1004,8 +1152,23 @@ export function StudioWorkspace({
           </button>
         </div>
       </header>
+      )}
 
-      <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-2.5 bg-slate-50 dark:bg-[#0f131c] transition-colors duration-150">
+      {navHidden && (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            setNavHidden(false);
+          }}
+          className="fixed right-3 top-2 z-50 flex h-6 w-7 items-center justify-center rounded border border-border/70 bg-card/95 text-muted-foreground shadow-sm transition-colors hover:text-foreground"
+          title="显示顶部栏"
+        >
+          <ChevronDown className="h-4 w-4" />
+        </button>
+      )}
+
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-1 bg-slate-50 dark:bg-[#0f131c] transition-colors duration-150">
         <div className="relative min-h-0 flex-1">
           {layoutTree ? (
             renderNode(layoutTree)

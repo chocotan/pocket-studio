@@ -68,6 +68,9 @@ func New(cfg Config) *Daemon {
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
+	if _, err := ensurePocketStudioTmuxConfig(); err != nil {
+		log.Printf("ensure tmux config: %v", err)
+	}
 	if err := d.loadProjectStore(); err != nil {
 		log.Printf("load daemon projects: %v", err)
 	}
@@ -2648,6 +2651,11 @@ type runningPTY struct {
 	done       chan struct{}
 }
 
+const (
+	tmuxSocketName   = "pocket-studio"
+	tmuxHistoryLimit = 50000
+)
+
 func (d *Daemon) startTerminalStream(parent context.Context, req protocol.TerminalStreamStart) {
 	key := req.ProjectID + "::" + req.TerminalID
 	d.termMu.Lock()
@@ -2669,16 +2677,20 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 
 	sessionName := "pocket-studio-" + req.ProjectID + "-" + req.TerminalID
 	initialTitle := initialTerminalTitle(req.Command, req.InitialTitle)
-	var cmd *exec.Cmd
-	if req.Command != "" {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, req.Command, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
-	} else {
-		cmd = exec.Command("tmux", "-u", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspace.Path, ";", "set-option", "-g", "status", "off", ";", "set-option", "-g", "set-titles", "on", ";", "set-option", "-g", "default-terminal", "tmux-256color", ";", "set-option", "-ga", "terminal-overrides", ",xterm-256color:RGB,tmux-256color:RGB", ";", "set-window-option", "-g", "allow-rename", "on", ";", "set-window-option", "-g", "automatic-rename", "off")
-	}
-	cmd.Env = terminalEnv()
-
-	ptyFile, err := pty.Start(cmd)
+	cmd, err := tmuxNewSessionCommand(sessionName, initialTitle, workspace.Path, req.Command)
 	if err != nil {
+		log.Printf("daemon failed to prepare tmux config: %v. falling back to user shell.", err)
+		cmd = nil
+	}
+	if cmd != nil {
+		cmd.Env = terminalEnv()
+	}
+
+	var ptyFile *os.File
+	if cmd != nil {
+		ptyFile, err = pty.Start(cmd)
+	}
+	if cmd == nil || err != nil {
 		log.Printf("daemon failed to start tmux: %v. falling back to user shell.", err)
 		if req.Command != "" {
 			cmd = exec.Command(userShell(), "-lc", req.Command)
@@ -2803,7 +2815,7 @@ func (d *Daemon) watchTerminalTitle(ctx context.Context, projectID string, termi
 }
 
 func tmuxTerminalInfo(sessionName string) (string, string) {
-	cmd := exec.Command("tmux", "display-message", "-p", "-t", sessionName, "#{window_name}\t#{pane_current_command}")
+	cmd := tmuxCommand("display-message", "-p", "-t", sessionName, "#{window_name}\t#{pane_current_command}")
 	raw, err := cmd.Output()
 	if err != nil {
 		return "", ""
@@ -2821,7 +2833,7 @@ func tmuxTerminalInfo(sessionName string) (string, string) {
 }
 
 func tmuxCapturePane(sessionName string) []byte {
-	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", sessionName)
+	cmd := tmuxCommand("capture-pane", "-p", "-e", "-J", "-S", "-"+strconv.Itoa(tmuxHistoryLimit), "-t", sessionName)
 	raw, err := cmd.Output()
 	if err != nil {
 		return nil
@@ -2832,18 +2844,103 @@ func tmuxCapturePane(sessionName string) []byte {
 	return append(raw, '\r')
 }
 
+func tmuxNewSessionCommand(sessionName string, initialTitle string, workspacePath string, command string) (*exec.Cmd, error) {
+	configPath, err := ensurePocketStudioTmuxConfig()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"-u", "-L", tmuxSocketName, "-f", configPath, "start-server", ";", "source-file", configPath, ";", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspacePath}
+	if command != "" {
+		args = append(args, command)
+	}
+	return exec.Command("tmux", args...), nil
+}
+
+func tmuxCommand(args ...string) *exec.Cmd {
+	fullArgs := append([]string{"-L", tmuxSocketName}, args...)
+	return exec.Command("tmux", fullArgs...)
+}
+
+func ensurePocketStudioTmuxConfig() (string, error) {
+	configPath := filepath.Join(daemonConfigDir(), "tmux.conf")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return "", err
+	}
+	content := pocketStudioTmuxConfig(userShell())
+	if existing, err := os.ReadFile(configPath); err == nil && string(existing) == content {
+		return configPath, nil
+	}
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		return "", err
+	}
+	return configPath, nil
+}
+
+func pocketStudioTmuxConfig(shell string) string {
+	var b strings.Builder
+	if shell != "" {
+		fmt.Fprintf(&b, "set-option -g default-shell %q\n", shell)
+	}
+	b.WriteString(`set-option -g status off
+set-option -g set-titles on
+set-option -g default-terminal "tmux-256color"
+set-option -g terminal-overrides ",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB"
+set-option -ga terminal-features ",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB"
+set-option -g history-limit 50000
+set-option -g mouse on
+set-option -g prefix C-a
+unbind-key C-b
+bind-key C-a send-prefix
+set-environment -gu NO_COLOR
+set-environment -g COLORTERM truecolor
+set-environment -g CLICOLOR 1
+set-environment -g CLICOLOR_FORCE 1
+set-environment -g FORCE_COLOR 1
+set-window-option -g allow-rename on
+set-window-option -g automatic-rename off
+set-window-option -g mode-keys vi
+bind-key v copy-mode
+bind-key -T copy-mode-vi v send-keys -X begin-selection
+bind-key -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "sh -c 'if command -v wl-copy >/dev/null 2>&1; then wl-copy; elif command -v xclip >/dev/null 2>&1; then xclip -selection clipboard; elif command -v xsel >/dev/null 2>&1; then xsel --clipboard --input; elif command -v pbcopy >/dev/null 2>&1; then pbcopy; else cat >/dev/null; fi'"
+bind-key -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel "sh -c 'if command -v wl-copy >/dev/null 2>&1; then wl-copy; elif command -v xclip >/dev/null 2>&1; then xclip -selection clipboard; elif command -v xsel >/dev/null 2>&1; then xsel --clipboard --input; elif command -v pbcopy >/dev/null 2>&1; then pbcopy; else cat >/dev/null; fi'"
+bind-key -T copy-mode-vi Escape send-keys -X cancel
+`)
+	return b.String()
+}
+
 func terminalEnv() []string {
 	shell := userShell()
-	return append(os.Environ(),
+	env := make([]string, 0, len(os.Environ())+8)
+	for _, item := range os.Environ() {
+		key, _, ok := strings.Cut(item, "=")
+		if !ok {
+			env = append(env, item)
+			continue
+		}
+		switch key {
+		case "NO_COLOR", "TERM", "COLORTERM", "CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR", "SHELL":
+			continue
+		default:
+			env = append(env, item)
+		}
+	}
+	return append(env,
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"TERM_PROGRAM=PocketStudio",
+		"CLICOLOR=1",
+		"CLICOLOR_FORCE=1",
 		"FORCE_COLOR=1",
 		"SHELL="+shell,
 	)
 }
 
 func userShell() string {
+	if runtime.GOOS != "windows" {
+		if zsh, err := exec.LookPath("zsh"); err == nil && zsh != "" {
+			return zsh
+		}
+	}
 	if shell := strings.TrimSpace(os.Getenv("SHELL")); shell != "" {
 		return shell
 	}
@@ -2869,7 +2966,7 @@ func resizeTmuxSession(sessionName string, cols uint16, rows uint16) {
 	if sessionName == "" || cols == 0 || rows == 0 {
 		return
 	}
-	_ = exec.Command("tmux", "resize-window", "-t", sessionName, "-x", strconv.Itoa(int(cols)), "-y", strconv.Itoa(int(rows))).Run()
+	_ = tmuxCommand("resize-window", "-t", sessionName, "-x", strconv.Itoa(int(cols)), "-y", strconv.Itoa(int(rows))).Run()
 }
 
 func initialTerminalTitle(command string, fallback string) string {

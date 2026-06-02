@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Settings,
   TerminalSquare,
+  Keyboard,
 } from "lucide-react";
 import type { Device } from "../../lib/types";
 import { clearClientConfig, loadClientConfig, postJSON, saveClientConfig, type ClientConfig } from "../../lib/api";
@@ -32,6 +33,7 @@ import {
 } from "@/components/ui/dialog";
 import { ZoomSelect } from "./zoom-select";
 import type { PageZoom } from "@/lib/zoom";
+import { ShortcutSettingsContent } from "./studio-settings";
 
 export interface Project {
   id: string;
@@ -101,6 +103,7 @@ export function StudioDashboard({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [shortcutSettingsOpen, setShortcutSettingsOpen] = useState(false);
   const [serverURL, setServerURL] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [settingsError, setSettingsError] = useState("");
@@ -337,6 +340,14 @@ export function StudioDashboard({
             title="刷新设备和项目"
           >
             <RefreshCw className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setShortcutSettingsOpen(true)}
+            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            title="快捷键设置"
+          >
+            <Keyboard className="h-4 w-4" />
           </button>
           <button
             type="button"
@@ -692,6 +703,20 @@ export function StudioDashboard({
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={shortcutSettingsOpen} onOpenChange={setShortcutSettingsOpen}>
+        <DialogContent className="max-w-3xl p-0 overflow-hidden border-slate-200/80 shadow-2xl rounded-2xl animate-scale-in">
+          <DialogHeader className="px-6 py-4 bg-slate-50 border-b border-slate-100">
+            <DialogTitle className="text-sm font-bold text-slate-800 flex items-center gap-2">
+              <div className="h-6.5 w-6.5 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center">
+                <Keyboard className="h-3.5 w-3.5 text-indigo-600" />
+              </div>
+              快捷键
+            </DialogTitle>
+          </DialogHeader>
+          <ShortcutSettingsContent />
         </DialogContent>
       </Dialog>
 

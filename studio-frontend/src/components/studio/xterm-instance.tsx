@@ -83,10 +83,10 @@ export function getXtermTheme(theme: StudioTheme) {
     };
   } else if (theme === "claude") {
     return {
-      background:          "#fffdf8",
+      background:          "#fbf4e8",
       foreground:          "#2b2118",
       cursor:              "#b66a2c",
-      cursorAccent:        "#fffdf8",
+      cursorAccent:        "#fbf4e8",
       selectionBackground: "rgba(182, 106, 44, 0.20)",
       selectionForeground: "#2b2118",
       black:               "#2b2118",
@@ -96,7 +96,7 @@ export function getXtermTheme(theme: StudioTheme) {
       blue:                "#2f5f9f",
       magenta:             "#8b4a7a",
       cyan:                "#2f7a7a",
-      white:               "#efe6d8",
+      white:               "#eadcc9",
       brightBlack:         "#7a6b5c",
       brightRed:           "#d0442e",
       brightGreen:         "#3d9b63",
@@ -104,7 +104,7 @@ export function getXtermTheme(theme: StudioTheme) {
       brightBlue:          "#3d74bd",
       brightMagenta:       "#a95d95",
       brightCyan:          "#3d9592",
-      brightWhite:         "#fffaf0",
+      brightWhite:         "#fff7ed",
     };
   } else {
     // Light
@@ -173,6 +173,7 @@ export function XtermInstance({
   const receivedFirstFrameRef = useRef(false);
   const resizeDebounceTimerRef = useRef<number | null>(null);
   const terminalReadyRef = useRef(false);
+  const isActiveRef = useRef(isActive);
   const incomingBuf = useRef<Array<string | Uint8Array>>([]);
   // Buffer keystrokes that arrive before WS is OPEN
   const inputBuf    = useRef<string[]>([]);
@@ -180,6 +181,10 @@ export function XtermInstance({
   useEffect(() => {
     onTitleChangeRef.current = onTitleChange;
   }, [onTitleChange]);
+
+  useEffect(() => {
+    isActiveRef.current = isActive;
+  }, [isActive]);
 
   function sendResizeNow(force = false) {
     const ws = wsRef.current;
@@ -295,6 +300,7 @@ export function XtermInstance({
     let connectFrame: number | null = null;
     let cancelInitialFit: (() => void) | null = null;
     let cancelFontFit: (() => void) | null = null;
+    let cancelCopyPasteShortcut: (() => void) | null = null;
     const postOpenResizeTimers: number[] = [];
 
     let initialized = false;
@@ -315,7 +321,7 @@ export function XtermInstance({
         fontSize:      12,
         fontFamily:    "JetBrains Mono, Menlo, Monaco, Consolas, monospace",
         lineHeight:    1.2,
-        scrollback:    5000,
+        scrollback:    50000,
         scrollSensitivity: 1,
         scrollOnUserInput: true,
         allowProposedApi: true,
@@ -336,6 +342,7 @@ export function XtermInstance({
 
       term.attachCustomWheelEventHandler((event) => {
         if (event.ctrlKey) return true;
+        if (term!.modes.mouseTrackingMode !== "none") return true;
         const rawDelta = event.deltaMode === WheelEvent.DOM_DELTA_PIXEL
           ? event.deltaY / 18
           : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
@@ -351,10 +358,38 @@ export function XtermInstance({
       /* Mount terminal into the container div */
       term.open(container);
 
+      const handleCopyPasteShortcut = (event: KeyboardEvent) => {
+        if (!isActiveRef.current) return;
+        if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
+        const key = event.key.toLowerCase();
+        if (key === "c") {
+          const selection = term?.getSelection();
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+          if (selection) void navigator.clipboard?.writeText(selection);
+        } else if (key === "v") {
+          event.preventDefault();
+          event.stopPropagation();
+          event.stopImmediatePropagation();
+          void navigator.clipboard?.readText().then((text) => {
+            if (text) term?.paste(text);
+          }).catch(() => {});
+        }
+      };
+      window.addEventListener("keydown", handleCopyPasteShortcut, { capture: true });
+      container.addEventListener("keydown", handleCopyPasteShortcut, { capture: true });
+      cancelCopyPasteShortcut = () => {
+        window.removeEventListener("keydown", handleCopyPasteShortcut, { capture: true });
+        container.removeEventListener("keydown", handleCopyPasteShortcut, { capture: true });
+      };
+
       // Force instant initial fit calculation before websocket runs
       try {
         fitAddon.fit();
-      } catch (e) {}
+      } catch {
+        // The resize observer will retry once fonts/layout are ready.
+      }
       window.requestAnimationFrame(() => {
         window.requestAnimationFrame(() => {
           if (disposedRef.current) return;
@@ -371,7 +406,9 @@ export function XtermInstance({
         if (!disposedRef.current && fitAddon) {
           try {
             fitAddon.fit();
-          } catch (e) {}
+          } catch {
+            // Later resize events will retry if font metrics are not ready.
+          }
         }
       });
 
@@ -494,6 +531,7 @@ export function XtermInstance({
     /* ── 5. Cleanup ── */
     return () => {
       disposedRef.current = true;
+      if (cancelCopyPasteShortcut) cancelCopyPasteShortcut();
       if (cancelInitialFit) cancelInitialFit();
       if (cancelFontFit) cancelFontFit();
       window.removeEventListener("resize", handleWinResize);
