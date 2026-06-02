@@ -87,8 +87,16 @@ function TerminalPanelViewComponent({
     { dir: "bottom" as const, Icon: SplitBottomIcon, label: "向下分割" },
   ];
   const focusClasses = isFocused
-    ? "border-2 border-indigo-500/90 dark:border-indigo-400/90 [--studio-panel-shadow:none]"
-    : "border-2 border-transparent hover:border-border/70 shadow-sm";
+    ? "border-2 [--studio-panel-shadow:none]"
+    : "border-2 shadow-sm";
+  const panelStyle: React.CSSProperties = {
+    position: "absolute",
+    inset: 0,
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    zIndex: isFocused ? 2 : 1,
+  };
   const accentClasses = {
     indigo: "bg-indigo-100 text-indigo-600 ring-1 ring-indigo-200/70 dark:bg-indigo-400/18 dark:text-indigo-200 dark:ring-indigo-300/20",
     violet: "bg-violet-100 text-violet-600 ring-1 ring-violet-200/70 dark:bg-violet-400/18 dark:text-violet-200 dark:ring-violet-300/20",
@@ -214,18 +222,12 @@ function TerminalPanelViewComponent({
     <div
       data-studio-panel="true"
       data-panel-id={panel.id}
+      data-focused={isFocused ? "true" : "false"}
       onClick={() => onFocus(panel.id)}
       onPointerEnter={() => {
         if (!isFocused) onFocus(panel.id);
       }}
-      style={{
-        position: "absolute",
-        inset: 0,
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-        zIndex: isFocused ? 2 : 1,
-      }}
+      style={panelStyle}
       className={`studio-panel box-border bg-card text-card-foreground transition-[border-color,box-shadow] duration-150 ${focusClasses}`}
     >
       <div

@@ -455,6 +455,12 @@
   --radius-2xl: 8px;
 }
 
+.studio-square {
+  --studio-tabbar-background: color-mix(in oklch, var(--muted) 82%, var(--background));
+  --studio-panel-background: var(--background);
+  --studio-panel-border-color: var(--studio-tabbar-background);
+}
+
 .studio-square .rounded-sm,
 .studio-square .rounded {
   border-radius: 4px !important;
@@ -492,8 +498,18 @@
 }
 
 .studio-square .studio-panel {
+  background-color: var(--studio-panel-background) !important;
   border-radius: 0 !important;
+  border-color: var(--studio-panel-border-color, var(--studio-panel-background)) !important;
   box-shadow: var(--studio-panel-shadow, 0 1px 3px rgb(15 23 42 / 0.06)) !important;
+}
+
+.studio-square .studio-panel[data-focused="false"] {
+  --studio-panel-border-color: var(--studio-tabbar-background);
+}
+
+.studio-square .studio-panel[data-focused="true"] {
+  --studio-panel-border-color: var(--primary);
 }
 
 .studio-square .studio-tabbar::after {
@@ -501,7 +517,7 @@
 }
 
 .studio-square .studio-tabbar {
-  background: color-mix(in oklch, var(--muted) 82%, var(--background)) !important;
+  background: var(--studio-tabbar-background) !important;
 }
 
 .studio-square .studio-tab {
@@ -608,6 +624,7 @@
 }
 
 .studio-square .studio-terminal-surface {
+  background-color: var(--studio-panel-background) !important;
   border-top: 0 !important;
 }
 

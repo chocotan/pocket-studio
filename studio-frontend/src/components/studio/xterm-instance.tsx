@@ -137,7 +137,9 @@ export function getXtermTheme(theme: StudioTheme) {
 
 function resolvePanelBackground(element: HTMLElement | null, fallback: string) {
   if (!element) return fallback;
-  const value = getComputedStyle(element).getPropertyValue("--card").trim();
+  const styles = getComputedStyle(element);
+  const value = styles.getPropertyValue("--studio-panel-background").trim()
+    || styles.getPropertyValue("--card").trim();
   return value || fallback;
 }
 
@@ -622,7 +624,7 @@ export function XtermInstance({
   return (
     <div
       ref={containerRef}
-      className="absolute inset-0 box-border overflow-hidden px-2 py-1.5"
+      className="absolute inset-0 box-border overflow-hidden px-0.5 py-0.5"
     />
   );
 }
