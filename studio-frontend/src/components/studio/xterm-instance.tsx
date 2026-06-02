@@ -538,7 +538,11 @@ export function XtermInstance({
   /* Re-fit and force PTY size sync when this pane becomes the focused/active one */
   useEffect(() => {
     if (!isActive) return;
+    const focusFrame = window.requestAnimationFrame(() => {
+      xtermRef.current?.focus();
+    });
     const timer1 = window.setTimeout(() => {
+      xtermRef.current?.focus();
       scheduleFitBurst();
       scheduleResizeAfterFit();
     }, 150);
@@ -549,6 +553,7 @@ export function XtermInstance({
     const cleanup = scheduleFitBurst();
     return () => {
       cleanup();
+      window.cancelAnimationFrame(focusFrame);
       window.clearTimeout(timer1);
       window.clearTimeout(timer2);
     };
@@ -579,8 +584,7 @@ export function XtermInstance({
   return (
     <div
       ref={containerRef}
-      className="absolute inset-0"
-      style={{ padding: "6px 8px" }}
+      className="absolute inset-0 box-border overflow-hidden px-2 py-1.5"
     />
   );
 }

@@ -17,6 +17,7 @@ import {
   terminalTypeFromCommand,
   type SplitDirection,
   type TerminalKind,
+  type TerminalTitleState,
   type TerminalTitleSource,
   type StudioTheme,
 } from "./terminal-types";
@@ -42,14 +43,10 @@ interface TerminalPanelViewProps {
   onTabDragEnd: (fromPanelId: string, tabId: string, clientX: number, clientY: number, fallbackIndex: number) => void;
   onTabDragCancel: () => void;
   onClosePanel: (id: string) => void;
+  onTitleChange: (id: string, title: string, command?: string, source?: TerminalTitleSource) => void;
+  terminalTitles: Record<string, TerminalTitleState>;
   layoutVersion: number;
   theme?: StudioTheme;
-}
-
-interface TerminalTitleState {
-  title: string;
-  command: string;
-  source: TerminalTitleSource;
 }
 
 function TerminalPanelViewComponent({
@@ -72,6 +69,8 @@ function TerminalPanelViewComponent({
   onTabDragEnd,
   onTabDragCancel,
   onClosePanel,
+  onTitleChange,
+  terminalTitles,
   layoutVersion,
   theme = "light",
 }: TerminalPanelViewProps) {
@@ -80,7 +79,6 @@ function TerminalPanelViewComponent({
   const pointerDragRef = useRef<{ panelId: string; tabId: string; pointerId: number; startX: number; startY: number; dragging: boolean } | null>(null);
   const [scrollState, setScrollState] = useState({ canLeft: false, canRight: false });
   const [dropIndex, setDropIndex] = useState<number | null>(null);
-  const [terminalTitles, setTerminalTitles] = useState<Record<string, TerminalTitleState>>({});
   const isFocused = panel.focus;
   const splitActions = [
     { dir: "left" as const, Icon: SplitLeftIcon, label: "向左分割" },
@@ -98,6 +96,7 @@ function TerminalPanelViewComponent({
     amber: "bg-amber-100 text-amber-700 ring-1 ring-amber-200/70 dark:bg-amber-400/16 dark:text-amber-200 dark:ring-amber-300/20",
     cyan: "bg-cyan-100 text-cyan-700 ring-1 ring-cyan-200/70 dark:bg-cyan-400/16 dark:text-cyan-200 dark:ring-cyan-300/20",
     rose: "bg-rose-100 text-rose-600 ring-1 ring-rose-200/70 dark:bg-rose-400/16 dark:text-rose-200 dark:ring-rose-300/20",
+    lime: "bg-lime-100 text-lime-700 ring-1 ring-lime-200/70 dark:bg-lime-400/16 dark:text-lime-200 dark:ring-lime-300/20",
   };
   const addMenuLeft = Math.min(panel.tabs.length * 112 + 28, 520);
 
@@ -188,26 +187,6 @@ function TerminalPanelViewComponent({
     }
   }
 
-  function handleTerminalTitle(tabId: string, title: string, command?: string, source: TerminalTitleSource = "tmux") {
-    setTerminalTitles((prev) => {
-      const tab = panel.tabs.find((item) => item.id === tabId);
-      if (!tab || tab.kind !== "terminal") return prev;
-      const previous = prev[tabId];
-      const nextCommand = command || previous?.command || tab.activeCommand || "";
-      const cleanedTitle = cleanTerminalTitle(title, terminalType(tab.termType).title, tab.termType);
-      if (!cleanedTitle) return prev;
-      if (previous?.title === cleanedTitle && previous.command === nextCommand && previous.source === source) return prev;
-      return {
-        ...prev,
-        [tabId]: {
-          title: cleanedTitle,
-          command: nextCommand,
-          source,
-        },
-      };
-    });
-  }
-
   useEffect(() => {
     updateScrollState();
     const scroller = tabScrollerRef.current;
@@ -227,29 +206,18 @@ function TerminalPanelViewComponent({
     updateScrollState();
   }, [panel.activeTabId, panel.tabs.length]);
 
-  useEffect(() => {
-    const tabIds = new Set(panel.tabs.map((tab) => tab.id));
-    setTerminalTitles((prev) => {
-      let changed = false;
-      const next: Record<string, TerminalTitleState> = {};
-      Object.entries(prev).forEach(([id, value]) => {
-        if (tabIds.has(id)) {
-          next[id] = value;
-        } else {
-          changed = true;
-        }
-      });
-      return changed ? next : prev;
-    });
-  }, [panel.tabs]);
-
   const visibleDropIndex = dragTarget
     ? dragTarget.panelId === panel.id ? dragTarget.insertIndex : null
     : dropIndex;
 
   return (
     <div
+      data-studio-panel="true"
+      data-panel-id={panel.id}
       onClick={() => onFocus(panel.id)}
+      onPointerEnter={() => {
+        if (!isFocused) onFocus(panel.id);
+      }}
       style={{
         position: "absolute",
         inset: 0,
@@ -551,7 +519,7 @@ function TerminalPanelViewComponent({
                     isActive={isFocused && active}
                     layoutVersion={layoutVersion}
                     theme={theme}
-                    onTitleChange={(title, command, source) => handleTerminalTitle(tab.id, title, command, source)}
+                    onTitleChange={(title, command, source) => onTitleChange(tab.id, title, command, source)}
                   />
                 )}
               </div>
@@ -582,16 +550,6 @@ function TerminalTypeMenu({
       style={style}
       onClick={(event) => event.stopPropagation()}
     >
-      <button
-        type="button"
-        onClick={onFileExplorer}
-        className="flex w-full items-center gap-2 border-b border-slate-100 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
-      >
-        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-100 text-sky-700">
-          <FolderTree className="h-3.5 w-3.5" />
-        </span>
-        <span className="truncate">文件</span>
-      </button>
       {TERMINAL_TYPES.map((item) => (
         <button
           key={item.value}
@@ -605,6 +563,16 @@ function TerminalTypeMenu({
           <span className="truncate">{item.label}</span>
         </button>
       ))}
+      <button
+        type="button"
+        onClick={onFileExplorer}
+        className="flex w-full items-center gap-2 border-t border-slate-100 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
+      >
+        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-100 text-sky-700">
+          <FolderTree className="h-3.5 w-3.5" />
+        </span>
+        <span className="truncate">文件</span>
+      </button>
     </div>
   );
 }

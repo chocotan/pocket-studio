@@ -7,6 +7,8 @@ const path = require("node:path");
 
 const MODULES = new Set(["ui", "server", "daemon"]);
 
+configureLinuxWaylandIME();
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: "pocket-studio",
@@ -30,6 +32,19 @@ const daemonRuntime = {
 const appRuntime = {
   localServerURL: "",
 };
+
+function configureLinuxWaylandIME() {
+  if (process.platform !== "linux") return;
+  const runningUnderWayland = process.env.XDG_SESSION_TYPE === "wayland" || Boolean(process.env.WAYLAND_DISPLAY);
+  if (!runningUnderWayland) return;
+  if (!app.commandLine.hasSwitch("enable-wayland-ime")) {
+    app.commandLine.appendSwitch("enable-wayland-ime");
+  }
+  const textInputVersion = process.env.POCKET_STUDIO_WAYLAND_TEXT_INPUT_VERSION || "3";
+  if (!app.commandLine.hasSwitch("wayland-text-input-version")) {
+    app.commandLine.appendSwitch("wayland-text-input-version", textInputVersion);
+  }
+}
 
 function log(...args) {
   const line = `[pocket-studio] ${args.map((arg) => {

@@ -24,9 +24,14 @@ import {
 } from "./studio-layout";
 import { TerminalPanelView } from "./terminal-panel-view";
 import {
+  cleanTerminalTitle,
+  isPlaceholderTerminalTitle,
   makeId,
+  terminalType,
   type SplitDirection,
   type TerminalKind,
+  type TerminalTitleState,
+  type TerminalTitleSource,
 } from "./terminal-types";
 import { getJSON, postJSON } from "@/lib/api";
 import { ZoomSelect } from "./zoom-select";
@@ -74,6 +79,7 @@ export function StudioWorkspace({
   const [layoutVersion, setLayoutVersion] = useState(0);
   const [tabDragTarget, setTabDragTarget] = useState<{ panelId: string; insertIndex: number } | null>(null);
   const [isDraggingTab, setIsDraggingTab] = useState(false);
+  const [terminalTitles, setTerminalTitles] = useState<Record<string, TerminalTitleState>>({});
   const [theme, setTheme] = useState<StudioTheme>(() => {
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
@@ -298,6 +304,7 @@ export function StudioWorkspace({
     setStateLoaded(false);
     setTabDragTarget(null);
     setIsDraggingTab(false);
+    setTerminalTitles({});
 
     const applyState = (stateProject: Project) => {
       const next = initialStudioState(stateProject);
@@ -362,6 +369,22 @@ export function StudioWorkspace({
     }, 250);
     return () => window.clearTimeout(timer);
   }, [layoutTree, focusedId, newTerminalType, projectId, stateLoaded]);
+
+  useEffect(() => {
+    const tabIds = new Set(collectAllTabs(layoutTree).map((tab) => tab.id));
+    setTerminalTitles((prev) => {
+      let changed = false;
+      const next: Record<string, TerminalTitleState> = {};
+      Object.entries(prev).forEach(([id, value]) => {
+        if (tabIds.has(id)) {
+          next[id] = value;
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [layoutTree]);
 
   function performSplit(
     node: LayoutNode,
@@ -670,6 +693,18 @@ export function StudioWorkspace({
       };
     }
 
+    const panels = Array.from(document.querySelectorAll<HTMLElement>("[data-studio-panel='true']"));
+    for (const panel of panels) {
+      const rect = panel.getBoundingClientRect();
+      if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) continue;
+      const panelId = panel.dataset.panelId || fallbackPanelId;
+      const targetPanel = layoutTree ? findPanel(layoutTree, panelId) : null;
+      return {
+        panelId,
+        insertIndex: targetPanel?.tabs.length ?? fallbackIndex,
+      };
+    }
+
     return {
       panelId: fallbackPanelId,
       insertIndex: fallbackIndex,
@@ -688,6 +723,36 @@ export function StudioWorkspace({
     window.setTimeout(() => {
       handleMoveTab(fromPanelId, drop.panelId, tabId, drop.insertIndex);
     }, 0);
+  }
+
+  function handleTerminalTitle(tabId: string, title: string, command?: string, source?: TerminalTitleSource) {
+    setTerminalTitles((prev) => {
+      const tab = collectAllTabs(layoutTree).find((item) => item.id === tabId);
+      if (!tab || tab.kind !== "terminal") return prev;
+      const previous = prev[tabId];
+      const nextCommand = command || previous?.command || tab.activeCommand || "";
+      const cleanedTitle = cleanTerminalTitle(title, terminalType(tab.termType).title, tab.termType);
+      const placeholderTitle = isPlaceholderTerminalTitle(cleanedTitle, nextCommand);
+      const currentSource = previous?.source || tab.titleSource || "initial";
+      const shouldKeepTitle = source === "tmux" && (
+        placeholderTitle ||
+        currentSource === "terminal"
+      );
+      const nextTitle = shouldKeepTitle
+        ? (previous?.title || tab.title)
+        : cleanedTitle;
+      const nextSource = shouldKeepTitle ? currentSource : (source || "tmux");
+      if (!nextTitle) return prev;
+      if (previous?.title === nextTitle && previous.command === nextCommand && previous.source === nextSource) return prev;
+      return {
+        ...prev,
+        [tabId]: {
+          title: nextTitle,
+          command: nextCommand,
+          source: nextSource,
+        },
+      };
+    });
   }
 
   function handleCreateInitialPanel(kind: TerminalKind) {
@@ -743,6 +808,8 @@ export function StudioWorkspace({
             setIsDraggingTab(false);
           }}
           onClosePanel={handleClosePanel}
+          onTitleChange={handleTerminalTitle}
+          terminalTitles={terminalTitles}
           layoutVersion={layoutVersion}
           theme={theme}
         />

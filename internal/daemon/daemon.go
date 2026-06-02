@@ -2888,6 +2888,8 @@ func initialTerminalTitle(command string, fallback string) string {
 		return "Codex"
 	case strings.Contains(command, "opencode"):
 		return "OpenCode"
+	case strings.Contains(command, "kilo"):
+		return "Kilo Code"
 	case command == "pi" || strings.HasPrefix(command, "pi "):
 		return "Pi"
 	case command == "agy" || strings.Contains(command, "antigravity"):

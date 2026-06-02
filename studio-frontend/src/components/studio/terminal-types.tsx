@@ -1,13 +1,18 @@
 import React from "react";
 import { Terminal as TerminalIcon } from "lucide-react";
-import { Antigravity, ClaudeCode, Codex, OpenCode } from "@lobehub/icons/es/icons";
+import { Antigravity, ClaudeCode, Codex, KiloCode, OpenCode } from "@lobehub/icons/es/icons";
 
-export type TerminalKind = "bash" | "claude" | "codex" | "opencode" | "pi" | "agy";
+export type TerminalKind = "bash" | "claude" | "codex" | "opencode" | "kilo" | "pi" | "agy";
 export type SplitDirection = "left" | "right" | "top" | "bottom";
-export type TerminalAccent = "indigo" | "violet" | "emerald" | "amber" | "cyan" | "rose";
+export type TerminalAccent = "indigo" | "violet" | "emerald" | "amber" | "cyan" | "rose" | "lime";
 export type TerminalTitleSource = "initial" | "tmux" | "terminal";
 export type StudioTheme = "light" | "claude" | "dark" | "synthwave" | "onedark";
 
+export interface TerminalTitleState {
+  title: string;
+  command: string;
+  source: TerminalTitleSource;
+}
 
 export interface TerminalTypeDefinition {
   value: TerminalKind;
@@ -23,6 +28,7 @@ export const TERMINAL_TYPES: TerminalTypeDefinition[] = [
   { value: "claude", label: "Claude Code", title: "Claude Code", command: "claude", accent: "violet", logo: <ClaudeCode width={14} height={14} /> },
   { value: "codex", label: "Codex", title: "Codex", command: "codex", accent: "emerald", logo: <Codex width={14} height={14} /> },
   { value: "opencode", label: "OpenCode", title: "OpenCode", command: "opencode", accent: "amber", logo: <OpenCode width={14} height={14} /> },
+  { value: "kilo", label: "Kilo Code", title: "Kilo Code", command: "kilo", accent: "lime", logo: <KiloCode width={14} height={14} /> },
   { value: "pi", label: "Pi", title: "Pi", command: "pi", accent: "cyan", logo: <span className="text-[10px] font-black leading-none">π</span> },
   { value: "agy", label: "Antigravity", title: "Antigravity", command: "agy", accent: "rose", logo: <Antigravity width={14} height={14} /> },
 ];
@@ -37,6 +43,7 @@ export function terminalTypeFromCommand(command: string, fallback: TerminalKind)
   if (normalized.includes("claude")) return "claude";
   if (normalized.includes("codex")) return "codex";
   if (normalized.includes("opencode")) return "opencode";
+  if (normalized.includes("kilo")) return "kilo";
   if (normalized === "pi" || normalized.startsWith("pi-")) return "pi";
   if (normalized.includes("agy") || normalized.includes("antigravity")) return "agy";
   return fallback;
