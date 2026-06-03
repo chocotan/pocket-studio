@@ -162,6 +162,9 @@ func (h *Hub) projectByID(userID string, projectID string) (Project, bool) {
 }
 
 func daemonWorkspaceProjectID(deviceID string, workspace protocol.Workspace) string {
+	if id := strings.TrimSpace(workspace.ID); id != "" {
+		return id
+	}
 	sum := sha1.Sum([]byte(deviceID + "\x00" + workspace.Path))
 	return "ws_" + fmt.Sprintf("%x", sum[:8])
 }

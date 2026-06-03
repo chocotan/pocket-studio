@@ -1,9 +1,13 @@
 package daemon
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"remote-agent/internal/hostinfo"
 	"remote-agent/internal/protocol"
@@ -42,8 +46,12 @@ type ACPXConfig struct {
 }
 
 func NormalizeConfig(cfg Config) (Config, error) {
-	if cfg.Device.ID == "" {
-		return cfg, fmt.Errorf("device.id is required")
+	if strings.TrimSpace(cfg.Device.ID) == "" {
+		device, err := loadOrCreateDeviceConfig(cfg.Device.Name)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.Device = device
 	}
 	cfg.Device.Name = hostinfo.ResolveDeviceName(cfg.Device.Name)
 	if cfg.Server.URL == "" {
@@ -92,7 +100,6 @@ func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
 		Device: DeviceConfig{
-			ID:   "dev_local",
 			Name: hostinfo.DisplayName(),
 		},
 		Server: ServerConfig{
@@ -117,4 +124,56 @@ func DefaultConfig() Config {
 			},
 		},
 	}
+}
+
+func daemonDevicePath() string {
+	return filepath.Join(daemonConfigDir(), "device.json")
+}
+
+func loadOrCreateDeviceConfig(name string) (DeviceConfig, error) {
+	if raw, err := os.ReadFile(daemonDevicePath()); err == nil {
+		var device DeviceConfig
+		if err := json.Unmarshal(raw, &device); err != nil {
+			return DeviceConfig{}, err
+		}
+		if strings.TrimSpace(device.ID) != "" {
+			if strings.TrimSpace(name) != "" {
+				device.Name = name
+			}
+			return device, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return DeviceConfig{}, err
+	}
+
+	device := DeviceConfig{
+		ID:   randomDeviceID(),
+		Name: name,
+	}
+	if strings.TrimSpace(device.Name) == "" {
+		device.Name = hostinfo.DisplayName()
+	}
+	if err := os.MkdirAll(filepath.Dir(daemonDevicePath()), 0o755); err != nil {
+		return DeviceConfig{}, err
+	}
+	raw, err := json.MarshalIndent(device, "", "  ")
+	if err != nil {
+		return DeviceConfig{}, err
+	}
+	if err := os.WriteFile(daemonDevicePath(), append(raw, '\n'), 0o600); err != nil {
+		return DeviceConfig{}, err
+	}
+	return device, nil
+}
+
+func randomDeviceID() string {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		sum := hex.EncodeToString([]byte(hostinfo.DisplayName() + "-" + fmt.Sprint(os.Getpid())))
+		if len(sum) > 16 {
+			sum = sum[:16]
+		}
+		return "dev_" + sum
+	}
+	return "dev_" + hex.EncodeToString(buf[:])
 }

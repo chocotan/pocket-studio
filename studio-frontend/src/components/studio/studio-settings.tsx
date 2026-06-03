@@ -116,7 +116,7 @@ export function ShortcutSettingsContent() {
         {SHORTCUT_ACTIONS.map((action) => (
           <div
             key={action}
-            className="grid grid-cols-[minmax(150px,1fr)_minmax(180px,260px)_auto] items-center gap-3 border border-slate-200/75 bg-slate-50 px-3 py-2"
+            className="grid grid-cols-[minmax(8rem,1fr)_minmax(12rem,17rem)_5rem] items-center gap-3 border border-slate-200/75 bg-slate-50 px-3 py-2 max-sm:grid-cols-1 max-sm:items-stretch"
           >
             <Label className="text-[11px] font-bold text-slate-700">
               {SHORTCUT_LABELS[action]}
@@ -132,7 +132,7 @@ export function ShortcutSettingsContent() {
               variant={recordingAction === action ? "default" : "outline"}
               size="sm"
               onClick={() => setRecordingAction(action)}
-              className="h-8 min-w-18 text-xs"
+              className="h-8 w-20 justify-center text-xs max-sm:w-full"
             >
               {recordingAction === action ? "录制中" : "录制"}
             </Button>
@@ -140,13 +140,13 @@ export function ShortcutSettingsContent() {
         ))}
       </div>
 
-      <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-100 pt-4">
+      <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-100 pt-4 max-sm:flex-col max-sm:items-stretch">
         <p className="text-[11px] leading-relaxed text-slate-500">
           {recordingAction
             ? recordedShortcut ? `已捕获 ${recordedShortcut}，松开所有按键后结束录制。` : "按下完整组合键，Esc 取消。"
             : saved ? "已保存到本机浏览器。" : "格式示例：Ctrl+H、Ctrl+J、Ctrl+K、Ctrl+L、Ctrl+N。"}
         </p>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 items-center justify-end gap-2 max-sm:justify-stretch">
           <Button type="button" variant="outline" size="sm" onClick={handleReset} className="h-8 text-xs">
             <RotateCcw className="h-3.5 w-3.5" />
             默认

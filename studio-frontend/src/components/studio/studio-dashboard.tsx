@@ -707,7 +707,7 @@ export function StudioDashboard({
       </Dialog>
 
       <Dialog open={shortcutSettingsOpen} onOpenChange={setShortcutSettingsOpen}>
-        <DialogContent className="max-w-3xl p-0 overflow-hidden border-slate-200/80 shadow-2xl rounded-2xl animate-scale-in">
+        <DialogContent className="w-[min(52rem,calc(100dvw-2rem))] max-w-none p-0 overflow-hidden border-slate-200/80 shadow-2xl rounded-2xl animate-scale-in">
           <DialogHeader className="px-6 py-4 bg-slate-50 border-b border-slate-100">
             <DialogTitle className="text-sm font-bold text-slate-800 flex items-center gap-2">
               <div className="h-6.5 w-6.5 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center">

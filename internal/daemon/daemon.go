@@ -194,6 +194,10 @@ func daemonProjectStatesPath() string {
 	return filepath.Join(daemonConfigDir(), "project-states.json")
 }
 
+func daemonWorkspaceProjectsPath() string {
+	return filepath.Join(daemonConfigDir(), "workspace-projects.json")
+}
+
 func (d *Daemon) loadProjectStore() error {
 	raw, err := os.ReadFile(daemonProjectsPath())
 	if err != nil {
@@ -271,6 +275,56 @@ func (d *Daemon) loadProjectStates() error {
 	return nil
 }
 
+func loadWorkspaceProjectIDs() (map[string]string, error) {
+	raw, err := os.ReadFile(daemonWorkspaceProjectsPath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return map[string]string{}, nil
+		}
+		return nil, err
+	}
+	var ids map[string]string
+	if err := json.Unmarshal(raw, &ids); err != nil {
+		return nil, err
+	}
+	if ids == nil {
+		ids = map[string]string{}
+	}
+	return ids, nil
+}
+
+func saveWorkspaceProjectIDs(ids map[string]string) error {
+	if err := os.MkdirAll(daemonConfigDir(), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(ids, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(daemonWorkspaceProjectsPath(), append(raw, '\n'), 0o600)
+}
+
+func canonicalProjectIDForWorkspace(workspacePath string) (string, error) {
+	real, err := filepath.EvalSymlinks(workspacePath)
+	if err != nil {
+		real = workspacePath
+	}
+	real = filepath.Clean(real)
+	ids, err := loadWorkspaceProjectIDs()
+	if err != nil {
+		return "", err
+	}
+	if id := strings.TrimSpace(ids[real]); id != "" {
+		return id, nil
+	}
+	id := protocol.NewID("ws")
+	ids[real] = id
+	if err := saveWorkspaceProjectIDs(ids); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 func (d *Daemon) saveProjectStatesLocked() error {
 	if err := os.MkdirAll(daemonConfigDir(), 0o755); err != nil {
 		return err
@@ -291,6 +345,7 @@ func (d *Daemon) workspacesSnapshot() []protocol.Workspace {
 		if workspace.Path == "" {
 			continue
 		}
+		workspace.ID = d.projectIDForWorkspacePath(workspace.Path)
 		workspaces = append(workspaces, workspace)
 		seen[workspace.Path] = true
 	}
@@ -299,7 +354,7 @@ func (d *Daemon) workspacesSnapshot() []protocol.Workspace {
 			continue
 		}
 		workspaces = append(workspaces, protocol.Workspace{
-			ID:   workspaceIDForPath(project.WorkspacePath),
+			ID:   d.projectIDForWorkspacePath(project.WorkspacePath),
 			Name: project.Name,
 			Path: project.WorkspacePath,
 		})
@@ -1713,12 +1768,8 @@ func (d *Daemon) resolveWorkspacePath(workspaceID string, requested string) (pro
 	if err != nil {
 		return protocol.Workspace{}, err
 	}
-	id := workspaceID
-	if id == "" {
-		id = workspaceIDForPath(real)
-	}
 	return protocol.Workspace{
-		ID:   id,
+		ID:   d.projectIDForWorkspacePath(real),
 		Name: filepath.Base(real),
 		Path: real,
 	}, nil
@@ -1853,7 +1904,7 @@ func (d *Daemon) createProject(request protocol.ProjectCreateRequest) {
 		return
 	}
 	project := protocol.Project{
-		ID:            projectIDForWorkspace(d.cfg.Device.ID, workspace.Path),
+		ID:            d.projectIDForWorkspacePath(workspace.Path),
 		Name:          name,
 		DeviceID:      d.cfg.Device.ID,
 		WorkspacePath: workspace.Path,
@@ -1875,13 +1926,26 @@ func (d *Daemon) createProject(request protocol.ProjectCreateRequest) {
 func (d *Daemon) getProjectState(request protocol.ProjectStateGetRequest) {
 	projectID := request.ProjectID
 	if projectID == "" && request.WorkspacePath != "" {
-		projectID = projectIDForWorkspace(d.cfg.Device.ID, request.WorkspacePath)
+		projectID = d.projectIDForWorkspacePath(request.WorkspacePath)
+	}
+	if err := d.loadProjectStates(); err != nil {
+		log.Printf("reload project states: %v", err)
 	}
 	d.mu.Lock()
 	state := append(json.RawMessage(nil), d.projectStates[projectID]...)
 	if len(state) == 0 {
 		if project, ok := d.projects[projectID]; ok && len(project.StudioState) > 0 {
 			state = append(json.RawMessage(nil), project.StudioState...)
+		}
+	}
+	if len(state) == 0 && request.WorkspacePath != "" {
+		legacyID := legacyProjectIDForWorkspace(d.cfg.Device.ID, request.WorkspacePath)
+		if legacyID != projectID {
+			if stored := d.projectStates[legacyID]; len(stored) > 0 {
+				state = append(json.RawMessage(nil), stored...)
+				d.projectStates[projectID] = append(json.RawMessage(nil), stored...)
+				_ = d.saveProjectStatesLocked()
+			}
 		}
 	}
 	if len(state) == 0 && request.WorkspacePath != "" {
@@ -1906,7 +1970,7 @@ func (d *Daemon) getProjectState(request protocol.ProjectStateGetRequest) {
 func (d *Daemon) setProjectState(request protocol.ProjectStateSetRequest) {
 	projectID := request.ProjectID
 	if projectID == "" && request.WorkspacePath != "" {
-		projectID = projectIDForWorkspace(d.cfg.Device.ID, request.WorkspacePath)
+		projectID = d.projectIDForWorkspacePath(request.WorkspacePath)
 	}
 	if projectID == "" {
 		d.sendProjectError(request.RequestID, "project_id is required")
@@ -2009,6 +2073,15 @@ func (d *Daemon) sendTerminalError(requestID string, command string, message str
 	})
 }
 
+func (d *Daemon) projectIDForWorkspacePath(workspacePath string) string {
+	id, err := canonicalProjectIDForWorkspace(workspacePath)
+	if err != nil {
+		log.Printf("canonical project id for %s: %v", workspacePath, err)
+		return legacyProjectIDForWorkspace(d.cfg.Device.ID, workspacePath)
+	}
+	return id
+}
+
 func workspaceIDForPath(path string) string {
 	clean := strings.Trim(filepath.ToSlash(filepath.Clean(path)), "/")
 	if clean == "" {
@@ -2021,7 +2094,7 @@ func workspaceIDForPath(path string) string {
 	return id
 }
 
-func projectIDForWorkspace(deviceID string, workspacePath string) string {
+func legacyProjectIDForWorkspace(deviceID string, workspacePath string) string {
 	sum := sha1.Sum([]byte(deviceID + "\x00" + workspacePath))
 	return "ws_" + fmt.Sprintf("%x", sum[:8])
 }
@@ -2644,11 +2717,12 @@ func mustJSON(value any) json.RawMessage {
 }
 
 type runningPTY struct {
-	projectID  string
-	terminalID string
-	ptyFile    *os.File
-	cmd        *exec.Cmd
-	done       chan struct{}
+	projectID   string
+	terminalID  string
+	sessionName string
+	ptyFile     *os.File
+	cmd         *exec.Cmd
+	done        chan struct{}
 }
 
 const (
@@ -2657,25 +2731,23 @@ const (
 )
 
 func (d *Daemon) startTerminalStream(parent context.Context, req protocol.TerminalStreamStart) {
-	key := req.ProjectID + "::" + req.TerminalID
-	d.termMu.Lock()
-	if rPty, exists := d.terminalPTYs[key]; exists {
-		d.termMu.Unlock()
-		sessionName := "pocket-studio-" + req.ProjectID + "-" + req.TerminalID
-		applyTerminalSize(rPty.ptyFile, req.Cols, req.Rows)
-		resizeTmuxSession(sessionName, req.Cols, req.Rows)
-		d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
-		return
-	}
-
 	workspace, err := d.resolveWorkspacePath("", req.WorkspacePath)
 	if err != nil {
-		d.termMu.Unlock()
 		log.Printf("terminal stream failed to resolve workspace path: %v", err)
 		return
 	}
 
-	sessionName := "pocket-studio-" + req.ProjectID + "-" + req.TerminalID
+	key := req.ProjectID + "::" + req.TerminalID
+	sessionName := terminalSessionName(workspace.Path, req.TerminalID)
+	d.termMu.Lock()
+	if rPty, exists := d.terminalPTYs[key]; exists {
+		d.termMu.Unlock()
+		applyTerminalSize(rPty.ptyFile, req.Cols, req.Rows)
+		resizeTmuxSession(rPty.sessionName, req.Cols, req.Rows)
+		d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, rPty.sessionName)
+		return
+	}
+
 	initialTitle := initialTerminalTitle(req.Command, req.InitialTitle)
 	cmd, err := tmuxNewSessionCommand(sessionName, initialTitle, workspace.Path, req.Command)
 	if err != nil {
@@ -2711,11 +2783,12 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 
 	done := make(chan struct{})
 	rPty := &runningPTY{
-		projectID:  req.ProjectID,
-		terminalID: req.TerminalID,
-		ptyFile:    ptyFile,
-		cmd:        cmd,
-		done:       done,
+		projectID:   req.ProjectID,
+		terminalID:  req.TerminalID,
+		sessionName: sessionName,
+		ptyFile:     ptyFile,
+		cmd:         cmd,
+		done:        done,
 	}
 	d.terminalPTYs[key] = rPty
 	d.termMu.Unlock()
@@ -2969,6 +3042,11 @@ func resizeTmuxSession(sessionName string, cols uint16, rows uint16) {
 	_ = tmuxCommand("resize-window", "-t", sessionName, "-x", strconv.Itoa(int(cols)), "-y", strconv.Itoa(int(rows))).Run()
 }
 
+func terminalSessionName(workspacePath string, terminalID string) string {
+	sum := sha1.Sum([]byte(workspacePath + "\x00" + terminalID))
+	return "pocket-studio-" + fmt.Sprintf("%x", sum[:10])
+}
+
 func initialTerminalTitle(command string, fallback string) string {
 	fallback = strings.TrimSpace(fallback)
 	if fallback != "" {
@@ -3014,9 +3092,8 @@ func (d *Daemon) resizeTerminalStream(req protocol.TerminalStreamResize) {
 	d.termMu.Unlock()
 
 	if rPty != nil {
-		sessionName := "pocket-studio-" + req.ProjectID + "-" + req.TerminalID
 		applyTerminalSize(rPty.ptyFile, req.Cols, req.Rows)
-		resizeTmuxSession(sessionName, req.Cols, req.Rows)
+		resizeTmuxSession(rPty.sessionName, req.Cols, req.Rows)
 	}
 }
 
