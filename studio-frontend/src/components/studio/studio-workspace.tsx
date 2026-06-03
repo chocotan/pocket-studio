@@ -1161,10 +1161,10 @@ export function StudioWorkspace({
             event.stopPropagation();
             setNavHidden(false);
           }}
-          className="fixed right-3 top-2 z-50 flex h-6 w-7 items-center justify-center rounded border border-border/70 bg-card/95 text-muted-foreground shadow-sm transition-colors hover:text-foreground"
+          className="fixed left-1/2 top-0 z-50 flex h-3.5 w-7 -translate-x-1/2 items-center justify-center rounded-b border-x border-b border-border/60 bg-card/80 text-muted-foreground opacity-70 shadow-sm transition-[height,opacity,color,background-color] hover:h-5 hover:bg-card hover:text-foreground hover:opacity-100"
           title="显示顶部栏"
         >
-          <ChevronDown className="h-4 w-4" />
+          <ChevronDown className="h-3.5 w-3.5" />
         </button>
       )}
 

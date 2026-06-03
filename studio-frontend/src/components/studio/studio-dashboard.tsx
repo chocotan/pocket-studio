@@ -929,7 +929,6 @@ function ProjectCard({
             <Badge className="max-w-48 truncate rounded border border-indigo-100 bg-indigo-50 px-1.5 py-0 text-[9px] font-bold text-indigo-600">
               {deviceLabel}
             </Badge>
-            <span className="hidden truncate font-mono text-[9px] text-slate-400 sm:block">{proj.id}</span>
           </div>
         </div>
       </div>
