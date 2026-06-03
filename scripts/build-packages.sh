@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 ELECTRON_RESOURCES="$DIST/electron-resources"
+SERVER_EMBED="$ROOT/cmd/server/embedded"
 PLATFORM="${1:-linux}"
 
 case "$PLATFORM" in
@@ -17,6 +18,9 @@ esac
 rm -rf "$ELECTRON_RESOURCES" "$DIST/electron"
 mkdir -p "$DIST"
 mkdir -p "$ELECTRON_RESOURCES/bin"
+mkdir -p "$SERVER_EMBED/studio" "$SERVER_EMBED/user"
+find "$SERVER_EMBED/studio" -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} +
+find "$SERVER_EMBED/user" -mindepth 1 -maxdepth 1 ! -name README.md -exec rm -rf {} +
 
 (
   cd "$ROOT/studio-frontend"
@@ -27,6 +31,9 @@ mkdir -p "$ELECTRON_RESOURCES/bin"
   cd "$ROOT/user-frontend"
   npm run build
 )
+
+cp -a "$ROOT/studio-frontend/dist/." "$SERVER_EMBED/studio/"
+cp -a "$ROOT/user-frontend/dist/." "$SERVER_EMBED/user/"
 
 SERVER_EXT=""
 DAEMON_EXT=""

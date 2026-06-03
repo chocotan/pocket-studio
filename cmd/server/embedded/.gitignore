@@ -1,0 +1,4 @@
+/studio/*
+!/studio/README.md
+/user/*
+!/user/README.md

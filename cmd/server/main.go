@@ -1,7 +1,9 @@
 package main
 
 import (
+	"embed"
 	"flag"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -12,6 +14,12 @@ import (
 	"remote-agent/internal/auth"
 	"remote-agent/internal/server"
 )
+
+//go:embed embedded/studio
+var embeddedStudio embed.FS
+
+//go:embed embedded/user
+var embeddedUser embed.FS
 
 type serverConfig struct {
 	addr              string
@@ -38,14 +46,14 @@ func main() {
 
 	hub := server.NewHub(authManager)
 	mux := http.NewServeMux()
-	if distDir, ok := findWebDist(); ok {
-		mux.Handle("/studio/", http.StripPrefix("/studio", spaHandler(http.Dir(distDir))))
+	if studioFS, ok := findWebDist(); ok {
+		mux.Handle("/studio/", http.StripPrefix("/studio", spaHandler(studioFS)))
 	} else {
 		log.Fatal("studio-frontend/dist not found; run `cd studio-frontend && npm run build` before starting the server")
 	}
-	if userDistDir, ok := findUserWebDist(); ok {
-		mux.Handle("/user/", http.StripPrefix("/user", spaHandler(http.Dir(userDistDir))))
-		mux.Handle("/", spaHandler(http.Dir(userDistDir)))
+	if userFS, ok := findUserWebDist(); ok {
+		mux.Handle("/user/", http.StripPrefix("/user", spaHandler(userFS)))
+		mux.Handle("/", spaHandler(userFS))
 	}
 	authHTTP := auth.HTTP{Manager: authManager, AllowRegister: cfg.authAllowRegister}
 	mux.Handle("/api/auth/", authHTTP)
@@ -120,7 +128,10 @@ func allowedOrigin(origin string) bool {
 		strings.HasPrefix(origin, "http://[::1]:")
 }
 
-func findUserWebDist() (string, bool) {
+func findUserWebDist() (http.FileSystem, bool) {
+	if embedded, ok := embeddedWebFS(embeddedUser, "embedded/user"); ok {
+		return embedded, true
+	}
 	candidates := []string{filepath.Join("user-frontend", "dist")}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
@@ -134,13 +145,16 @@ func findUserWebDist() (string, bool) {
 	}
 	for _, dir := range candidates {
 		if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
-			return dir, true
+			return http.Dir(dir), true
 		}
 	}
-	return "", false
+	return nil, false
 }
 
-func findWebDist() (string, bool) {
+func findWebDist() (http.FileSystem, bool) {
+	if embedded, ok := embeddedWebFS(embeddedStudio, "embedded/studio"); ok {
+		return embedded, true
+	}
 	candidates := []string{filepath.Join("studio-frontend", "dist")}
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
@@ -154,10 +168,21 @@ func findWebDist() (string, bool) {
 	}
 	for _, dir := range candidates {
 		if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
-			return dir, true
+			return http.Dir(dir), true
 		}
 	}
-	return "", false
+	return nil, false
+}
+
+func embeddedWebFS(root embed.FS, dir string) (http.FileSystem, bool) {
+	if _, err := root.Open(filepath.ToSlash(filepath.Join(dir, "index.html"))); err != nil {
+		return nil, false
+	}
+	sub, err := fs.Sub(root, filepath.ToSlash(dir))
+	if err != nil {
+		return nil, false
+	}
+	return http.FS(sub), true
 }
 
 func spaHandler(root http.FileSystem) http.Handler {
