@@ -1224,28 +1224,30 @@ func (h *Hub) broadcastToUser(userID string, env protocol.Envelope) {
 
 func writeLoop(conn *websocket.Conn, ch <-chan protocol.Envelope, writeMu ...*sync.Mutex) {
 	for env := range ch {
-		if env.Version == 0 {
-			env.Version = 1
-		}
-		if env.Timestamp == 0 {
-			env.Timestamp = time.Now().Unix()
-		}
-		if env.ID == "" {
-			env.ID = protocol.NewID("msg")
-		}
 		if len(writeMu) > 0 && writeMu[0] != nil {
 			writeMu[0].Lock()
 		}
-		if err := conn.WriteJSON(env); err != nil {
-			if len(writeMu) > 0 && writeMu[0] != nil {
-				writeMu[0].Unlock()
-			}
-			return
-		}
+		err := writeEnvelope(conn, env)
 		if len(writeMu) > 0 && writeMu[0] != nil {
 			writeMu[0].Unlock()
 		}
+		if err != nil {
+			return
+		}
 	}
+}
+
+func writeEnvelope(conn *websocket.Conn, env protocol.Envelope) error {
+	if env.Version == 0 {
+		env.Version = 1
+	}
+	if env.Timestamp == 0 {
+		env.Timestamp = time.Now().Unix()
+	}
+	if env.ID == "" {
+		env.ID = protocol.NewID("msg")
+	}
+	return conn.WriteJSON(env)
 }
 
 func enableTCPNoDelay(conn *websocket.Conn) {
@@ -1558,7 +1560,13 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 		Cols:          initialCols,
 		Rows:          initialRows,
 	}
-	dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamStart, "server", startPayload)
+	startEnv := protocol.NewEnvelope(protocol.TypeTerminalStreamStart, "server", startPayload)
+	dc.mu.Lock()
+	err = writeEnvelope(dc.conn, startEnv)
+	dc.mu.Unlock()
+	if err != nil {
+		return
+	}
 	for {
 		msgType, payload, err := conn.ReadMessage()
 		if err != nil {
