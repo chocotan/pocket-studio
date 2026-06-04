@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,15 +33,23 @@ import (
 type Daemon struct {
 	cfg Config
 
-	mu            sync.Mutex
-	tasks         map[string]*runningTask
-	history       map[string]protocol.TaskRecord
-	projects      map[string]protocol.Project
-	projectStates map[string]json.RawMessage
-	send          chan protocol.Envelope
-	termMu        sync.Mutex
-	terminalPTYs  map[string]*runningPTY
+	mu             sync.Mutex
+	tasks          map[string]*runningTask
+	history        map[string]protocol.TaskRecord
+	projects       map[string]protocol.Project
+	projectStates  map[string]json.RawMessage
+	send           chan protocol.Envelope
+	sendBinary     chan []byte
+	terminalBinary bool
+	termMu         sync.Mutex
+	terminalPTYs   map[string]*runningPTY
 }
+
+const (
+	reconnectInitialDelay = time.Second
+	reconnectMaxDelay     = 5 * time.Minute
+	reconnectStableAfter  = 30 * time.Second
+)
 
 type runningTask struct {
 	id        string
@@ -63,6 +72,7 @@ func New(cfg Config) *Daemon {
 		projects:      make(map[string]protocol.Project),
 		projectStates: make(map[string]json.RawMessage),
 		send:          make(chan protocol.Envelope, 128),
+		sendBinary:    make(chan []byte, 256),
 		terminalPTYs:  make(map[string]*runningPTY),
 	}
 }
@@ -77,16 +87,43 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.loadProjectStates(); err != nil {
 		log.Printf("load daemon project states: %v", err)
 	}
+	nextDelay := reconnectInitialDelay
 	for {
+		started := time.Now()
 		if err := d.runOnce(ctx); err != nil {
 			log.Printf("daemon connection closed: %v", err)
 		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var delay time.Duration
+		delay, nextDelay = reconnectDelay(nextDelay, time.Since(started))
+		log.Printf("daemon reconnecting in %s", delay)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(delay):
 		}
 	}
+}
+
+func reconnectDelay(current time.Duration, connectedFor time.Duration) (time.Duration, time.Duration) {
+	if connectedFor >= reconnectStableAfter {
+		current = reconnectInitialDelay
+	}
+	delay := current
+	return delay, nextReconnectDelay(delay)
+}
+
+func nextReconnectDelay(current time.Duration) time.Duration {
+	if current < reconnectInitialDelay {
+		return reconnectInitialDelay
+	}
+	next := current * 2
+	if next < current || next > reconnectMaxDelay {
+		return reconnectMaxDelay
+	}
+	return next
 }
 
 func (d *Daemon) runOnce(ctx context.Context) error {
@@ -103,14 +140,22 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
+	enableTCPNoDelay(conn)
+	connCtx, cancelConn := context.WithCancel(ctx)
+	defer cancelConn()
 
 	writeDone := make(chan error, 1)
 	go func() {
 		for {
 			select {
-			case <-ctx.Done():
-				writeDone <- ctx.Err()
+			case <-connCtx.Done():
+				writeDone <- connCtx.Err()
 				return
+			case raw := <-d.sendBinary:
+				if err := conn.WriteMessage(websocket.BinaryMessage, raw); err != nil {
+					writeDone <- err
+					return
+				}
 			case env := <-d.send:
 				if err := writeEnvelope(conn, env); err != nil {
 					writeDone <- err
@@ -128,7 +173,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-connCtx.Done():
 				return
 			case <-ticker.C:
 				d.send <- protocol.NewEnvelope(protocol.TypeDaemonHeartbeat, "daemon", protocol.DaemonHeartbeat{
@@ -144,12 +189,31 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	readErr := make(chan error, 1)
 	go func() {
 		for {
-			var env protocol.Envelope
-			if err := conn.ReadJSON(&env); err != nil {
+			msgType, raw, err := conn.ReadMessage()
+			if err != nil {
 				readErr <- err
 				return
 			}
-			d.handleEnvelope(ctx, env)
+			if msgType == websocket.BinaryMessage {
+				streamData, ok, err := protocol.UnmarshalTerminalStreamDataBinary(raw)
+				if err != nil {
+					log.Printf("daemon received invalid terminal binary frame: %v", err)
+					continue
+				}
+				if ok {
+					d.writeTerminalStream(streamData)
+					continue
+				}
+			}
+			if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+				continue
+			}
+			var env protocol.Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				log.Printf("daemon received invalid json frame: %v", err)
+				continue
+			}
+			d.handleEnvelope(connCtx, env)
 		}
 	}()
 
@@ -501,6 +565,14 @@ func agentDisplayName(agent string) string {
 
 func (d *Daemon) handleEnvelope(ctx context.Context, env protocol.Envelope) {
 	switch env.Type {
+	case protocol.TypeServerHello:
+		hello, err := protocol.DecodePayload[protocol.ServerHello](env)
+		if err != nil {
+			return
+		}
+		d.mu.Lock()
+		d.terminalBinary = hasFeature(hello.Features, protocol.FeatureTerminalBinaryV1)
+		d.mu.Unlock()
 	case protocol.TypeSessionCreate:
 		session, err := protocol.DecodePayload[protocol.SessionCreate](env)
 		if err != nil {
@@ -2057,6 +2129,7 @@ func (d *Daemon) sendHello() {
 		AgentLabel:    d.agentLabel(),
 		Agents:        d.agentCapabilities(),
 		Workspaces:    d.workspacesSnapshot(),
+		Features:      []string{protocol.FeatureTerminalBinaryV1},
 	})
 }
 
@@ -2698,6 +2771,15 @@ func appendBounded[T any](items []T, item T, max int) []T {
 	return append([]T(nil), items[len(items)-max:]...)
 }
 
+func hasFeature(features []string, target string) bool {
+	for _, feature := range features {
+		if feature == target {
+			return true
+		}
+	}
+	return false
+}
+
 func writeEnvelope(conn *websocket.Conn, env protocol.Envelope) error {
 	if env.ID == "" {
 		env.ID = protocol.NewID("msg")
@@ -2709,6 +2791,12 @@ func writeEnvelope(conn *websocket.Conn, env protocol.Envelope) error {
 		env.Timestamp = time.Now().Unix()
 	}
 	return conn.WriteJSON(env)
+}
+
+func enableTCPNoDelay(conn *websocket.Conn) {
+	if tcp, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
+		_ = tcp.SetNoDelay(true)
+	}
 }
 
 func mustJSON(value any) json.RawMessage {
@@ -2836,14 +2924,33 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 				TerminalID: req.TerminalID,
 				Data:       buf[:n],
 			}
-			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", dataPayload)
+			d.sendTerminalStreamData(dataPayload)
 		}
 	}()
 }
 
+func (d *Daemon) sendTerminalStreamData(data protocol.TerminalStreamData) {
+	d.mu.Lock()
+	terminalBinary := d.terminalBinary
+	d.mu.Unlock()
+	if terminalBinary {
+		frame, err := protocol.MarshalTerminalStreamDataBinary(data)
+		if err != nil {
+			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", data)
+			return
+		}
+		select {
+		case d.sendBinary <- frame:
+			return
+		default:
+		}
+	}
+	d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", data)
+}
+
 func (d *Daemon) sendTerminalSnapshot(projectID string, terminalID string, sessionName string) {
 	if data := tmuxCapturePane(sessionName); len(data) > 0 {
-		d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", protocol.TerminalStreamData{
+		d.sendTerminalStreamData(protocol.TerminalStreamData{
 			ProjectID:  projectID,
 			TerminalID: terminalID,
 			Data:       data,
@@ -2961,6 +3068,7 @@ set-option -g terminal-overrides ",xterm-256color:RGB,tmux-256color:RGB,*-256col
 set-option -ga terminal-features ",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB"
 set-option -g history-limit 50000
 set-option -g mouse on
+set-option -sg escape-time 10
 set-option -g prefix C-a
 unbind-key C-b
 bind-key C-a send-prefix

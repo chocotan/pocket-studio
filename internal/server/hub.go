@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"mime"
+	"net"
 	"net/http"
 	"path/filepath"
 	"regexp"
@@ -79,16 +80,18 @@ type Hub struct {
 }
 
 type daemonConn struct {
-	userID     string
-	deviceID   string
-	deviceName string
-	agent      string
-	agentLabel string
-	agents     []protocol.AgentCapability
-	workspaces []protocol.Workspace
-	conn       *websocket.Conn
-	send       chan protocol.Envelope
-	lastSeen   time.Time
+	userID         string
+	deviceID       string
+	deviceName     string
+	agent          string
+	agentLabel     string
+	agents         []protocol.AgentCapability
+	workspaces     []protocol.Workspace
+	conn           *websocket.Conn
+	send           chan protocol.Envelope
+	mu             sync.Mutex
+	terminalBinary bool
+	lastSeen       time.Time
 }
 
 type webConn struct {
@@ -359,9 +362,10 @@ func (h *Hub) ServeDaemonSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("upgrade daemon: %v", err)
 		return
 	}
+	enableTCPNoDelay(conn)
 
 	dc := &daemonConn{userID: userID, conn: conn, send: make(chan protocol.Envelope, 64), lastSeen: time.Now()}
-	go writeLoop(conn, dc.send)
+	go writeLoop(conn, dc.send, &dc.mu)
 	h.readDaemonLoop(dc)
 }
 
@@ -873,9 +877,28 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 	}()
 
 	for {
-		var env protocol.Envelope
-		if err := dc.conn.ReadJSON(&env); err != nil {
+		msgType, raw, err := dc.conn.ReadMessage()
+		if err != nil {
 			return
+		}
+		if msgType == websocket.BinaryMessage {
+			streamData, ok, err := protocol.UnmarshalTerminalStreamDataBinary(raw)
+			if err != nil {
+				log.Printf("daemon %s sent invalid terminal binary frame: %v", dc.deviceID, err)
+				continue
+			}
+			if ok {
+				h.forwardTerminalStreamData(dc.userID, streamData)
+				continue
+			}
+		}
+		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
+			continue
+		}
+		var env protocol.Envelope
+		if err := json.Unmarshal(raw, &env); err != nil {
+			log.Printf("daemon %s sent invalid json frame: %v", dc.deviceID, err)
+			continue
 		}
 		switch env.Type {
 		case protocol.TypeDaemonHello:
@@ -890,6 +913,7 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			dc.agentLabel = hello.AgentLabel
 			dc.agents = hello.Agents
 			dc.workspaces = hello.Workspaces
+			dc.terminalBinary = hasFeature(hello.Features, protocol.FeatureTerminalBinaryV1)
 			dc.lastSeen = time.Now()
 			h.mu.Lock()
 			key := daemonKey(dc.userID, hello.DeviceID)
@@ -898,6 +922,11 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			}
 			h.daemons[key] = dc
 			h.mu.Unlock()
+			if dc.terminalBinary {
+				dc.send <- protocol.NewEnvelope(protocol.TypeServerHello, "server", protocol.ServerHello{
+					Features: []string{protocol.FeatureTerminalBinaryV1},
+				})
+			}
 			h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
 		case protocol.TypeDaemonHeartbeat, protocol.TypeDaemonSnapshot:
 			dc.lastSeen = time.Now()
@@ -968,15 +997,7 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 		case protocol.TypeTerminalStreamData:
 			streamData, err := protocol.DecodePayload[protocol.TerminalStreamData](env)
 			if err == nil {
-				key := terminalKey(dc.userID, streamData.ProjectID, streamData.TerminalID)
-				h.termMu.RLock()
-				wc := h.terminalConns[key]
-				h.termMu.RUnlock()
-				if wc != nil {
-					wc.mu.Lock()
-					_ = wc.conn.WriteMessage(websocket.BinaryMessage, streamData.Data)
-					wc.mu.Unlock()
-				}
+				h.forwardTerminalStreamData(dc.userID, streamData)
 			}
 		case protocol.TypeTerminalStreamTitle:
 			streamTitle, err := protocol.DecodePayload[protocol.TerminalStreamTitle](env)
@@ -1052,6 +1073,19 @@ func (h *Hub) stateView(userID string) StateView {
 		return tasks[i].UpdatedAt > tasks[j].UpdatedAt
 	})
 	return StateView{Devices: devices, Tasks: tasks}
+}
+
+func (h *Hub) forwardTerminalStreamData(userID string, streamData protocol.TerminalStreamData) {
+	key := terminalKey(userID, streamData.ProjectID, streamData.TerminalID)
+	h.termMu.RLock()
+	wc := h.terminalConns[key]
+	h.termMu.RUnlock()
+	if wc == nil {
+		return
+	}
+	wc.mu.Lock()
+	_ = wc.conn.WriteMessage(websocket.BinaryMessage, streamData.Data)
+	wc.mu.Unlock()
 }
 
 func (h *Hub) requestDaemon(r *http.Request, messageType string, workspacePath string, requestID string, payload any) (protocol.Envelope, error) {
@@ -1161,6 +1195,15 @@ func daemonHasWorkspace(dc *daemonConn, workspacePath string) bool {
 	return false
 }
 
+func hasFeature(features []string, target string) bool {
+	for _, feature := range features {
+		if feature == target {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Hub) broadcastToUser(userID string, env protocol.Envelope) {
 	h.mu.RLock()
 	webs := make([]*webConn, 0, len(h.webs))
@@ -1179,7 +1222,7 @@ func (h *Hub) broadcastToUser(userID string, env protocol.Envelope) {
 	}
 }
 
-func writeLoop(conn *websocket.Conn, ch <-chan protocol.Envelope) {
+func writeLoop(conn *websocket.Conn, ch <-chan protocol.Envelope, writeMu ...*sync.Mutex) {
 	for env := range ch {
 		if env.Version == 0 {
 			env.Version = 1
@@ -1190,9 +1233,24 @@ func writeLoop(conn *websocket.Conn, ch <-chan protocol.Envelope) {
 		if env.ID == "" {
 			env.ID = protocol.NewID("msg")
 		}
+		if len(writeMu) > 0 && writeMu[0] != nil {
+			writeMu[0].Lock()
+		}
 		if err := conn.WriteJSON(env); err != nil {
+			if len(writeMu) > 0 && writeMu[0] != nil {
+				writeMu[0].Unlock()
+			}
 			return
 		}
+		if len(writeMu) > 0 && writeMu[0] != nil {
+			writeMu[0].Unlock()
+		}
+	}
+}
+
+func enableTCPNoDelay(conn *websocket.Conn) {
+	if tcp, ok := conn.UnderlyingConn().(*net.TCPConn); ok {
+		_ = tcp.SetNoDelay(true)
 	}
 }
 
@@ -1467,6 +1525,7 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	enableTCPNoDelay(conn)
 
 	h.mu.RLock()
 	dc := h.daemons[daemonKey(userID, deviceID)]
@@ -1524,6 +1583,19 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 					ProjectID:  projID,
 					TerminalID: terminalID,
 					Data:       payload,
+				}
+				if dc.terminalBinary {
+					frame, err := protocol.MarshalTerminalStreamDataBinary(dataPayload)
+					if err != nil {
+						dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "server", dataPayload)
+						continue
+					}
+					dc.mu.Lock()
+					err = dc.conn.WriteMessage(websocket.BinaryMessage, frame)
+					dc.mu.Unlock()
+					if err == nil {
+						continue
+					}
 				}
 				dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "server", dataPayload)
 			}

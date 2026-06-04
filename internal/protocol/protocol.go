@@ -1,7 +1,10 @@
 package protocol
 
 import (
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 )
 
@@ -9,6 +12,7 @@ const (
 	TypeDaemonHello          = "daemon.hello"
 	TypeDaemonSnapshot       = "daemon.snapshot"
 	TypeDaemonHeartbeat      = "daemon.heartbeat"
+	TypeServerHello          = "server.hello"
 	TypeWebHello             = "web.hello"
 	TypeTaskDispatch         = "task.dispatch"
 	TypeTaskEvent            = "task.event"
@@ -34,6 +38,8 @@ const (
 	TypeTerminalStreamResize = "terminal.stream.resize"
 	TypeTerminalStreamExit   = "terminal.stream.exit"
 )
+
+const FeatureTerminalBinaryV1 = "terminal.binary.v1"
 
 type Envelope struct {
 	ID        string          `json:"id"`
@@ -70,6 +76,11 @@ type DaemonHello struct {
 	AgentLabel    string            `json:"agent_label,omitempty"`
 	Agents        []AgentCapability `json:"agents,omitempty"`
 	Workspaces    []Workspace       `json:"workspaces"`
+	Features      []string          `json:"features,omitempty"`
+}
+
+type ServerHello struct {
+	Features []string `json:"features,omitempty"`
 }
 
 type DaemonSnapshot struct {
@@ -276,6 +287,67 @@ type TerminalStreamData struct {
 	ProjectID  string `json:"project_id"`
 	TerminalID string `json:"terminal_id"`
 	Data       []byte `json:"data"`
+}
+
+var terminalStreamBinaryMagic = [4]byte{'P', 'S', 'T', 'D'}
+
+const terminalStreamBinaryVersion byte = 1
+
+func MarshalTerminalStreamDataBinary(data TerminalStreamData) ([]byte, error) {
+	projectID := []byte(data.ProjectID)
+	terminalID := []byte(data.TerminalID)
+	if len(projectID) > 0xffff {
+		return nil, fmt.Errorf("project id is too long")
+	}
+	if len(terminalID) > 0xffff {
+		return nil, fmt.Errorf("terminal id is too long")
+	}
+	size := 4 + 1 + 2 + 2 + len(projectID) + len(terminalID) + len(data.Data)
+	out := make([]byte, size)
+	copy(out[:4], terminalStreamBinaryMagic[:])
+	out[4] = terminalStreamBinaryVersion
+	binary.BigEndian.PutUint16(out[5:7], uint16(len(projectID)))
+	binary.BigEndian.PutUint16(out[7:9], uint16(len(terminalID)))
+	offset := 9
+	copy(out[offset:], projectID)
+	offset += len(projectID)
+	copy(out[offset:], terminalID)
+	offset += len(terminalID)
+	copy(out[offset:], data.Data)
+	return out, nil
+}
+
+func UnmarshalTerminalStreamDataBinary(raw []byte) (TerminalStreamData, bool, error) {
+	if len(raw) < 9 || !bytesEqual(raw[:4], terminalStreamBinaryMagic[:]) {
+		return TerminalStreamData{}, false, nil
+	}
+	if raw[4] != terminalStreamBinaryVersion {
+		return TerminalStreamData{}, true, fmt.Errorf("unsupported terminal stream binary version %d", raw[4])
+	}
+	projectLen := int(binary.BigEndian.Uint16(raw[5:7]))
+	terminalLen := int(binary.BigEndian.Uint16(raw[7:9]))
+	offset := 9
+	if len(raw) < offset+projectLen+terminalLen {
+		return TerminalStreamData{}, true, errors.New("truncated terminal stream binary frame")
+	}
+	projectID := string(raw[offset : offset+projectLen])
+	offset += projectLen
+	terminalID := string(raw[offset : offset+terminalLen])
+	offset += terminalLen
+	data := append([]byte(nil), raw[offset:]...)
+	return TerminalStreamData{ProjectID: projectID, TerminalID: terminalID, Data: data}, true, nil
+}
+
+func bytesEqual(a []byte, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 type TerminalStreamTitle struct {
