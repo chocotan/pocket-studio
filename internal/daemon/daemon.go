@@ -3076,9 +3076,10 @@ func pocketStudioTmuxConfig(shell string) string {
 set-option -g set-titles on
 set-option -g default-terminal "tmux-256color"
 set-option -g terminal-overrides ",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB"
-set-option -ga terminal-features ",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB"
+set-option -ga terminal-features ",xterm-256color:RGB:clipboard,tmux-256color:RGB:clipboard,*-256color:RGB:clipboard"
 set-option -g history-limit 50000
-set-option -g mouse off
+set-option -g mouse on
+set-option -g set-clipboard external
 set-option -sg escape-time 10
 set-option -g prefix C-a
 unbind-key C-b
@@ -3093,8 +3094,8 @@ set-window-option -g automatic-rename off
 set-window-option -g mode-keys vi
 bind-key v copy-mode
 bind-key -T copy-mode-vi v send-keys -X begin-selection
-bind-key -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "sh -c 'if command -v wl-copy >/dev/null 2>&1; then wl-copy; elif command -v xclip >/dev/null 2>&1; then xclip -selection clipboard; elif command -v xsel >/dev/null 2>&1; then xsel --clipboard --input; elif command -v pbcopy >/dev/null 2>&1; then pbcopy; else cat >/dev/null; fi'"
-bind-key -T copy-mode-vi Enter send-keys -X copy-pipe-and-cancel "sh -c 'if command -v wl-copy >/dev/null 2>&1; then wl-copy; elif command -v xclip >/dev/null 2>&1; then xclip -selection clipboard; elif command -v xsel >/dev/null 2>&1; then xsel --clipboard --input; elif command -v pbcopy >/dev/null 2>&1; then pbcopy; else cat >/dev/null; fi'"
+bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+bind-key -T copy-mode-vi Enter send-keys -X copy-selection-and-cancel
 bind-key -T copy-mode-vi Escape send-keys -X cancel
 `)
 	return b.String()

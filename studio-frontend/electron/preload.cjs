@@ -10,4 +10,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setZoom(zoom) {
     return ipcRenderer.invoke("app:set-zoom", zoom);
   },
+  writeClipboardText(text) {
+    return ipcRenderer.invoke("clipboard:write-text", text);
+  },
 });

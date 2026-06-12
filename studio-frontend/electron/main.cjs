@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, protocol, net: electronNet, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, clipboard, dialog, protocol, net: electronNet, ipcMain } = require("electron");
 const { execFileSync, spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -280,6 +280,13 @@ function registerAppIPC() {
       return { ok: false, error: "window is not available" };
     }
     window.webContents.setZoomFactor(zoom / 100);
+    return { ok: true };
+  });
+  ipcMain.handle("clipboard:write-text", (_event, text) => {
+    if (typeof text !== "string") {
+      return { ok: false, error: "invalid text" };
+    }
+    clipboard.writeText(text);
     return { ok: true };
   });
 }

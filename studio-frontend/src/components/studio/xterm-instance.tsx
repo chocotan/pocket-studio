@@ -159,6 +159,40 @@ function writeClipboardFallback(text: string) {
   }
 }
 
+function decodeBase64Utf8(value: string) {
+  const binary = window.atob(value);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+function osc52ClipboardText(data: string) {
+  const separator = data.indexOf(";");
+  if (separator < 0) return "";
+  const selectionTarget = data.slice(0, separator);
+  if (!["", "c", "p", "s", "0", "1", "2", "3", "4", "5", "6", "7"].includes(selectionTarget)) {
+    return "";
+  }
+  const payload = data.slice(separator + 1);
+  if (!payload || payload === "?") return "";
+  try {
+    return decodeBase64Utf8(payload);
+  } catch {
+    return "";
+  }
+}
+
+function writeClipboardText(text: string) {
+  const electronAPI = (window as any).electronAPI;
+  if (electronAPI?.writeClipboardText) {
+    return Promise.resolve(electronAPI.writeClipboardText(text)).then(() => undefined);
+  }
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  writeClipboardFallback(text);
+  return Promise.resolve();
+}
+
 
 interface XtermInstanceProps {
   projectId: string;
@@ -319,6 +353,7 @@ export function XtermInstance({
     let cancelFontFit: (() => void) | null = null;
     let cancelCopyPasteShortcut: (() => void) | null = null;
     let cancelPasteHandler: (() => void) | null = null;
+    let osc52Disposable: { dispose: () => void } | null = null;
     const postOpenResizeTimers: number[] = [];
 
     let initialized = false;
@@ -357,6 +392,14 @@ export function XtermInstance({
       titleDisposable = term.onTitleChange((title) => {
         onTitleChangeRef.current?.(title, undefined, "terminal");
       });
+      osc52Disposable = term.parser.registerOscHandler(52, (data) => {
+        const text = osc52ClipboardText(data);
+        if (!text) return true;
+        return writeClipboardText(text).then(
+          () => true,
+          () => true,
+        );
+      });
 
       term.attachCustomWheelEventHandler((event) => {
         if (event.ctrlKey) return true;
@@ -386,11 +429,7 @@ export function XtermInstance({
           event.stopImmediatePropagation();
           const selection = term?.getSelection();
           if (!selection) return;
-          if (navigator.clipboard?.writeText && window.isSecureContext) {
-            void navigator.clipboard.writeText(selection).catch(() => writeClipboardFallback(selection));
-          } else {
-            writeClipboardFallback(selection);
-          }
+          void writeClipboardText(selection);
         } else if (key === "v") {
           if (!navigator.clipboard?.readText || !window.isSecureContext) {
             return;
@@ -589,6 +628,7 @@ export function XtermInstance({
       incomingBuf.current = [];
       ro.disconnect();
       if (titleDisposable) titleDisposable.dispose();
+      if (osc52Disposable) osc52Disposable.dispose();
       if (connectFrame !== null) window.cancelAnimationFrame(connectFrame);
       if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
         wsRef.current.close();
