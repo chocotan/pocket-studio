@@ -2808,6 +2808,7 @@ type runningPTY struct {
 	projectID   string
 	terminalID  string
 	sessionName string
+	usesTmux    bool
 	ptyFile     *os.File
 	cmd         *exec.Cmd
 	done        chan struct{}
@@ -2831,8 +2832,10 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	if rPty, exists := d.terminalPTYs[key]; exists {
 		d.termMu.Unlock()
 		applyTerminalSize(rPty.ptyFile, req.Cols, req.Rows)
-		resizeTmuxSession(rPty.sessionName, req.Cols, req.Rows)
-		d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, rPty.sessionName)
+		if rPty.usesTmux {
+			resizeTmuxSession(rPty.sessionName, req.Cols, req.Rows)
+			d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, rPty.sessionName)
+		}
 		return
 	}
 
@@ -2847,10 +2850,13 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	}
 
 	var ptyFile *os.File
+	usesTmux := false
 	if cmd != nil {
 		ptyFile, err = pty.Start(cmd)
+		usesTmux = err == nil
 	}
 	if cmd == nil || err != nil {
+		usesTmux = false
 		log.Printf("daemon failed to start tmux: %v. falling back to user shell.", err)
 		if req.Command != "" {
 			cmd = exec.Command(userShell(), "-lc", req.Command)
@@ -2867,31 +2873,36 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 		}
 	}
 	applyTerminalSize(ptyFile, req.Cols, req.Rows)
-	resizeTmuxSession(sessionName, req.Cols, req.Rows)
+	if usesTmux {
+		resizeTmuxSession(sessionName, req.Cols, req.Rows)
+	}
 
 	done := make(chan struct{})
 	rPty := &runningPTY{
 		projectID:   req.ProjectID,
 		terminalID:  req.TerminalID,
 		sessionName: sessionName,
+		usesTmux:    usesTmux,
 		ptyFile:     ptyFile,
 		cmd:         cmd,
 		done:        done,
 	}
 	d.terminalPTYs[key] = rPty
 	d.termMu.Unlock()
-	go d.watchTerminalTitle(parent, req.ProjectID, req.TerminalID, sessionName, done)
-	d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
-	go func() {
-		select {
-		case <-done:
-			return
-		case <-parent.Done():
-			return
-		case <-time.After(250 * time.Millisecond):
-			d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
-		}
-	}()
+	if usesTmux {
+		go d.watchTerminalTitle(parent, req.ProjectID, req.TerminalID, sessionName, done)
+		d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
+		go func() {
+			select {
+			case <-done:
+				return
+			case <-parent.Done():
+				return
+			case <-time.After(250 * time.Millisecond):
+				d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
+			}
+		}()
+	}
 
 	go func() {
 		defer func() {
@@ -3201,7 +3212,9 @@ func (d *Daemon) resizeTerminalStream(req protocol.TerminalStreamResize) {
 
 	if rPty != nil {
 		applyTerminalSize(rPty.ptyFile, req.Cols, req.Rows)
-		resizeTmuxSession(rPty.sessionName, req.Cols, req.Rows)
+		if rPty.usesTmux {
+			resizeTmuxSession(rPty.sessionName, req.Cols, req.Rows)
+		}
 	}
 }
 

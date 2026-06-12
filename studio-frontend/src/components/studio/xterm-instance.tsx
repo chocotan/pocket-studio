@@ -209,7 +209,6 @@ export function XtermInstance({
   }
 
   function scheduleResizeAfterFit({ force = false, delay = 80 }: { force?: boolean; delay?: number } = {}) {
-    if (!receivedFirstFrameRef.current) return;
     if (resizeDebounceTimerRef.current !== null) {
       window.clearTimeout(resizeDebounceTimerRef.current);
     }
@@ -444,7 +443,8 @@ export function XtermInstance({
           }
           inputBuf.current = [];
           lastSentSizeRef.current = null;
-          scheduleFitBurst();
+          fitAndResize(true);
+          scheduleFitBurst({ notify: true });
           [500, 2000].forEach((delay) => {
             postOpenResizeTimers.push(window.setTimeout(() => {
               fitAndResize(true);

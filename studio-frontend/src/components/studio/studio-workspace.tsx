@@ -48,6 +48,7 @@ import {
 interface StudioWorkspaceProps {
   projectId: string;
   project: Project;
+  deviceName?: string;
   pageZoom: PageZoom;
   onPageZoomChange: (zoom: PageZoom) => void;
   onBackToDashboard: () => void;
@@ -86,6 +87,7 @@ function editableTargetShouldKeepKeyboard(event: KeyboardEvent) {
 export function StudioWorkspace({
   projectId,
   project,
+  deviceName = "",
   pageZoom,
   onPageZoomChange,
   onBackToDashboard,
@@ -119,6 +121,8 @@ export function StudioWorkspace({
     return localStorage.getItem(STUDIO_NAV_HIDDEN_KEY) === "true";
   });
   const [stateLoaded, setStateLoaded] = useState(false);
+  const panelScale = pageZoom / 100;
+  const projectTitle = deviceName ? `${deviceName} / ${project.name}` : project.name;
 
   useEffect(() => {
     localStorage.setItem("pocket-studio-theme", theme);
@@ -1020,7 +1024,15 @@ export function StudioWorkspace({
           </span>
           <div className="ml-2 h-4 w-px bg-slate-200 dark:bg-slate-800" />
           <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-slate-500 bg-slate-100/80 px-2.5 py-0.5 rounded-full border border-slate-200/60 dark:bg-slate-800/50 dark:border-slate-700/60 dark:text-slate-400">
-            <span className="text-indigo-600 font-semibold truncate max-w-[220px] dark:text-indigo-400">{project.name}</span>
+            {deviceName && (
+              <>
+                <span className="truncate max-w-[120px] font-semibold text-slate-500 dark:text-slate-400" title={deviceName}>
+                  {deviceName}
+                </span>
+                <span className="text-slate-300 dark:text-slate-600">/</span>
+              </>
+            )}
+            <span className="text-indigo-600 font-semibold truncate max-w-[220px] dark:text-indigo-400" title={projectTitle}>{project.name}</span>
           </div>
         </div>
 
@@ -1169,12 +1181,22 @@ export function StudioWorkspace({
       )}
 
       <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-1 bg-slate-50 dark:bg-[#0f131c] transition-colors duration-150">
-        <div className="relative min-h-0 flex-1">
-          {layoutTree ? (
-            renderNode(layoutTree)
-          ) : (
-            <EmptyWorkspace onCreate={handleCreateInitialPanel} onCreateFileExplorer={handleCreateInitialFileExplorer} />
-          )}
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          <div
+            className="absolute left-0 top-0"
+            style={{
+              width: `${100 / panelScale}%`,
+              height: `${100 / panelScale}%`,
+              transform: `scale(${panelScale})`,
+              transformOrigin: "top left",
+            }}
+          >
+            {layoutTree ? (
+              renderNode(layoutTree)
+            ) : (
+              <EmptyWorkspace onCreate={handleCreateInitialPanel} onCreateFileExplorer={handleCreateInitialFileExplorer} />
+            )}
+          </div>
         </div>
       </main>
     </div>
