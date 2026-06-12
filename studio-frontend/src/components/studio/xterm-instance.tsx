@@ -143,6 +143,22 @@ function resolvePanelBackground(element: HTMLElement | null, fallback: string) {
   return value || fallback;
 }
 
+function writeClipboardFallback(text: string) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
 
 interface XtermInstanceProps {
   projectId: string;
@@ -302,6 +318,7 @@ export function XtermInstance({
     let cancelInitialFit: (() => void) | null = null;
     let cancelFontFit: (() => void) | null = null;
     let cancelCopyPasteShortcut: (() => void) | null = null;
+    let cancelPasteHandler: (() => void) | null = null;
     const postOpenResizeTimers: number[] = [];
 
     let initialized = false;
@@ -365,24 +382,44 @@ export function XtermInstance({
         const key = event.key.toLowerCase();
         if (key === "c") {
           const selection = term?.getSelection();
+          if (!selection) return;
           event.preventDefault();
           event.stopPropagation();
           event.stopImmediatePropagation();
-          if (selection) void navigator.clipboard?.writeText(selection);
+          if (navigator.clipboard?.writeText && window.isSecureContext) {
+            void navigator.clipboard.writeText(selection).catch(() => writeClipboardFallback(selection));
+          } else {
+            writeClipboardFallback(selection);
+          }
         } else if (key === "v") {
+          if (!navigator.clipboard?.readText || !window.isSecureContext) {
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           event.stopImmediatePropagation();
-          void navigator.clipboard?.readText().then((text) => {
+          void navigator.clipboard.readText().then((text) => {
             if (text) term?.paste(text);
           }).catch(() => {});
         }
       };
+      const handlePaste = (event: ClipboardEvent) => {
+        if (!isActiveRef.current) return;
+        const text = event.clipboardData?.getData("text/plain");
+        if (!text) return;
+        event.preventDefault();
+        event.stopPropagation();
+        term?.paste(text);
+      };
       window.addEventListener("keydown", handleCopyPasteShortcut, { capture: true });
       container.addEventListener("keydown", handleCopyPasteShortcut, { capture: true });
+      container.addEventListener("paste", handlePaste, { capture: true });
       cancelCopyPasteShortcut = () => {
         window.removeEventListener("keydown", handleCopyPasteShortcut, { capture: true });
         container.removeEventListener("keydown", handleCopyPasteShortcut, { capture: true });
+      };
+      cancelPasteHandler = () => {
+        container.removeEventListener("paste", handlePaste, { capture: true });
       };
 
       // Force instant initial fit calculation before websocket runs
@@ -534,6 +571,7 @@ export function XtermInstance({
     return () => {
       disposedRef.current = true;
       if (cancelCopyPasteShortcut) cancelCopyPasteShortcut();
+      if (cancelPasteHandler) cancelPasteHandler();
       if (cancelInitialFit) cancelInitialFit();
       if (cancelFontFit) cancelFontFit();
       window.removeEventListener("resize", handleWinResize);
