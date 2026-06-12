@@ -357,9 +357,15 @@
 /* ─────────────────────────────────────────────
    XTERM.JS OVERRIDES — Light Theme
    ───────────────────────────────────────────── */
-.xterm {
+.studio-square .xterm {
   width: 100%;
   height: 100%;
+  -webkit-user-select: text !important;
+  user-select: text !important;
+}
+.studio-square .xterm * {
+  -webkit-user-select: text !important;
+  user-select: text !important;
 }
 .xterm-viewport {
   background-color: var(--card) !important;
