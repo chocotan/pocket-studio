@@ -117,6 +117,7 @@ jobs:
           name: release-${{ matrix.artifact-os }}-${{ matrix.artifact-arch }}
           path: dist/release/*
           if-no-files-found: error
+          retention-days: 3
 
   publish:
     name: Upload artifacts to GitHub Release

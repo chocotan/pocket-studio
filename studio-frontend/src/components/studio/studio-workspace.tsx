@@ -1160,7 +1160,7 @@ export function StudioWorkspace({
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white hover:bg-slate-50 text-slate-700 hover:text-slate-900 border border-slate-205 hover:border-slate-300 shadow-sm font-semibold text-[11px] transition-all active:scale-95 duration-150 cursor-pointer dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-white"
           >
             <ArrowLeft className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />
-            返回项目大厅
+            返回
           </button>
         </div>
       </header>
