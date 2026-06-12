@@ -76,7 +76,7 @@ type Hub struct {
 	pending       map[string]chan protocol.Envelope
 	projects      map[string]Project
 	termMu        sync.RWMutex
-	terminalConns map[string]*terminalConn
+	terminalConns map[string]map[*terminalConn]struct{}
 }
 
 type daemonConn struct {
@@ -131,7 +131,7 @@ func NewHub(authManager *auth.Manager) *Hub {
 		taskRecords:   make(map[string]protocol.TaskRecord),
 		pending:       make(map[string]chan protocol.Envelope),
 		projects:      make(map[string]Project),
-		terminalConns: make(map[string]*terminalConn),
+		terminalConns: make(map[string]map[*terminalConn]struct{}),
 	}
 	return h
 }
@@ -837,12 +837,13 @@ func (h *Hub) readWebLoop(wc *webConn) {
 
 func (h *Hub) closeTerminal(userID string, projectID string, terminalID string) {
 	key := terminalKey(userID, projectID, terminalID)
+	conns := h.terminalSubscribers(key)
 	h.termMu.Lock()
-	if wc := h.terminalConns[key]; wc != nil {
-		_ = wc.conn.Close()
-		delete(h.terminalConns, key)
-	}
+	delete(h.terminalConns, key)
 	h.termMu.Unlock()
+	for _, wc := range conns {
+		_ = wc.conn.Close()
+	}
 
 	h.mu.RLock()
 	project, ok := h.projects[scopedKey(userID, projectID)]
@@ -1003,10 +1004,7 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			streamTitle, err := protocol.DecodePayload[protocol.TerminalStreamTitle](env)
 			if err == nil {
 				key := terminalKey(dc.userID, streamTitle.ProjectID, streamTitle.TerminalID)
-				h.termMu.RLock()
-				wc := h.terminalConns[key]
-				h.termMu.RUnlock()
-				if wc != nil {
+				for _, wc := range h.terminalSubscribers(key) {
 					wc.mu.Lock()
 					_ = wc.conn.WriteJSON(map[string]string{
 						"type":    "title",
@@ -1020,11 +1018,11 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			streamExit, err := protocol.DecodePayload[protocol.TerminalStreamExit](env)
 			if err == nil {
 				key := terminalKey(dc.userID, streamExit.ProjectID, streamExit.TerminalID)
+				conns := h.terminalSubscribers(key)
 				h.termMu.Lock()
-				wc := h.terminalConns[key]
 				delete(h.terminalConns, key)
 				h.termMu.Unlock()
-				if wc != nil {
+				for _, wc := range conns {
 					_ = wc.conn.Close()
 				}
 			}
@@ -1077,15 +1075,22 @@ func (h *Hub) stateView(userID string) StateView {
 
 func (h *Hub) forwardTerminalStreamData(userID string, streamData protocol.TerminalStreamData) {
 	key := terminalKey(userID, streamData.ProjectID, streamData.TerminalID)
-	h.termMu.RLock()
-	wc := h.terminalConns[key]
-	h.termMu.RUnlock()
-	if wc == nil {
-		return
+	for _, wc := range h.terminalSubscribers(key) {
+		wc.mu.Lock()
+		_ = wc.conn.WriteMessage(websocket.BinaryMessage, streamData.Data)
+		wc.mu.Unlock()
 	}
-	wc.mu.Lock()
-	_ = wc.conn.WriteMessage(websocket.BinaryMessage, streamData.Data)
-	wc.mu.Unlock()
+}
+
+func (h *Hub) terminalSubscribers(key string) []*terminalConn {
+	h.termMu.RLock()
+	subscribers := h.terminalConns[key]
+	conns := make([]*terminalConn, 0, len(subscribers))
+	for wc := range subscribers {
+		conns = append(conns, wc)
+	}
+	h.termMu.RUnlock()
+	return conns
 }
 
 func (h *Hub) requestDaemon(r *http.Request, messageType string, workspacePath string, requestID string, payload any) (protocol.Envelope, error) {
@@ -1541,12 +1546,18 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	key := terminalKey(userID, projID, terminalID)
 	terminal := &terminalConn{conn: conn}
 	h.termMu.Lock()
-	h.terminalConns[key] = terminal
+	if h.terminalConns[key] == nil {
+		h.terminalConns[key] = make(map[*terminalConn]struct{})
+	}
+	h.terminalConns[key][terminal] = struct{}{}
 	h.termMu.Unlock()
 	defer func() {
 		h.termMu.Lock()
-		if h.terminalConns[key] == terminal {
-			delete(h.terminalConns, key)
+		if subscribers := h.terminalConns[key]; subscribers != nil {
+			delete(subscribers, terminal)
+			if len(subscribers) == 0 {
+				delete(h.terminalConns, key)
+			}
 		}
 		h.termMu.Unlock()
 	}()
