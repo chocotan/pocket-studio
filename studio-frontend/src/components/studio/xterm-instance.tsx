@@ -381,11 +381,11 @@ export function XtermInstance({
         if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
         const key = event.key.toLowerCase();
         if (key === "c") {
-          const selection = term?.getSelection();
-          if (!selection) return;
           event.preventDefault();
           event.stopPropagation();
           event.stopImmediatePropagation();
+          const selection = term?.getSelection();
+          if (!selection) return;
           if (navigator.clipboard?.writeText && window.isSecureContext) {
             void navigator.clipboard.writeText(selection).catch(() => writeClipboardFallback(selection));
           } else {

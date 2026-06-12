@@ -3078,7 +3078,7 @@ set-option -g default-terminal "tmux-256color"
 set-option -g terminal-overrides ",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB"
 set-option -ga terminal-features ",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB"
 set-option -g history-limit 50000
-set-option -g mouse on
+set-option -g mouse off
 set-option -sg escape-time 10
 set-option -g prefix C-a
 unbind-key C-b

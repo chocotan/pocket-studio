@@ -464,6 +464,12 @@ async function createWindow(serverURL, serverURLSource) {
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     log("renderer gone", details);
   });
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    const key = String(input.key || "").toLowerCase();
+    if (input.control && input.shift && key === "c" && !input.alt && !input.meta) {
+      event.preventDefault();
+    }
+  });
   await mainWindow.loadURL(target.toString());
 }
 
