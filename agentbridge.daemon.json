@@ -3,10 +3,7 @@
     "id": "dev_local",
     "name": ""
   },
-  "server": {
-    "url": "ws://nas.local.javaer101.com:18080/ws/daemon",
-    "token": "ps_qUibCJpWEX38X0ZsuD79nrgCf03DLx9O3PPGTuYUs58"
-  },
+  "server": {},
   "claude": {
     "command": "claude",
     "args": [

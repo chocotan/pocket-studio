@@ -150,8 +150,8 @@ http://<server-host>:18080/
 | --- | --- | --- |
 | `-daemon.device.id` | `dev_local` | 设备 ID。 |
 | `-daemon.device.name` | 当前主机名 | Studio 中显示的设备名称。 |
-| `-daemon.server.url` | `ws://localhost:8080/ws/daemon` | daemon 连接的 server WebSocket 地址。 |
-| `-daemon.server.token` | 空 | 连接 server 使用的 token。 |
+| `-daemon.server.url` | 必填 | daemon 连接的 server WebSocket 地址。 |
+| `-daemon.server.token` | 必填 | 连接 server 使用的 token。 |
 | `-daemon.workspace` | `~/Agent` | 项目目录，可重复传。支持 `id:name:path` 格式，其中 `id` 是内部标识，`name` 是页面显示名，`path` 是本机项目路径。 |
 
 ### AppImage 常用参数

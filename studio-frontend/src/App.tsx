@@ -1,9 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { StudioDashboard, type Project } from "./components/studio/studio-dashboard";
 import { StudioWorkspace } from "./components/studio/studio-workspace";
 import type { Device } from "./lib/types";
 import { getJSON, loadClientConfig } from "./lib/api";
 import { loadZoom, saveZoom, type PageZoom } from "./lib/zoom";
+
+const PROJECT_ORDER_KEY = "pocket-studio-project-order";
 
 export default function App() {
   const initialProjectId = projectIdFromPath();
@@ -12,12 +14,18 @@ export default function App() {
   );
   const [devices, setDevices] = useState<Device[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectOrder, setProjectOrder] = useState<string[]>(() => loadProjectOrder());
   const [selectedProjectId, setSelectedProjectId] = useState<string>(initialProjectId);
   const [pageZoom, setPageZoom] = useState<PageZoom>(() => loadZoom());
+  const orderedProjects = useMemo(() => orderProjects(projects, projectOrder), [projectOrder, projects]);
 
   useEffect(() => {
     saveZoom(pageZoom);
   }, [pageZoom]);
+
+  useEffect(() => {
+    saveProjectOrder(mergeProjectOrder(projectOrder, projects));
+  }, [projectOrder, projects]);
 
   useEffect(() => {
     void loadClientConfig().then((cfg) => {
@@ -36,13 +44,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedProjectId || projects.length === 0) return;
-    if (!projects.some((project) => project.id === selectedProjectId)) {
+    if (!selectedProjectId || orderedProjects.length === 0) return;
+    if (!orderedProjects.some((project) => project.id === selectedProjectId)) {
       setSelectedProjectId("");
       setView("studio_dashboard");
       replacePath(studioPath("/"));
     }
-  }, [projects, selectedProjectId]);
+  }, [orderedProjects, selectedProjectId]);
 
   async function refreshAll() {
     try {
@@ -70,21 +78,19 @@ export default function App() {
     pushPath(studioPath(`/projects/${encodeURIComponent(projectId)}`));
   }
 
-  const activeProject = projects.find((p) => p.id === selectedProjectId);
-  const activeDevice = activeProject
-    ? devices.find((device) => device.id === activeProject.device_id)
-    : undefined;
-  const activeDeviceName = activeProject
-    ? activeDevice?.name || activeProject.device_id
-    : "";
+  function handleMoveProject(projectId: string, direction: "up" | "down") {
+    setProjectOrder((current) => moveProjectInOrder(current, orderedProjects, projectId, direction));
+  }
 
+  const activeProject = orderedProjects.find((p) => p.id === selectedProjectId);
   return (
     <div className="h-full w-full">
       {view === "studio_dashboard" ? (
         <StudioDashboard
           devices={devices}
-          projects={projects}
+          projects={orderedProjects}
           onSelectProject={handleSelectProject}
+          onMoveProject={handleMoveProject}
           onRefreshProjects={refreshAll}
           pageZoom={pageZoom}
           onPageZoomChange={setPageZoom}
@@ -94,9 +100,11 @@ export default function App() {
           <StudioWorkspace
             projectId={selectedProjectId}
             project={activeProject}
-            deviceName={activeDeviceName}
+            projects={orderedProjects}
+            devices={devices}
             pageZoom={pageZoom}
             onPageZoomChange={setPageZoom}
+            onSelectProject={handleSelectProject}
             onBackToDashboard={() => {
               refreshAll();
               setView("studio_dashboard");
@@ -140,6 +148,49 @@ function pushPath(path: string) {
 function replacePath(path: string) {
   if (window.location.pathname === path) return;
   window.history.replaceState({}, "", path);
+}
+
+function loadProjectOrder() {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(PROJECT_ORDER_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveProjectOrder(order: string[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(order));
+  } catch {
+    // Ignore storage failures in restricted browser contexts.
+  }
+}
+
+function mergeProjectOrder(order: string[], projects: Project[]) {
+  const projectIds = projects.map((project) => project.id);
+  const knownIds = new Set(projectIds);
+  const orderedKnown = order.filter((id) => knownIds.has(id));
+  const orderedSet = new Set(orderedKnown);
+  return [...orderedKnown, ...projectIds.filter((id) => !orderedSet.has(id))];
+}
+
+function orderProjects(projects: Project[], order: string[]) {
+  const rank = new Map(mergeProjectOrder(order, projects).map((id, index) => [id, index]));
+  return [...projects].sort((a, b) => (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+}
+
+function moveProjectInOrder(order: string[], projects: Project[], projectId: string, direction: "up" | "down") {
+  const nextOrder = mergeProjectOrder(order, projects);
+  const index = nextOrder.indexOf(projectId);
+  if (index === -1) return nextOrder;
+  const swapWith = direction === "up" ? index - 1 : index + 1;
+  if (swapWith < 0 || swapWith >= nextOrder.length) return nextOrder;
+  [nextOrder[index], nextOrder[swapWith]] = [nextOrder[swapWith], nextOrder[index]];
+  return nextOrder;
 }
 
 function syncAppImageURL(serverURL: string, token: string) {

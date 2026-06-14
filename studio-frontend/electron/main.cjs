@@ -313,9 +313,7 @@ function spawnManaged(command, args, env) {
 
 function daemonArgsFor(serverURL, token, workspace) {
   const args = ["-daemon.server.url", daemonWebSocketURL(serverURL)];
-  if (token) {
-    args.push("-daemon.server.token", token);
-  }
+  args.push("-daemon.server.token", token);
   if (workspace) {
     args.push("-daemon.workspace", workspace);
   }

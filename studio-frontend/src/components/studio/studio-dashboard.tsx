@@ -34,6 +34,7 @@ import {
 import { ZoomSelect } from "./zoom-select";
 import type { PageZoom } from "@/lib/zoom";
 import { ShortcutSettingsContent } from "./studio-settings";
+import { ProjectSwitcher } from "./project-switcher";
 
 export interface Project {
   id: string;
@@ -49,6 +50,7 @@ interface StudioDashboardProps {
   devices: Device[];
   projects: Project[];
   onSelectProject: (projectId: string) => void;
+  onMoveProject: (projectId: string, direction: "up" | "down") => void;
   onRefreshProjects: () => void;
   pageZoom: PageZoom;
   onPageZoomChange: (zoom: PageZoom) => void;
@@ -92,6 +94,7 @@ export function StudioDashboard({
   devices,
   projects,
   onSelectProject,
+  onMoveProject,
   onRefreshProjects,
   pageZoom,
   onPageZoomChange,
@@ -332,6 +335,13 @@ export function StudioDashboard({
         </div>
 
         <div className="flex items-center gap-3">
+          <ProjectSwitcher
+            projects={projects}
+            devices={devices}
+            onSelectProject={onSelectProject}
+            onMoveProject={onMoveProject}
+            triggerClassName="hidden sm:flex"
+          />
           <ZoomSelect value={pageZoom} onChange={onPageZoomChange} />
           <button
             type="button"

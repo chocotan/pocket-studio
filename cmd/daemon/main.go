@@ -51,8 +51,8 @@ func configFromFlags() (daemon.Config, error) {
 
 	flag.StringVar(&cfg.Device.ID, "daemon.device.id", cfg.Device.ID, "device id reported to server")
 	flag.StringVar(&cfg.Device.Name, "daemon.device.name", cfg.Device.Name, "device display name")
-	flag.StringVar(&cfg.Server.URL, "daemon.server.url", cfg.Server.URL, "server websocket URL, for example ws://host:18080/ws/daemon")
-	flag.StringVar(&cfg.Server.Token, "daemon.server.token", cfg.Server.Token, "server access token")
+	flag.StringVar(&cfg.Server.URL, "daemon.server.url", cfg.Server.URL, "required server websocket URL, for example ws://host:18080/ws/daemon")
+	flag.StringVar(&cfg.Server.Token, "daemon.server.token", cfg.Server.Token, "required server access token")
 	flag.Var(&workspaceValues, "daemon.workspace", "workspace path or id:name:path; may be repeated")
 	flag.BoolVar(&cfg.ACPX.Enabled, "daemon.acpx.enabled", cfg.ACPX.Enabled, "enable acpx agent execution")
 	flag.StringVar(&cfg.ACPX.Command, "daemon.acpx.command", cfg.ACPX.Command, "acpx command")

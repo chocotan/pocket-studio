@@ -54,9 +54,14 @@ func NormalizeConfig(cfg Config) (Config, error) {
 		cfg.Device = device
 	}
 	cfg.Device.Name = hostinfo.ResolveDeviceName(cfg.Device.Name)
-	if cfg.Server.URL == "" {
-		cfg.Server.URL = "ws://localhost:8080/ws/daemon"
+	if strings.TrimSpace(cfg.Server.URL) == "" {
+		return cfg, fmt.Errorf("daemon.server.url is required")
 	}
+	cfg.Server.URL = strings.TrimSpace(cfg.Server.URL)
+	if strings.TrimSpace(cfg.Server.Token) == "" {
+		return cfg, fmt.Errorf("daemon.server.token is required")
+	}
+	cfg.Server.Token = strings.TrimSpace(cfg.Server.Token)
 	if cfg.Claude.Command == "" {
 		cfg.Claude.Command = "claude"
 	}
@@ -101,9 +106,6 @@ func DefaultConfig() Config {
 	return Config{
 		Device: DeviceConfig{
 			Name: hostinfo.DisplayName(),
-		},
-		Server: ServerConfig{
-			URL: "ws://localhost:8080/ws/daemon",
 		},
 		Claude: ClaudeConfig{
 			Command: "claude",
