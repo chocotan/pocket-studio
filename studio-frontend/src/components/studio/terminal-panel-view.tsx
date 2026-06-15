@@ -18,7 +18,6 @@ import {
   type SplitDirection,
   type TerminalKind,
   type TerminalTitleState,
-  type TerminalTitleSource,
   type StudioTheme,
 } from "./terminal-types";
 
@@ -43,8 +42,10 @@ interface TerminalPanelViewProps {
   onTabDragEnd: (fromPanelId: string, tabId: string, clientX: number, clientY: number, fallbackIndex: number) => void;
   onTabDragCancel: () => void;
   onClosePanel: (id: string) => void;
-  onTitleChange: (id: string, title: string, command?: string, source?: TerminalTitleSource) => void;
+  onTitleChange: (id: string, title: string, command?: string, fullTitle?: string) => void;
+  onTerminalFocus: (panelId: string, tabId: string) => void;
   terminalTitles: Record<string, TerminalTitleState>;
+  alertTerminalIds?: Set<string>;
   layoutVersion: number;
   theme?: StudioTheme;
 }
@@ -70,14 +71,19 @@ function TerminalPanelViewComponent({
   onTabDragCancel,
   onClosePanel,
   onTitleChange,
+  onTerminalFocus,
   terminalTitles,
+  alertTerminalIds = new Set<string>(),
   layoutVersion,
   theme = "light",
 }: TerminalPanelViewProps) {
+  const tabbarRef = useRef<HTMLDivElement | null>(null);
   const tabScrollerRef = useRef<HTMLDivElement | null>(null);
+  const addButtonRef = useRef<HTMLButtonElement | null>(null);
   const tabButtonRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const pointerDragRef = useRef<{ panelId: string; tabId: string; pointerId: number; startX: number; startY: number; dragging: boolean } | null>(null);
   const [scrollState, setScrollState] = useState({ canLeft: false, canRight: false });
+  const [addMenuPosition, setAddMenuPosition] = useState({ left: 4, top: 26 });
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const isFocused = panel.focus;
   const splitActions = [
@@ -106,7 +112,7 @@ function TerminalPanelViewComponent({
     rose: "bg-rose-100 text-rose-600 ring-1 ring-rose-200/70 dark:bg-rose-400/16 dark:text-rose-200 dark:ring-rose-300/20",
     lime: "bg-lime-100 text-lime-700 ring-1 ring-lime-200/70 dark:bg-lime-400/16 dark:text-lime-200 dark:ring-lime-300/20",
   };
-  const addMenuLeft = Math.min(panel.tabs.length * 112 + 28, 520);
+  const panelAlert = panel.tabs.some((tab) => alertTerminalIds.has(tab.id));
 
   function updateScrollState() {
     const scroller = tabScrollerRef.current;
@@ -118,6 +124,20 @@ function TerminalPanelViewComponent({
     });
   }
 
+  function updateAddMenuPosition() {
+    const tabbar = tabbarRef.current;
+    const button = addButtonRef.current;
+    if (!tabbar || !button) return;
+    const tabbarRect = tabbar.getBoundingClientRect();
+    const buttonRect = button.getBoundingClientRect();
+    const menuWidth = 160;
+    const left = Math.max(4, Math.min(buttonRect.left - tabbarRect.left, tabbarRect.width - menuWidth - 4));
+    setAddMenuPosition({
+      left,
+      top: buttonRect.bottom - tabbarRect.top + 2,
+    });
+  }
+
   function scrollTabs(direction: "left" | "right") {
     const scroller = tabScrollerRef.current;
     if (!scroller) return;
@@ -125,6 +145,21 @@ function TerminalPanelViewComponent({
       left: direction === "left" ? -Math.max(160, scroller.clientWidth * 0.7) : Math.max(160, scroller.clientWidth * 0.7),
       behavior: "smooth",
     });
+  }
+
+  function displayTitleForTab(tab: TerminalPanel["tabs"][number]) {
+    if (tab.kind === "file_explorer") return "文件";
+    if (tab.kind === "file_viewer") return tab.title;
+    const liveTitle = terminalTitles[tab.id];
+    return cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType);
+  }
+
+  function fullTitleForTab(tab: TerminalPanel["tabs"][number]) {
+    if (tab.kind === "file_explorer") return "文件";
+    if (tab.kind === "file_viewer") return tab.title;
+    const liveTitle = terminalTitles[tab.id];
+    const rawTitle = (liveTitle?.fullTitle || liveTitle?.title || tab.title || "").trim();
+    return rawTitle || terminalType(tab.termType).title;
   }
 
   function getDropIndex(clientX: number) {
@@ -209,6 +244,22 @@ function TerminalPanelViewComponent({
   }, [panel.tabs.length, layoutVersion]);
 
   useEffect(() => {
+    if (addMenuPanelId !== panel.id) return;
+    updateAddMenuPosition();
+    const scroller = tabScrollerRef.current;
+    const tabbar = tabbarRef.current;
+    const resizeObserver = new ResizeObserver(updateAddMenuPosition);
+    if (tabbar) resizeObserver.observe(tabbar);
+    window.addEventListener("resize", updateAddMenuPosition);
+    scroller?.addEventListener("scroll", updateAddMenuPosition);
+    return () => {
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", updateAddMenuPosition);
+      scroller?.removeEventListener("scroll", updateAddMenuPosition);
+    };
+  }, [addMenuPanelId, panel.id, panel.tabs.length, layoutVersion]);
+
+  useEffect(() => {
     const activeTab = tabButtonRefs.current[panel.activeTabId];
     activeTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
     updateScrollState();
@@ -223,6 +274,7 @@ function TerminalPanelViewComponent({
       data-studio-panel="true"
       data-panel-id={panel.id}
       data-focused={isFocused ? "true" : "false"}
+      data-alert={panelAlert ? "true" : "false"}
       onClick={() => onFocus(panel.id)}
       onPointerEnter={() => {
         if (!isFocused) onFocus(panel.id);
@@ -231,6 +283,7 @@ function TerminalPanelViewComponent({
       className={`studio-panel box-border bg-card text-card-foreground transition-[border-color,box-shadow] duration-150 ${focusClasses}`}
     >
       <div
+        ref={tabbarRef}
         data-studio-tabbar="true"
         data-panel-id={panel.id}
         data-tab-count={panel.tabs.length}
@@ -258,13 +311,13 @@ function TerminalPanelViewComponent({
           {panel.tabs.map((tab) => {
             const isFileExplorer = tab.kind === "file_explorer";
             const isFileViewer = tab.kind === "file_viewer";
-            const liveTitle = terminalTitles[tab.id];
+            const liveTitle = tab.kind === "terminal" ? terminalTitles[tab.id] : undefined;
             const activeCommand = liveTitle?.command || tab.activeCommand || "";
             const displayType = terminalType(terminalTypeFromCommand(activeCommand, tab.termType));
-            const displayTitle = isFileExplorer || isFileViewer
-              ? isFileExplorer ? "文件" : tab.title
-              : cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType);
+            const displayTitle = displayTitleForTab(tab);
+            const fullTitle = fullTitleForTab(tab);
             const active = tab.id === panel.activeTabId;
+            const alerting = alertTerminalIds.has(tab.id) && !(isFocused && active);
             const tabIndex = panel.tabs.indexOf(tab);
             return (
               <React.Fragment key={tab.id}>
@@ -289,6 +342,7 @@ function TerminalPanelViewComponent({
                         data-studio-tab="true"
                         data-panel-id={panel.id}
                         data-tab-index={tabIndex}
+                        data-alert={alerting ? "true" : "false"}
                         ref={(element) => {
                           tabButtonRefs.current[tab.id] = element;
                         }}
@@ -296,13 +350,13 @@ function TerminalPanelViewComponent({
                         onPointerMove={handleTabPointerMove}
                         onPointerUp={handleTabPointerUp}
                         onPointerCancel={handleTabPointerCancel}
-                        className={`studio-tab group flex h-6 min-w-[72px] max-w-[220px] flex-[0_1_auto] items-center gap-1 rounded-t-md border px-1.5 text-left transition-colors ${
+                        className={`studio-tab group flex h-6 min-w-11 max-w-[420px] flex-[0_1_auto] items-center gap-1 rounded-t-md border px-1.5 text-left transition-colors ${
                           active
                             ? "studio-tab-active relative z-20 border-border bg-card text-foreground shadow-sm"
                             : "studio-tab-inactive relative border-border/50 bg-muted/40 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
                         }`}
                       >
-                        <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-md ${
+                        <span className={`relative z-10 flex h-4 w-4 shrink-0 items-center justify-center rounded-md ${
                           isFileExplorer
                             ? active ? "bg-sky-100 text-sky-700 ring-1 ring-sky-200/70 dark:bg-sky-400/16 dark:text-sky-200 dark:ring-sky-300/20" : "text-slate-400 dark:text-slate-600"
                             : isFileViewer
@@ -315,7 +369,7 @@ function TerminalPanelViewComponent({
                               ? tab.fileKind === "image" ? <ImageIcon className="h-3.5 w-3.5" /> : <FileText className="h-3.5 w-3.5" />
                               : displayType.logo}
                         </span>
-                        <span className="min-w-0 flex-1 truncate text-[11px] font-semibold leading-none">
+                        <span className="relative z-10 min-w-0 flex-1 truncate text-[11px] font-semibold leading-none">
                           {displayTitle}
                         </span>
                         <button
@@ -337,7 +391,7 @@ function TerminalPanelViewComponent({
                           onPointerUp={(event) => {
                             event.stopPropagation();
                           }}
-                          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-slate-400 opacity-0 transition-opacity hover:bg-rose-50 hover:text-rose-500 group-hover:opacity-100 dark:text-slate-600 dark:hover:bg-rose-400/10 dark:hover:text-rose-300"
+                          className="relative z-10 flex h-4 w-4 shrink-0 items-center justify-center rounded text-slate-400 opacity-0 transition-opacity hover:bg-rose-50 hover:text-rose-500 group-hover:opacity-100 dark:text-slate-600 dark:hover:bg-rose-400/10 dark:hover:text-rose-300"
                           aria-label="关闭标签"
                         >
                           <X className="h-3 w-3" />
@@ -345,8 +399,8 @@ function TerminalPanelViewComponent({
                       </div>
                     }
                   />
-                  <TooltipContent side="bottom" className="max-w-[360px] text-[10px] font-medium">
-                    {displayTitle}
+                  <TooltipContent side="bottom" className="max-w-[420px] whitespace-normal break-words text-[10px] font-medium leading-relaxed">
+                    {fullTitle}
                   </TooltipContent>
                 </Tooltip>
               </React.Fragment>
@@ -358,9 +412,11 @@ function TerminalPanelViewComponent({
               <TooltipTrigger
                 render={
                   <button
+                    ref={addButtonRef}
                     type="button"
                     onClick={(event) => {
                       event.stopPropagation();
+                      updateAddMenuPosition();
                       onAddMenu(panel.id);
                     }}
                     className="flex h-6 w-5 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white hover:text-indigo-600"
@@ -393,7 +449,7 @@ function TerminalPanelViewComponent({
         {addMenuPanelId === panel.id && (
           <TerminalTypeMenu
             align="left"
-            style={{ left: addMenuLeft, top: 26 }}
+            style={addMenuPosition}
             onSelect={(kind) => onAddTab(panel.id, kind)}
             onFileExplorer={() => onAddFileExplorer(panel.id)}
           />
@@ -520,7 +576,8 @@ function TerminalPanelViewComponent({
                     isActive={isFocused && active}
                     layoutVersion={layoutVersion}
                     theme={theme}
-                    onTitleChange={(title, command, source) => onTitleChange(tab.id, title, command, source)}
+                    onTitleChange={(title, command, fullTitle) => onTitleChange(tab.id, title, command, fullTitle)}
+                    onActiveFocus={() => onTerminalFocus(panel.id, tab.id)}
                   />
                 )}
               </div>

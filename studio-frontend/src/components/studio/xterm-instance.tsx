@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { Terminal as XTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import type { TerminalTitleSource, StudioTheme } from "./terminal-types";
+import type { StudioTheme } from "./terminal-types";
 import { websocketURL } from "@/lib/api";
 
 export function getXtermTheme(theme: StudioTheme) {
@@ -201,7 +201,8 @@ interface XtermInstanceProps {
   isActive: boolean;
   layoutVersion?: number;
   theme?: StudioTheme;
-  onTitleChange?: (title: string, command?: string, source?: TerminalTitleSource) => void;
+  onTitleChange?: (title: string, command?: string, fullTitle?: string) => void;
+  onActiveFocus?: () => void;
 }
 
 
@@ -212,7 +213,8 @@ export function XtermInstance({
   isActive,
   layoutVersion = 0,
   theme = "light",
-  onTitleChange
+  onTitleChange,
+  onActiveFocus,
 }: XtermInstanceProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const xtermRef    = useRef<XTerminal | null>(null);
@@ -226,6 +228,7 @@ export function XtermInstance({
   const resizeDebounceTimerRef = useRef<number | null>(null);
   const terminalReadyRef = useRef(false);
   const isActiveRef = useRef(isActive);
+  const onActiveFocusRef = useRef(onActiveFocus);
   const incomingBuf = useRef<Array<string | Uint8Array>>([]);
   // Buffer keystrokes that arrive before WS is OPEN
   const inputBuf    = useRef<string[]>([]);
@@ -233,6 +236,10 @@ export function XtermInstance({
   useEffect(() => {
     onTitleChangeRef.current = onTitleChange;
   }, [onTitleChange]);
+
+  useEffect(() => {
+    onActiveFocusRef.current = onActiveFocus;
+  }, [onActiveFocus]);
 
   useEffect(() => {
     isActiveRef.current = isActive;
@@ -347,12 +354,12 @@ export function XtermInstance({
 
     let term: XTerminal | null = null;
     let fitAddon: FitAddon | null = null;
-    let titleDisposable: { dispose: () => void } | null = null;
     let connectFrame: number | null = null;
     let cancelInitialFit: (() => void) | null = null;
     let cancelFontFit: (() => void) | null = null;
     let cancelCopyPasteShortcut: (() => void) | null = null;
     let cancelPasteHandler: (() => void) | null = null;
+    let cancelFocusHandler: (() => void) | null = null;
     let osc52Disposable: { dispose: () => void } | null = null;
     const postOpenResizeTimers: number[] = [];
 
@@ -374,7 +381,7 @@ export function XtermInstance({
         fontSize:      12,
         fontFamily:    "JetBrains Mono, Menlo, Monaco, Consolas, monospace",
         lineHeight:    1.2,
-        scrollback:    50000,
+        scrollback:    0,
         scrollSensitivity: 1,
         scrollOnUserInput: true,
         allowProposedApi: true,
@@ -389,9 +396,6 @@ export function XtermInstance({
       fitAddonRef.current = fitAddon;
       term.loadAddon(fitAddon);
 
-      titleDisposable = term.onTitleChange((title) => {
-        onTitleChangeRef.current?.(title, undefined, "terminal");
-      });
       osc52Disposable = term.parser.registerOscHandler(52, (data) => {
         const text = osc52ClipboardText(data);
         if (!text) return true;
@@ -400,22 +404,14 @@ export function XtermInstance({
           () => true,
         );
       });
-
-      term.attachCustomWheelEventHandler((event) => {
-        if (event.ctrlKey) return true;
-        if (term!.modes.mouseTrackingMode !== "none") return true;
-        const rawDelta = event.deltaMode === WheelEvent.DOM_DELTA_PIXEL
-          ? event.deltaY / 18
-          : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-            ? event.deltaY * term!.rows
-            : event.deltaY;
-        const lines = Math.sign(rawDelta) * Math.max(1, Math.min(12, Math.round(Math.abs(rawDelta))));
-        term!.scrollLines(lines);
-        event.preventDefault();
-        event.stopPropagation();
-        return false;
-      });
-
+      const handleTerminalFocus = () => {
+        if (!isActiveRef.current) return;
+        onActiveFocusRef.current?.();
+      };
+      container.addEventListener("focusin", handleTerminalFocus);
+      cancelFocusHandler = () => {
+        container.removeEventListener("focusin", handleTerminalFocus);
+      };
       /* Mount terminal into the container div */
       term.open(container);
 
@@ -533,9 +529,9 @@ export function XtermInstance({
             writeTerminalData(new Uint8Array(event.data));
           } else if (typeof event.data === "string") {
             try {
-              const message = JSON.parse(event.data) as { type?: string; title?: string; command?: string };
+              const message = JSON.parse(event.data) as { type?: string; title?: string; full_title?: string; command?: string };
               if (message.type === "title" && typeof message.title === "string") {
-                onTitleChangeRef.current?.(message.title, message.command, "tmux");
+                onTitleChangeRef.current?.(message.title, message.command, message.full_title);
                 return;
               }
             } catch {
@@ -611,6 +607,7 @@ export function XtermInstance({
       disposedRef.current = true;
       if (cancelCopyPasteShortcut) cancelCopyPasteShortcut();
       if (cancelPasteHandler) cancelPasteHandler();
+      if (cancelFocusHandler) cancelFocusHandler();
       if (cancelInitialFit) cancelInitialFit();
       if (cancelFontFit) cancelFontFit();
       window.removeEventListener("resize", handleWinResize);
@@ -627,7 +624,6 @@ export function XtermInstance({
       terminalReadyRef.current = false;
       incomingBuf.current = [];
       ro.disconnect();
-      if (titleDisposable) titleDisposable.dispose();
       if (osc52Disposable) osc52Disposable.dispose();
       if (connectFrame !== null) window.cancelAnimationFrame(connectFrame);
       if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
@@ -655,12 +651,15 @@ export function XtermInstance({
 
   /* Re-fit and force PTY size sync when this pane becomes the focused/active one */
   useEffect(() => {
+    isActiveRef.current = isActive;
     if (!isActive) return;
     const focusFrame = window.requestAnimationFrame(() => {
       xtermRef.current?.focus();
+      onActiveFocusRef.current?.();
     });
     const timer1 = window.setTimeout(() => {
       xtermRef.current?.focus();
+      onActiveFocusRef.current?.();
       scheduleFitBurst();
       scheduleResizeAfterFit();
     }, 150);

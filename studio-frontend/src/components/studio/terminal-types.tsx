@@ -5,11 +5,12 @@ import { Antigravity, ClaudeCode, Codex, KiloCode, OpenCode } from "@lobehub/ico
 export type TerminalKind = "bash" | "claude" | "codex" | "opencode" | "kilo" | "pi" | "agy";
 export type SplitDirection = "left" | "right" | "top" | "bottom";
 export type TerminalAccent = "indigo" | "violet" | "emerald" | "amber" | "cyan" | "rose" | "lime";
-export type TerminalTitleSource = "initial" | "tmux" | "terminal";
+export type TerminalTitleSource = "initial" | "tmux";
 export type StudioTheme = "light" | "claude" | "dark" | "synthwave" | "onedark";
 
 export interface TerminalTitleState {
   title: string;
+  fullTitle?: string;
   command: string;
   source: TerminalTitleSource;
 }
