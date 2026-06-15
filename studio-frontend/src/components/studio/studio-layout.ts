@@ -278,7 +278,7 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): TerminalTab | n
       : cleanTerminalTitle(typeof tab.title === "string" ? tab.title : "", type.title, kind),
     termType: kind,
     activeCommand: typeof tab.activeCommand === "string" ? tab.activeCommand : "",
-    titleSource: tab.titleSource === "terminal" || tab.titleSource === "tmux" ? tab.titleSource : "initial",
+    titleSource: tab.titleSource === "tmux" ? tab.titleSource : "initial",
     filePath,
     fileKind: tab.fileKind === "text" || tab.fileKind === "image" ? tab.fileKind : "unknown",
   };
