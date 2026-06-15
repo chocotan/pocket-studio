@@ -1649,6 +1649,8 @@ func initialTerminalTitle(command string) string {
 		return "Shell"
 	}
 	switch {
+	case command == "online" || command == "acpx" || strings.HasPrefix(command, "acpx "):
+		return "在线类型"
 	case strings.Contains(command, "claude"):
 		return "Claude Code"
 	case strings.Contains(command, "codex"):

@@ -534,6 +534,8 @@ func lookPathAny(names ...string) string {
 
 func agentDisplayName(agent string) string {
 	switch strings.ToLower(strings.TrimSpace(agent)) {
+	case "acpx", "online":
+		return "在线类型"
 	case "claude", "claude_code", "claude-code":
 		return "Claude Code"
 	case "codex":
@@ -2859,10 +2861,11 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 		return
 	}
 
-	initialTitle := initialTerminalTitle(req.Command, req.InitialTitle)
-	agentName := agentTerminalCommand(req.Command)
+	terminalCommand := d.normalizeTerminalCommand(req.Command)
+	initialTitle := initialTerminalTitle(terminalCommand, req.InitialTitle)
+	agentName := agentTerminalCommand(terminalCommand)
 	agentHooks := d.prepareTerminalAgentHooks(workspace.Path, req.ProjectID, req.TerminalID, agentName)
-	command := terminalAgentCommandWithHooks(req.Command, agentName, agentHooks.env)
+	command := terminalAgentCommandWithHooks(terminalCommand, agentName, agentHooks.env)
 	cmd, err := tmuxNewSessionCommand(sessionName, initialTitle, workspace.Path, command, agentHooks.env)
 	if err != nil {
 		log.Printf("daemon failed to prepare tmux config: %v. falling back to user shell.", err)
@@ -3374,6 +3377,8 @@ func initialTerminalTitle(command string, fallback string) string {
 		return "Shell"
 	}
 	switch {
+	case command == "online" || command == "acpx" || strings.HasPrefix(command, "acpx "):
+		return "在线类型"
 	case strings.Contains(command, "claude"):
 		return "Claude Code"
 	case strings.Contains(command, "codex"):
@@ -3389,6 +3394,14 @@ func initialTerminalTitle(command string, fallback string) string {
 	default:
 		return command
 	}
+}
+
+func (d *Daemon) normalizeTerminalCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "online" {
+		return shellCommand([]string{d.cfg.ACPX.Command, taskAgentName(protocol.TaskDispatch{}, d.cfg.ACPX.Agent)})
+	}
+	return command
 }
 
 type terminalAgentHooks struct {
@@ -4069,10 +4082,12 @@ func agentTerminalCommand(command string) string {
 		base = filepath.Base(fields[0])
 	}
 	switch base {
-	case "claude", "codex", "opencode", "kilo", "kilocode", "pi", "agy", "antigravity":
+	case "claude", "codex", "opencode", "kilo", "kilocode", "pi", "agy", "antigravity", "acpx":
 		return base
 	}
 	switch {
+	case command == "online" || strings.HasPrefix(command, "acpx "):
+		return "acpx"
 	case strings.Contains(command, "opencode"):
 		return "opencode"
 	case strings.Contains(command, "kilocode"):
