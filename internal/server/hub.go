@@ -1007,12 +1007,20 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 				for _, wc := range h.terminalSubscribers(key) {
 					wc.mu.Lock()
 					_ = wc.conn.WriteJSON(map[string]string{
-						"type":    "title",
-						"title":   streamTitle.Title,
-						"command": streamTitle.Command,
+						"type":       "title",
+						"title":      streamTitle.Title,
+						"full_title": streamTitle.FullTitle,
+						"command":    streamTitle.Command,
 					})
 					wc.mu.Unlock()
 				}
+			}
+		case protocol.TypeTerminalStreamAlert:
+			_, err := protocol.DecodePayload[protocol.TerminalStreamAlert](env)
+			if err == nil {
+				forward := env
+				forward.From = "server"
+				h.broadcastToUser(dc.userID, forward)
 			}
 		case protocol.TypeTerminalStreamExit:
 			streamExit, err := protocol.DecodePayload[protocol.TerminalStreamExit](env)
@@ -1584,20 +1592,25 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if msgType == websocket.BinaryMessage || msgType == websocket.TextMessage {
-			var resizeMsg struct {
+			var controlMsg struct {
 				Type string `json:"type"`
 				Cols uint16 `json:"cols"`
 				Rows uint16 `json:"rows"`
 			}
-			if err := json.Unmarshal(payload, &resizeMsg); err == nil && resizeMsg.Type == "resize" {
-				resizePayload := protocol.TerminalStreamResize{
-					ProjectID:  projID,
-					TerminalID: terminalID,
-					Cols:       resizeMsg.Cols,
-					Rows:       resizeMsg.Rows,
+			if err := json.Unmarshal(payload, &controlMsg); err == nil {
+				switch controlMsg.Type {
+				case "resize":
+					resizePayload := protocol.TerminalStreamResize{
+						ProjectID:  projID,
+						TerminalID: terminalID,
+						Cols:       controlMsg.Cols,
+						Rows:       controlMsg.Rows,
+					}
+					dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamResize, "server", resizePayload)
+					continue
 				}
-				dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamResize, "server", resizePayload)
-			} else {
+			}
+			{
 				dataPayload := protocol.TerminalStreamData{
 					ProjectID:  projID,
 					TerminalID: terminalID,

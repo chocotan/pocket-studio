@@ -35,6 +35,7 @@ const (
 	TypeTerminalStreamStart  = "terminal.stream.start"
 	TypeTerminalStreamData   = "terminal.stream.data"
 	TypeTerminalStreamTitle  = "terminal.stream.title"
+	TypeTerminalStreamAlert  = "terminal.stream.alert"
 	TypeTerminalStreamResize = "terminal.stream.resize"
 	TypeTerminalStreamExit   = "terminal.stream.exit"
 )
@@ -354,7 +355,16 @@ type TerminalStreamTitle struct {
 	ProjectID  string `json:"project_id"`
 	TerminalID string `json:"terminal_id"`
 	Title      string `json:"title"`
+	FullTitle  string `json:"full_title,omitempty"`
 	Command    string `json:"command,omitempty"`
+}
+
+type TerminalStreamAlert struct {
+	ProjectID  string `json:"project_id"`
+	TerminalID string `json:"terminal_id"`
+	Reason     string `json:"reason,omitempty"`
+	Message    string `json:"message,omitempty"`
+	Agent      string `json:"agent,omitempty"`
 }
 
 type TerminalStreamResize struct {
