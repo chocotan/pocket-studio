@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/json"
 	"errors"
@@ -43,6 +44,9 @@ type Daemon struct {
 	terminalBinary bool
 	termMu         sync.Mutex
 	terminalPTYs   map[string]*runningPTY
+	hookURL        string
+	hookToken      string
+	hookAlerts     map[string]time.Time
 }
 
 const (
@@ -74,10 +78,17 @@ func New(cfg Config) *Daemon {
 		send:          make(chan protocol.Envelope, 128),
 		sendBinary:    make(chan []byte, 256),
 		terminalPTYs:  make(map[string]*runningPTY),
+		hookToken:     randomHookToken(),
+		hookAlerts:    make(map[string]time.Time),
 	}
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
+	if stopHookServer, err := d.startTerminalHookServer(ctx); err != nil {
+		log.Printf("start terminal hook server: %v", err)
+	} else {
+		defer stopHookServer()
+	}
 	if _, err := ensurePocketStudioTmuxConfig(); err != nil {
 		log.Printf("ensure tmux config: %v", err)
 	}
@@ -2087,7 +2098,7 @@ func (d *Daemon) runTerminalCommand(parent context.Context, request protocol.Ter
 	shell := userShell()
 	cmd := exec.CommandContext(ctx, shell, "-lc", command)
 	cmd.Dir = workspace.Path
-	cmd.Env = terminalEnv()
+	cmd.Env = taskEnv()
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -2804,6 +2815,15 @@ func mustJSON(value any) json.RawMessage {
 	return raw
 }
 
+func randomHookToken() string {
+	var buf [24]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		sum := sha1.Sum([]byte(fmt.Sprintf("%d:%d", time.Now().UnixNano(), os.Getpid())))
+		return fmt.Sprintf("%x", sum[:])
+	}
+	return fmt.Sprintf("%x", buf[:])
+}
+
 type runningPTY struct {
 	projectID   string
 	terminalID  string
@@ -2840,13 +2860,15 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	}
 
 	initialTitle := initialTerminalTitle(req.Command, req.InitialTitle)
-	cmd, err := tmuxNewSessionCommand(sessionName, initialTitle, workspace.Path, req.Command)
+	agentName := agentTerminalCommand(req.Command)
+	agentHooks := d.prepareTerminalAgentHooks(workspace.Path, req.ProjectID, req.TerminalID, agentName)
+	cmd, err := tmuxNewSessionCommand(sessionName, initialTitle, workspace.Path, req.Command, agentHooks.env)
 	if err != nil {
 		log.Printf("daemon failed to prepare tmux config: %v. falling back to user shell.", err)
 		cmd = nil
 	}
 	if cmd != nil {
-		cmd.Env = terminalEnv()
+		cmd.Env = terminalEnv(agentHooks.env...)
 	}
 
 	var ptyFile *os.File
@@ -2864,7 +2886,7 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 			cmd = exec.Command(userShell(), "-l")
 		}
 		cmd.Dir = workspace.Path
-		cmd.Env = terminalEnv()
+		cmd.Env = terminalEnv(agentHooks.env...)
 		ptyFile, err = pty.Start(cmd)
 		if err != nil {
 			d.termMu.Unlock()
@@ -2903,7 +2925,6 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 			}
 		}()
 	}
-
 	go func() {
 		defer func() {
 			ptyFile.Close()
@@ -2959,6 +2980,98 @@ func (d *Daemon) sendTerminalStreamData(data protocol.TerminalStreamData) {
 	d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", data)
 }
 
+type terminalHookEvent struct {
+	ProjectID  string `json:"project_id"`
+	TerminalID string `json:"terminal_id"`
+	Agent      string `json:"agent,omitempty"`
+	Event      string `json:"event,omitempty"`
+	Message    string `json:"message,omitempty"`
+	Token      string `json:"token,omitempty"`
+}
+
+func (d *Daemon) startTerminalHookServer(ctx context.Context) (func(), error) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/terminal-event", d.handleTerminalHookEvent)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	server := &http.Server{Handler: mux}
+	d.hookURL = "http://" + listener.Addr().String() + "/terminal-event"
+	go func() {
+		<-ctx.Done()
+		_ = server.Close()
+	}()
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("terminal hook server: %v", err)
+		}
+	}()
+	return func() { _ = server.Close() }, nil
+}
+
+func (d *Daemon) handleTerminalHookEvent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	var event terminalHookEvent
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&event); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if event.Token != d.hookToken {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if strings.TrimSpace(event.ProjectID) == "" || strings.TrimSpace(event.TerminalID) == "" {
+		http.Error(w, "project_id and terminal_id are required", http.StatusBadRequest)
+		return
+	}
+	if event.Event != "" && event.Event != "done" && event.Event != "idle" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	alert := d.terminalHookAlert(event)
+	if alert == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamAlert, "daemon", *alert)
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (d *Daemon) terminalHookAlert(event terminalHookEvent) *protocol.TerminalStreamAlert {
+	projectID := strings.TrimSpace(event.ProjectID)
+	terminalID := strings.TrimSpace(event.TerminalID)
+	agent := strings.TrimSpace(event.Agent)
+	message := strings.TrimSpace(event.Message)
+	if message == "" {
+		message = "任务已完成"
+	}
+	key := projectID + "::" + terminalID + "::" + agent + "::" + message
+	now := time.Now()
+	d.termMu.Lock()
+	defer d.termMu.Unlock()
+	if last := d.hookAlerts[key]; !last.IsZero() && now.Sub(last) < 2*time.Second {
+		return nil
+	}
+	d.hookAlerts[key] = now
+	for itemKey, last := range d.hookAlerts {
+		if now.Sub(last) > time.Minute {
+			delete(d.hookAlerts, itemKey)
+		}
+	}
+	return &protocol.TerminalStreamAlert{
+		ProjectID:  projectID,
+		TerminalID: terminalID,
+		Reason:     "agent_done",
+		Message:    message,
+		Agent:      agent,
+	}
+}
+
 func (d *Daemon) sendTerminalSnapshot(projectID string, terminalID string, sessionName string) {
 	if data := tmuxCapturePane(sessionName); len(data) > 0 {
 		d.sendTerminalStreamData(protocol.TerminalStreamData{
@@ -2967,12 +3080,13 @@ func (d *Daemon) sendTerminalSnapshot(projectID string, terminalID string, sessi
 			Data:       data,
 		})
 	}
-	title, command := tmuxTerminalInfo(sessionName)
+	title, fullTitle, command := tmuxTerminalInfo(sessionName)
 	if title != "" {
 		d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamTitle, "daemon", protocol.TerminalStreamTitle{
 			ProjectID:  projectID,
 			TerminalID: terminalID,
 			Title:      title,
+			FullTitle:  fullTitle,
 			Command:    command,
 		})
 	}
@@ -2982,16 +3096,19 @@ func (d *Daemon) watchTerminalTitle(ctx context.Context, projectID string, termi
 	ticker := time.NewTicker(2500 * time.Millisecond)
 	defer ticker.Stop()
 	lastTitle := ""
+	lastFullTitle := ""
 	lastCommand := ""
 	for {
-		title, command := tmuxTerminalInfo(sessionName)
-		if title != "" && (title != lastTitle || command != lastCommand) {
+		title, fullTitle, command := tmuxTerminalInfo(sessionName)
+		if title != "" && (title != lastTitle || fullTitle != lastFullTitle || command != lastCommand) {
 			lastTitle = title
+			lastFullTitle = fullTitle
 			lastCommand = command
 			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamTitle, "daemon", protocol.TerminalStreamTitle{
 				ProjectID:  projectID,
 				TerminalID: terminalID,
 				Title:      title,
+				FullTitle:  fullTitle,
 				Command:    command,
 			})
 		}
@@ -3005,22 +3122,70 @@ func (d *Daemon) watchTerminalTitle(ctx context.Context, projectID string, termi
 	}
 }
 
-func tmuxTerminalInfo(sessionName string) (string, string) {
-	cmd := tmuxCommand("display-message", "-p", "-t", sessionName, "#{window_name}\t#{pane_current_command}")
+func tmuxTerminalInfo(sessionName string) (string, string, string) {
+	cmd := tmuxCommand("display-message", "-p", "-t", sessionName, "#{window_name}\t#{pane_title}\t#{pane_current_path}\t#{pane_current_command}")
 	raw, err := cmd.Output()
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
-	parts := strings.SplitN(strings.TrimSpace(string(raw)), "\t", 2)
+	parts := strings.Split(strings.TrimSpace(string(raw)), "\t")
 	title := strings.TrimSpace(parts[0])
-	command := ""
+	paneTitle := ""
 	if len(parts) > 1 {
-		command = strings.TrimSpace(parts[1])
+		paneTitle = strings.TrimSpace(parts[1])
+	}
+	currentPath := ""
+	if len(parts) > 2 {
+		currentPath = strings.TrimSpace(parts[2])
+	}
+	command := ""
+	if len(parts) > 3 {
+		command = strings.TrimSpace(parts[3])
 	}
 	if title == "" {
 		title = command
 	}
-	return title, command
+	fullTitle := fullTerminalTitle(title, paneTitle, currentPath)
+	if currentPath != "" && tmuxTitleLooksShortenedPath(title) {
+		title = compactPathTitle(currentPath)
+	}
+	return title, fullTitle, command
+}
+
+func fullTerminalTitle(title string, paneTitle string, currentPath string) string {
+	if currentPath != "" && tmuxTitleLooksShortenedPath(title) {
+		return currentPath
+	}
+	if paneTitle != "" && paneTitle != title {
+		return paneTitle
+	}
+	return title
+}
+
+func compactPathTitle(path string) string {
+	if path == "" {
+		return ""
+	}
+	if path == "/" {
+		return path
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		if shortPath, err := filepath.Rel(home, path); err == nil && !pathRelativeToParent(shortPath) {
+			if shortPath == "." {
+				return "~"
+			}
+			return filepath.ToSlash(filepath.Join("~", shortPath))
+		}
+	}
+	return path
+}
+
+func pathRelativeToParent(path string) bool {
+	return path == ".." || strings.HasPrefix(path, "../") || strings.HasPrefix(path, `..\`)
+}
+
+func tmuxTitleLooksShortenedPath(title string) bool {
+	return title == "~" || strings.HasPrefix(title, "~/") || strings.HasPrefix(title, "..")
 }
 
 func tmuxCapturePane(sessionName string) []byte {
@@ -3035,12 +3200,19 @@ func tmuxCapturePane(sessionName string) []byte {
 	return append(raw, '\r')
 }
 
-func tmuxNewSessionCommand(sessionName string, initialTitle string, workspacePath string, command string) (*exec.Cmd, error) {
+func tmuxNewSessionCommand(sessionName string, initialTitle string, workspacePath string, command string, env []string) (*exec.Cmd, error) {
 	configPath, err := ensurePocketStudioTmuxConfig()
 	if err != nil {
 		return nil, err
 	}
 	args := []string{"-u", "-L", tmuxSocketName, "-f", configPath, "start-server", ";", "source-file", configPath, ";", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspacePath}
+	for _, item := range env {
+		key, _, ok := strings.Cut(item, "=")
+		if !ok || strings.TrimSpace(key) == "" {
+			continue
+		}
+		args = append(args, "-e", item)
+	}
 	if command != "" {
 		args = append(args, command)
 	}
@@ -3101,23 +3273,46 @@ bind-key -T copy-mode-vi Escape send-keys -X cancel
 	return b.String()
 }
 
-func terminalEnv() []string {
+func taskEnv() []string {
+	return terminalEnv()
+}
+
+func terminalEnv(extra ...string) []string {
 	shell := userShell()
-	env := make([]string, 0, len(os.Environ())+8)
+	env := make([]string, 0, len(os.Environ())+8+len(extra))
+	pathValue := ""
+	extraKeys := make(map[string]struct{}, len(extra))
+	for _, item := range extra {
+		key, _, ok := strings.Cut(item, "=")
+		if ok && key != "" {
+			extraKeys[key] = struct{}{}
+		}
+	}
 	for _, item := range os.Environ() {
 		key, _, ok := strings.Cut(item, "=")
 		if !ok {
 			env = append(env, item)
 			continue
 		}
+		if key == "PATH" {
+			pathValue = strings.TrimPrefix(item, "PATH=")
+			continue
+		}
 		switch key {
 		case "NO_COLOR", "TERM", "COLORTERM", "CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR", "SHELL":
 			continue
 		default:
+			if _, overridden := extraKeys[key]; overridden {
+				continue
+			}
 			env = append(env, item)
 		}
 	}
-	return append(env,
+	if pathValue == "" {
+		pathValue = os.Getenv("PATH")
+	}
+	env = append(env,
+		"PATH="+pathValue,
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"TERM_PROGRAM=PocketStudio",
@@ -3126,6 +3321,7 @@ func terminalEnv() []string {
 		"FORCE_COLOR=1",
 		"SHELL="+shell,
 	)
+	return append(env, extra...)
 }
 
 func userShell() string {
@@ -3191,6 +3387,612 @@ func initialTerminalTitle(command string, fallback string) string {
 		return "Antigravity"
 	default:
 		return command
+	}
+}
+
+type terminalAgentHooks struct {
+	env []string
+}
+
+func (d *Daemon) prepareTerminalAgentHooks(workspacePath string, projectID string, terminalID string, agent string) terminalAgentHooks {
+	hooks := terminalAgentHooks{}
+	if d.hookURL == "" || d.hookToken == "" || !supportsPluginTerminalAgent(agent) {
+		return hooks
+	}
+	removeLegacyProjectAgentHookPlugin(workspacePath, agent)
+	if err := writeAgentHookPlugin(agent); err != nil {
+		log.Printf("write %s terminal hook plugin for %s: %v", agent, workspacePath, err)
+		return hooks
+	}
+	hooks.env = []string{
+		"POCKET_STUDIO_HOOK_URL=" + d.hookURL,
+		"POCKET_STUDIO_HOOK_TOKEN=" + d.hookToken,
+		"POCKET_STUDIO_PROJECT_ID=" + projectID,
+		"POCKET_STUDIO_TERMINAL_ID=" + terminalID,
+		"POCKET_STUDIO_AGENT=" + agent,
+	}
+	return hooks
+}
+
+func writeAgentHookPlugin(agent string) error {
+	switch agent {
+	case "claude", "claude_code", "claude-code":
+		return writeClaudeHookIntegration()
+	case "codex":
+		return writeCodexNotifyIntegration()
+	case "opencode":
+		return writeFileIfChanged(
+			filepath.Join(userConfigDir(), "opencode", "plugins", "pocket-studio.ts"),
+			pocketStudioOpenCodePlugin(),
+		)
+	case "kilo", "kilocode":
+		return writeFileIfChanged(
+			filepath.Join(userConfigDir(), "kilo", "plugin", "pocket-studio.ts"),
+			pocketStudioKiloPlugin(),
+		)
+	default:
+		return nil
+	}
+}
+
+func writeClaudeHookIntegration() error {
+	scriptPath := pocketStudioHookScriptPath("claude-stop.js")
+	if err := writeFileIfChanged(scriptPath, pocketStudioTerminalNotifyScript(nil)); err != nil {
+		return err
+	}
+	settingsPath := claudeSettingsPath()
+	settings := map[string]any{}
+	if raw, err := os.ReadFile(settingsPath); err == nil && len(bytes.TrimSpace(raw)) > 0 {
+		if err := json.Unmarshal(raw, &settings); err != nil {
+			return fmt.Errorf("read claude settings: %w", err)
+		}
+	}
+	hooks := objectMap(settings["hooks"])
+	stopHooks := hookEntryList(hooks["Stop"])
+	command := shellCommand([]string{nodeCommand(), scriptPath})
+	if !hookEntryListHasCommand(stopHooks, command) {
+		stopHooks = append(stopHooks, map[string]any{
+			"hooks": []any{
+				map[string]any{
+					"type":    "command",
+					"command": command,
+					"timeout": float64(10),
+				},
+			},
+		})
+	}
+	hooks["Stop"] = stopHooks
+	settings["hooks"] = hooks
+	raw, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	return writeFileIfChanged(settingsPath, string(raw))
+}
+
+func writeCodexNotifyIntegration() error {
+	scriptPath := pocketStudioHookScriptPath("codex-notify.js")
+	previousPath := filepath.Join(filepath.Dir(scriptPath), "codex-notify-previous.json")
+	wrapper := []string{nodeCommand(), scriptPath}
+	if err := writeFileIfChanged(scriptPath, pocketStudioTerminalNotifyScript(&previousPath)); err != nil {
+		return err
+	}
+	configPath := codexConfigPath()
+	raw, err := os.ReadFile(configPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	content := string(raw)
+	current, hasNotify := topLevelTomlStringArray(content, "notify")
+	if !sameStringSlice(current, wrapper) {
+		if !isCodexPocketStudioNotify(current, scriptPath) {
+			previous := current
+			if len(previous) == 0 && errors.Is(err, os.ErrNotExist) {
+				previous = nil
+			}
+			if err := writeCodexPreviousNotify(previousPath, previous); err != nil {
+				return err
+			}
+		}
+	}
+	nextContent := setTopLevelTomlStringArray(content, "notify", wrapper, hasNotify)
+	return writeFileIfChanged(configPath, nextContent)
+}
+
+func removeLegacyProjectAgentHookPlugin(workspacePath string, agent string) {
+	workspacePath = strings.TrimSpace(workspacePath)
+	if workspacePath == "" {
+		return
+	}
+	var path string
+	switch agent {
+	case "opencode":
+		path = filepath.Join(workspacePath, ".opencode", "plugins", "pocket-studio.ts")
+	case "kilo", "kilocode":
+		path = filepath.Join(workspacePath, ".kilo", "plugin", "pocket-studio.ts")
+	default:
+		return
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	content := string(raw)
+	if strings.Contains(content, "POCKET_STUDIO_HOOK_URL") &&
+		strings.Contains(content, "POCKET_STUDIO_TERMINAL_ID") &&
+		strings.Contains(content, "pocket-studio") {
+		if err := os.Remove(path); err != nil {
+			log.Printf("remove legacy %s terminal hook plugin %s: %v", agent, path, err)
+		}
+	}
+}
+
+func userConfigDir() string {
+	if dir := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); dir != "" {
+		return dir
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".config")
+	}
+	return "."
+}
+
+func pocketStudioHookScriptPath(name string) string {
+	return filepath.Join(userConfigDir(), "pocket-studio", "hooks", name)
+}
+
+func claudeSettingsPath() string {
+	if dir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); dir != "" {
+		return filepath.Join(dir, "settings.json")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".claude", "settings.json")
+	}
+	return filepath.Join(".claude", "settings.json")
+}
+
+func codexConfigPath() string {
+	if dir := strings.TrimSpace(os.Getenv("CODEX_HOME")); dir != "" {
+		return filepath.Join(dir, "config.toml")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".codex", "config.toml")
+	}
+	return filepath.Join(".codex", "config.toml")
+}
+
+func nodeCommand() string {
+	if node, err := exec.LookPath("node"); err == nil && strings.TrimSpace(node) != "" {
+		return node
+	}
+	return "node"
+}
+
+func objectMap(value any) map[string]any {
+	if existing, ok := value.(map[string]any); ok {
+		return existing
+	}
+	return map[string]any{}
+}
+
+func hookEntryList(value any) []any {
+	if entries, ok := value.([]any); ok {
+		return entries
+	}
+	return []any{}
+}
+
+func hookEntryListHasCommand(entries []any, command string) bool {
+	for _, entry := range entries {
+		entryMap, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		hooks, ok := entryMap["hooks"].([]any)
+		if !ok {
+			continue
+		}
+		for _, hook := range hooks {
+			hookMap, ok := hook.(map[string]any)
+			if !ok {
+				continue
+			}
+			if hookMap["command"] == command {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func shellCommand(args []string) string {
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		return !(r >= 'A' && r <= 'Z') &&
+			!(r >= 'a' && r <= 'z') &&
+			!(r >= '0' && r <= '9') &&
+			!strings.ContainsRune("@%_+=:,./-", r)
+	}) == -1 {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func writeCodexPreviousNotify(path string, previous []string) error {
+	raw, err := json.MarshalIndent(map[string]any{"previous_notify": previous}, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	return writeFileIfChanged(path, string(raw))
+}
+
+func sameStringSlice(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func isCodexPocketStudioNotify(command []string, scriptPath string) bool {
+	for _, item := range command {
+		if item == scriptPath {
+			return true
+		}
+	}
+	return false
+}
+
+func topLevelTomlStringArray(content string, key string) ([]string, bool) {
+	lines := strings.SplitAfter(content, "\n")
+	offset := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			return nil, false
+		}
+		if strings.HasPrefix(trimmed, key+" ") || strings.HasPrefix(trimmed, key+"=") {
+			eq := strings.Index(line, "=")
+			if eq < 0 {
+				return nil, false
+			}
+			valueStart := offset + eq + 1
+			value, ok := scanTomlArrayValue(content[valueStart:])
+			if !ok {
+				return nil, false
+			}
+			items, ok := parseTomlStringArray(value)
+			return items, ok
+		}
+		offset += len(line)
+	}
+	return nil, false
+}
+
+func setTopLevelTomlStringArray(content string, key string, value []string, replace bool) string {
+	line := key + " = " + formatTomlStringArray(value) + "\n"
+	if !replace {
+		return line + content
+	}
+	lines := strings.SplitAfter(content, "\n")
+	offset := 0
+	for _, item := range lines {
+		trimmed := strings.TrimSpace(item)
+		if strings.HasPrefix(trimmed, "[") {
+			break
+		}
+		if strings.HasPrefix(trimmed, key+" ") || strings.HasPrefix(trimmed, key+"=") {
+			eq := strings.Index(item, "=")
+			if eq < 0 {
+				break
+			}
+			start := offset
+			valueStart := offset + eq + 1
+			_, ok, consumed := scanTomlArrayValueWithLength(content[valueStart:])
+			if !ok {
+				break
+			}
+			end := valueStart + consumed
+			for end < len(content) && (content[end] == ' ' || content[end] == '\t') {
+				end++
+			}
+			if end < len(content) && content[end] == '\n' {
+				end++
+			}
+			return content[:start] + line + content[end:]
+		}
+		offset += len(item)
+	}
+	return line + content
+}
+
+func scanTomlArrayValue(content string) (string, bool) {
+	value, ok, _ := scanTomlArrayValueWithLength(content)
+	return value, ok
+}
+
+func scanTomlArrayValueWithLength(content string) (string, bool, int) {
+	start := strings.Index(content, "[")
+	if start < 0 {
+		return "", false, 0
+	}
+	inString := false
+	escaped := false
+	for i := start; i < len(content); i++ {
+		ch := content[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case ']':
+			return content[start : i+1], true, i + 1
+		}
+	}
+	return "", false, 0
+}
+
+func parseTomlStringArray(value string) ([]string, bool) {
+	decoder := json.NewDecoder(strings.NewReader(value))
+	var items []string
+	if err := decoder.Decode(&items); err != nil {
+		return nil, false
+	}
+	return items, true
+}
+
+func formatTomlStringArray(items []string) string {
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		encoded, _ := json.Marshal(item)
+		parts = append(parts, string(encoded))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func writeFileIfChanged(path string, content string) error {
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func pocketStudioOpenCodePlugin() string {
+	return `export const PocketStudio = async () => ({
+  event: async ({ event }) => {
+    if (event.type !== "session.idle") return
+    const url = process.env.POCKET_STUDIO_HOOK_URL
+    if (!url) return
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: process.env.POCKET_STUDIO_HOOK_TOKEN,
+        project_id: process.env.POCKET_STUDIO_PROJECT_ID,
+        terminal_id: process.env.POCKET_STUDIO_TERMINAL_ID,
+        agent: process.env.POCKET_STUDIO_AGENT || "opencode",
+        event: "done",
+        message: "任务已完成"
+      })
+    }).catch(() => {})
+  }
+})
+`
+}
+
+func pocketStudioKiloPlugin() string {
+	return `const server = async () => ({
+  event: async ({ event }) => {
+    if (event.type !== "session.idle") return
+    const url = process.env.POCKET_STUDIO_HOOK_URL
+    if (!url) return
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: process.env.POCKET_STUDIO_HOOK_TOKEN,
+        project_id: process.env.POCKET_STUDIO_PROJECT_ID,
+        terminal_id: process.env.POCKET_STUDIO_TERMINAL_ID,
+        agent: process.env.POCKET_STUDIO_AGENT || "kilo",
+        event: "done",
+        message: "任务已完成"
+      })
+    }).catch(() => {})
+  }
+})
+
+export default { id: "pocket-studio", server }
+`
+}
+
+func pocketStudioTerminalNotifyScript(previousNotifyPath *string) string {
+	previousPathLiteral := "null"
+	if previousNotifyPath != nil {
+		encoded, _ := json.Marshal(*previousNotifyPath)
+		previousPathLiteral = string(encoded)
+	}
+	return `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process")
+const { readFileSync } = require("node:fs")
+
+const previousNotifyPath = ` + previousPathLiteral + `
+
+function readStdin() {
+  try {
+    if (process.stdin.isTTY) return ""
+    return readFileSync(0, "utf8")
+  } catch {
+    return ""
+  }
+}
+
+function parseJson(value) {
+  const text = String(value || "").trim()
+  if (!text) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+function lastJsonArg() {
+  for (let index = process.argv.length - 1; index >= 2; index--) {
+    const parsed = parseJson(process.argv[index])
+    if (parsed && typeof parsed === "object") return parsed
+  }
+  const stdin = parseJson(readStdin())
+  return stdin && typeof stdin === "object" ? stdin : {}
+}
+
+function text(value) {
+  if (value == null) return ""
+  if (typeof value === "string") return value.trim()
+  if (typeof value === "number" || typeof value === "boolean") return String(value)
+  return ""
+}
+
+function messageFromPayload(payload) {
+  const candidates = [
+    payload.message,
+    payload.notification,
+    payload.summary,
+    payload.title,
+    payload.reason,
+    payload.last_assistant_message,
+    payload["last-assistant-message"],
+    payload.transcript_path ? "任务已完成" : ""
+  ]
+  for (const candidate of candidates) {
+    const value = text(candidate)
+    if (value) return value.length > 240 ? value.slice(0, 239) + "..." : value
+  }
+  return "任务已完成"
+}
+
+async function postPocketStudio(payload) {
+  const url = process.env.POCKET_STUDIO_HOOK_URL
+  if (!url) return
+  const body = {
+    token: process.env.POCKET_STUDIO_HOOK_TOKEN,
+    project_id: process.env.POCKET_STUDIO_PROJECT_ID,
+    terminal_id: process.env.POCKET_STUDIO_TERMINAL_ID,
+    agent: process.env.POCKET_STUDIO_AGENT || "agent",
+    event: "done",
+    message: messageFromPayload(payload)
+  }
+  if (!body.token || !body.project_id || !body.terminal_id) return
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    })
+  } catch {}
+}
+
+function readPreviousNotify() {
+  if (!previousNotifyPath) return null
+  try {
+    const parsed = JSON.parse(readFileSync(previousNotifyPath, "utf8"))
+    return Array.isArray(parsed.previous_notify) ? parsed.previous_notify : null
+  } catch {
+    return null
+  }
+}
+
+function runPreviousNotify(payloadArg) {
+  const previous = readPreviousNotify()
+  if (!previous || previous.length === 0) return
+  const [command, ...args] = previous
+  if (!command) return
+  spawnSync(command, [...args, payloadArg], {
+    stdio: "ignore",
+    env: process.env,
+    cwd: process.cwd()
+  })
+}
+
+async function main() {
+  const payloadArg = process.argv[process.argv.length - 1] || "{}"
+  const payload = lastJsonArg()
+  await postPocketStudio(payload)
+  runPreviousNotify(payloadArg)
+}
+
+main().catch(() => {})
+`
+}
+
+func supportsPluginTerminalAgent(agent string) bool {
+	switch agent {
+	case "claude", "claude_code", "claude-code", "codex", "opencode", "kilo", "kilocode":
+		return true
+	default:
+		return false
+	}
+}
+
+func agentTerminalCommand(command string) string {
+	command = strings.ToLower(strings.TrimSpace(command))
+	if command == "" {
+		return ""
+	}
+	fields := strings.Fields(command)
+	base := ""
+	if len(fields) > 0 {
+		base = filepath.Base(fields[0])
+	}
+	switch base {
+	case "claude", "codex", "opencode", "kilo", "kilocode", "pi", "agy", "antigravity":
+		return base
+	}
+	switch {
+	case strings.Contains(command, "opencode"):
+		return "opencode"
+	case strings.Contains(command, "kilocode"):
+		return "kilocode"
+	case strings.Contains(command, "kilo"):
+		return "kilo"
+	case strings.Contains(command, "claude"):
+		return "claude"
+	case strings.Contains(command, "codex"):
+		return "codex"
+	case strings.Contains(command, "antigravity"):
+		return "antigravity"
+	default:
+		return ""
 	}
 }
 

@@ -1,0 +1,156 @@
+package daemon
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestTerminalHookAlertDeduplicatesBriefRepeats(t *testing.T) {
+	d := New(Config{})
+	event := terminalHookEvent{
+		ProjectID:  "project",
+		TerminalID: "terminal",
+		Agent:      "opencode",
+		Event:      "done",
+	}
+
+	first := d.terminalHookAlert(event)
+	if first == nil {
+		t.Fatal("terminalHookAlert() first event = nil, want alert")
+	}
+	if first.Reason != "agent_done" || first.Message != "任务已完成" || first.Agent != "opencode" {
+		t.Fatalf("terminalHookAlert() = %#v, want opencode completion alert", first)
+	}
+	if second := d.terminalHookAlert(event); second != nil {
+		t.Fatalf("terminalHookAlert() duplicate = %#v, want nil", second)
+	}
+}
+
+func TestPrepareTerminalAgentHooksWritesPluginAndEnvForPluginAgents(t *testing.T) {
+	d := New(Config{})
+	d.hookURL = "http://127.0.0.1:1/terminal-event"
+	d.hookToken = "token"
+	workspace := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+
+	hooks := d.prepareTerminalAgentHooks(workspace, "project", "terminal", "opencode")
+	if len(hooks.env) == 0 {
+		t.Fatal("prepareTerminalAgentHooks() env is empty, want hook env")
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode", "plugins", "pocket-studio.ts")); err != nil {
+		t.Fatalf("opencode plugin was not written: %v", err)
+	}
+}
+
+func TestOpenCodePluginUsesExportedPluginFunctionShape(t *testing.T) {
+	plugin := pocketStudioOpenCodePlugin()
+	if !strings.Contains(plugin, `export const PocketStudio = async () => ({`) {
+		t.Fatalf("pocketStudioOpenCodePlugin() missing exported plugin function:\n%s", plugin)
+	}
+	if strings.Contains(plugin, "export default") {
+		t.Fatalf("pocketStudioOpenCodePlugin() uses default module shape, want exported plugin function:\n%s", plugin)
+	}
+}
+
+func TestPrepareTerminalAgentHooksWritesClaudeStopHook(t *testing.T) {
+	d := New(Config{})
+	d.hookURL = "http://127.0.0.1:1/terminal-event"
+	d.hookToken = "token"
+	configHome := t.TempDir()
+	claudeDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+
+	hooks := d.prepareTerminalAgentHooks(t.TempDir(), "project", "terminal", "claude")
+	if len(hooks.env) == 0 {
+		t.Fatal("prepareTerminalAgentHooks() env is empty, want hook env for claude")
+	}
+	scriptPath := filepath.Join(configHome, "pocket-studio", "hooks", "claude-stop.js")
+	if raw, err := os.ReadFile(scriptPath); err != nil {
+		t.Fatalf("claude hook script was not written: %v", err)
+	} else if !strings.Contains(string(raw), "POCKET_STUDIO_HOOK_URL") {
+		t.Fatalf("claude hook script missing Pocket Studio hook post:\n%s", raw)
+	}
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("claude settings were not written: %v", err)
+	}
+	if !strings.Contains(string(raw), `"Stop"`) || !strings.Contains(string(raw), scriptPath) {
+		t.Fatalf("claude settings missing Stop hook script path:\n%s", raw)
+	}
+}
+
+func TestPrepareTerminalAgentHooksWrapsCodexNotify(t *testing.T) {
+	d := New(Config{})
+	d.hookURL = "http://127.0.0.1:1/terminal-event"
+	d.hookToken = "token"
+	configHome := t.TempDir()
+	codexHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("CODEX_HOME", codexHome)
+	configPath := filepath.Join(codexHome, "config.toml")
+	if err := os.WriteFile(configPath, []byte("notify = [\"node\", \"/opt/omx/notify-hook.js\"]\nmodel = \"gpt\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	hooks := d.prepareTerminalAgentHooks(t.TempDir(), "project", "terminal", "codex")
+	if len(hooks.env) == 0 {
+		t.Fatal("prepareTerminalAgentHooks() env is empty, want hook env for codex")
+	}
+	scriptPath := filepath.Join(configHome, "pocket-studio", "hooks", "codex-notify.js")
+	if raw, err := os.ReadFile(scriptPath); err != nil {
+		t.Fatalf("codex notify script was not written: %v", err)
+	} else if !strings.Contains(string(raw), "POCKET_STUDIO_HOOK_URL") || !strings.Contains(string(raw), "previousNotifyPath") {
+		t.Fatalf("codex notify script missing hook post or previous notify support:\n%s", raw)
+	}
+	rawConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rawConfig), scriptPath) || !strings.Contains(string(rawConfig), `model = "gpt"`) {
+		t.Fatalf("codex config did not preserve settings and install wrapper:\n%s", rawConfig)
+	}
+	previousPath := filepath.Join(configHome, "pocket-studio", "hooks", "codex-notify-previous.json")
+	rawPrevious, err := os.ReadFile(previousPath)
+	if err != nil {
+		t.Fatalf("codex previous notify file was not written: %v", err)
+	}
+	if !strings.Contains(string(rawPrevious), "/opt/omx/notify-hook.js") {
+		t.Fatalf("codex previous notify was not preserved:\n%s", rawPrevious)
+	}
+}
+
+func TestPrepareTerminalAgentHooksSkipsUnknownAgents(t *testing.T) {
+	d := New(Config{})
+	d.hookURL = "http://127.0.0.1:1/terminal-event"
+	d.hookToken = "token"
+
+	hooks := d.prepareTerminalAgentHooks(t.TempDir(), "project", "terminal", "bash")
+	if len(hooks.env) != 0 {
+		t.Fatalf("prepareTerminalAgentHooks() env = %#v, want none for unknown agent", hooks.env)
+	}
+}
+
+func TestTmuxNewSessionCommandInjectsHookEnv(t *testing.T) {
+	cmd, err := tmuxNewSessionCommand("session", "OpenCode", t.TempDir(), "opencode", []string{
+		"POCKET_STUDIO_HOOK_URL=http://127.0.0.1:1/terminal-event",
+		"POCKET_STUDIO_TERMINAL_ID=terminal",
+	})
+	if err != nil {
+		t.Fatalf("tmuxNewSessionCommand() error = %v", err)
+	}
+	args := strings.Join(cmd.Args, "\x00")
+	for _, want := range []string{
+		"-e\x00POCKET_STUDIO_HOOK_URL=http://127.0.0.1:1/terminal-event",
+		"-e\x00POCKET_STUDIO_TERMINAL_ID=terminal",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("tmuxNewSessionCommand() args missing %q in %#v", want, cmd.Args)
+		}
+	}
+}
