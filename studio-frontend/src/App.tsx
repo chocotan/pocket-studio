@@ -362,6 +362,7 @@ function terminalKindFromAgent(agent: unknown): TerminalKind | "" {
   if (normalized === "claude-code") return "claude";
   if (normalized === "kilocode" || normalized === "kilo-code") return "kilo";
   if (normalized === "antigravity") return "agy";
+  if (normalized === "acpx") return "online";
   return isTerminalKind(normalized) ? normalized : "";
 }
 

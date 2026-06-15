@@ -1,8 +1,8 @@
 import React from "react";
-import { Terminal as TerminalIcon } from "lucide-react";
+import { Globe2, Terminal as TerminalIcon } from "lucide-react";
 import { Antigravity, ClaudeCode, Codex, KiloCode, OpenCode } from "@lobehub/icons/es/icons";
 
-export type TerminalKind = "bash" | "claude" | "codex" | "opencode" | "kilo" | "pi" | "agy";
+export type TerminalKind = "bash" | "claude" | "codex" | "opencode" | "kilo" | "pi" | "agy" | "online";
 export type SplitDirection = "left" | "right" | "top" | "bottom";
 export type TerminalAccent = "indigo" | "violet" | "emerald" | "amber" | "cyan" | "rose" | "lime";
 export type TerminalTitleSource = "initial" | "tmux";
@@ -32,6 +32,7 @@ export const TERMINAL_TYPES: TerminalTypeDefinition[] = [
   { value: "kilo", label: "Kilo Code", title: "Kilo Code", command: "kilo", accent: "lime", logo: <KiloCode width={14} height={14} /> },
   { value: "pi", label: "Pi", title: "Pi", command: "pi", accent: "cyan", logo: <span className="text-[10px] font-black leading-none">π</span> },
   { value: "agy", label: "Antigravity", title: "Antigravity", command: "agy", accent: "rose", logo: <Antigravity width={14} height={14} /> },
+  { value: "online", label: "在线类型", title: "在线类型", command: "online", accent: "cyan", logo: <Globe2 className="h-3 w-3" /> },
 ];
 
 export function terminalType(value: TerminalKind) {
@@ -41,6 +42,7 @@ export function terminalType(value: TerminalKind) {
 export function terminalTypeFromCommand(command: string, fallback: TerminalKind): TerminalKind {
   const normalized = command.trim().toLowerCase();
   if (!normalized) return fallback;
+  if (normalized === "online" || normalized === "acpx" || normalized.startsWith("acpx ")) return "online";
   if (normalized.includes("claude")) return "claude";
   if (normalized.includes("codex")) return "codex";
   if (normalized.includes("opencode")) return "opencode";
