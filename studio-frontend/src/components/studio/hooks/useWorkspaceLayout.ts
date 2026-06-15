@@ -519,6 +519,10 @@ export function useWorkspaceLayout({
     const nextTitle = (title || "").trim();
     const nextFullTitle = (fullTitle || "").trim();
     const nextCommand = (command || "").trim();
+    const previousTitle = terminalTitlesRef.current[tabId]?.title || "";
+    if (previousTitle && isPlaceholderTerminalTitle(nextTitle, nextCommand)) {
+      return;
+    }
     const nextSource = nextTitle ? "tmux" as const : "initial" as const;
     const nextTitles = {
       ...terminalTitlesRef.current,

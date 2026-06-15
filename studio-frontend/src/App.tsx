@@ -5,6 +5,7 @@ import type { NotificationJumpTarget, TerminalAlertEvent, TerminalNotification }
 import type { Device } from "./lib/types";
 import { getJSON, loadClientConfig, websocketURL } from "./lib/api";
 import { loadZoom, saveZoom, type PageZoom } from "./lib/zoom";
+import { isTerminalKind, terminalType, type TerminalKind } from "./components/studio/terminal-types";
 
 const PROJECT_ORDER_KEY = "pocket-studio-project-order";
 const MAX_TERMINAL_NOTIFICATIONS = 100;
@@ -22,7 +23,11 @@ export default function App() {
   const [terminalNotifications, setTerminalNotifications] = useState<TerminalNotification[]>([]);
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
   const [notificationJumpTarget, setNotificationJumpTarget] = useState<NotificationJumpTarget | null>(null);
+  const [clientConfigLoaded, setClientConfigLoaded] = useState(false);
   const notificationDedupRef = useRef<Map<string, number>>(new Map());
+  const devicesRef = useRef<Device[]>([]);
+  const projectsRef = useRef<Project[]>([]);
+  const orderedProjectsRef = useRef<Project[]>([]);
   const orderedProjects = useMemo(() => orderProjects(projects, projectOrder), [projectOrder, projects]);
   const unreadProjectIds = useMemo(() => new Set(terminalNotifications.filter((item) => !item.read).map((item) => item.projectId)), [terminalNotifications]);
   const unreadTerminalIds = useMemo(
@@ -39,9 +44,21 @@ export default function App() {
   }, [projectOrder, projects]);
 
   useEffect(() => {
+    devicesRef.current = devices;
+  }, [devices]);
+
+  useEffect(() => {
+    projectsRef.current = projects;
+    orderedProjectsRef.current = orderedProjects;
+  }, [orderedProjects, projects]);
+
+  useEffect(() => {
     void loadClientConfig().then((cfg) => {
       syncAppImageURL(cfg.server_url, cfg.access_token || "");
-    }).finally(refreshAll);
+    }).finally(() => {
+      setClientConfigLoaded(true);
+      refreshAll();
+    });
   }, []);
 
   useEffect(() => {
@@ -63,7 +80,7 @@ export default function App() {
             projectId: payload.project_id,
             tabId: payload.terminal_id,
             panelId: payload.panel_id || "",
-            title: payload.title || "Terminal",
+            title: notificationTerminalTitle(payload.title, payload.agent),
             reason: payload.reason || "bell",
             message: payload.message || "",
           });
@@ -77,13 +94,14 @@ export default function App() {
       };
     };
 
+    if (!clientConfigLoaded) return;
     connect();
     return () => {
       closed = true;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       socket?.close();
     };
-  }, [projects]);
+  }, [clientConfigLoaded]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -131,8 +149,8 @@ export default function App() {
   }
 
   function addTerminalNotification(event: TerminalAlertEvent & { projectId: string }) {
-    const project = orderedProjects.find((item) => item.id === event.projectId) || projects.find((item) => item.id === event.projectId);
-    const device = project ? devices.find((item) => item.id === project.device_id) : undefined;
+    const project = orderedProjectsRef.current.find((item) => item.id === event.projectId) || projectsRef.current.find((item) => item.id === event.projectId);
+    const device = project ? devicesRef.current.find((item) => item.id === project.device_id) : undefined;
     const dedupKey = `${event.projectId}:${event.tabId}:${event.reason || ""}:${event.message || ""}`;
     const now = Date.now();
     const lastSeen = notificationDedupRef.current.get(dedupKey) || 0;
@@ -328,6 +346,23 @@ function displayDeviceName(value: string) {
   const withoutProtocol = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
   const host = withoutProtocol.split(/[/:?#]/, 1)[0] || withoutProtocol;
   return host.split(".")[0] || host || raw;
+}
+
+function notificationTerminalTitle(title: unknown, agent: unknown) {
+  const explicitTitle = typeof title === "string" ? title.trim() : "";
+  if (explicitTitle) return explicitTitle;
+  const kind = terminalKindFromAgent(agent);
+  return kind ? terminalType(kind).title : "Terminal";
+}
+
+function terminalKindFromAgent(agent: unknown): TerminalKind | "" {
+  if (typeof agent !== "string") return "";
+  const normalized = agent.trim().toLowerCase().replace(/_/g, "-");
+  if (!normalized) return "";
+  if (normalized === "claude-code") return "claude";
+  if (normalized === "kilocode" || normalized === "kilo-code") return "kilo";
+  if (normalized === "antigravity") return "agy";
+  return isTerminalKind(normalized) ? normalized : "";
 }
 
 function syncAppImageURL(serverURL: string, token: string) {

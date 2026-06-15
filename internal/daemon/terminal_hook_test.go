@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,56 @@ func TestPrepareTerminalAgentHooksWritesPluginAndEnvForPluginAgents(t *testing.T
 	}
 }
 
+func TestPrepareTerminalAgentHooksConfiguresKiloPlugin(t *testing.T) {
+	d := New(Config{})
+	d.hookURL = "http://127.0.0.1:1/terminal-event"
+	d.hookToken = "token"
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+
+	hooks := d.prepareTerminalAgentHooks(t.TempDir(), "project", "terminal", "kilo")
+	if len(hooks.env) == 0 {
+		t.Fatal("prepareTerminalAgentHooks() env is empty, want hook env for kilo")
+	}
+	pluginPath := filepath.Join(configHome, "kilo", "plugin", "pocket-studio.ts")
+	if _, err := os.Stat(pluginPath); err != nil {
+		t.Fatalf("kilo plugin was not written: %v", err)
+	}
+	configEnv := envValue(hooks.env, "KILO_CONFIG_CONTENT")
+	if configEnv == "" {
+		t.Fatalf("prepareTerminalAgentHooks() env missing KILO_CONFIG_CONTENT: %#v", hooks.env)
+	}
+	var cfg struct {
+		Plugin []string `json:"plugin"`
+	}
+	if err := json.Unmarshal([]byte(configEnv), &cfg); err != nil {
+		t.Fatalf("KILO_CONFIG_CONTENT is not JSON: %v\n%s", err, configEnv)
+	}
+	if len(cfg.Plugin) != 1 || cfg.Plugin[0] != pluginPath {
+		t.Fatalf("KILO_CONFIG_CONTENT plugin = %#v, want %q", cfg.Plugin, pluginPath)
+	}
+}
+
+func TestPrepareTerminalAgentHooksConfiguresPiExtension(t *testing.T) {
+	d := New(Config{})
+	d.hookURL = "http://127.0.0.1:1/terminal-event"
+	d.hookToken = "token"
+	piDir := t.TempDir()
+	t.Setenv("PI_CODING_AGENT_DIR", piDir)
+
+	hooks := d.prepareTerminalAgentHooks(t.TempDir(), "project", "terminal", "pi")
+	if len(hooks.env) == 0 {
+		t.Fatal("prepareTerminalAgentHooks() env is empty, want hook env for pi")
+	}
+	extensionPath := filepath.Join(piDir, "extensions", "pocket-studio.ts")
+	if _, err := os.Stat(extensionPath); err != nil {
+		t.Fatalf("pi extension was not written: %v", err)
+	}
+	if got := envValue(hooks.env, "POCKET_STUDIO_PI_EXTENSION"); got != extensionPath {
+		t.Fatalf("POCKET_STUDIO_PI_EXTENSION = %q, want %q", got, extensionPath)
+	}
+}
+
 func TestOpenCodePluginUsesExportedPluginFunctionShape(t *testing.T) {
 	plugin := pocketStudioOpenCodePlugin()
 	if !strings.Contains(plugin, `export const PocketStudio = async () => ({`) {
@@ -53,6 +104,77 @@ func TestOpenCodePluginUsesExportedPluginFunctionShape(t *testing.T) {
 	}
 	if strings.Contains(plugin, "export default") {
 		t.Fatalf("pocketStudioOpenCodePlugin() uses default module shape, want exported plugin function:\n%s", plugin)
+	}
+}
+
+func TestOpenCodePluginPostsSessionIdleCompletion(t *testing.T) {
+	plugin := pocketStudioOpenCodePlugin()
+	for _, want := range []string{
+		`event.type !== "session.idle"`,
+		`process.env.POCKET_STUDIO_HOOK_URL`,
+		`process.env.POCKET_STUDIO_PROJECT_ID`,
+		`process.env.POCKET_STUDIO_TERMINAL_ID`,
+		`event: "done"`,
+		`message: "任务已完成"`,
+	} {
+		if !strings.Contains(plugin, want) {
+			t.Fatalf("pocketStudioOpenCodePlugin() missing %q:\n%s", want, plugin)
+		}
+	}
+}
+
+func TestKiloPluginPostsSessionIdleCompletion(t *testing.T) {
+	plugin := pocketStudioKiloPlugin()
+	for _, want := range []string{
+		`export default async () => ({`,
+		`event.type !== "session.idle"`,
+		`process.env.POCKET_STUDIO_HOOK_URL`,
+		`process.env.POCKET_STUDIO_PROJECT_ID`,
+		`process.env.POCKET_STUDIO_TERMINAL_ID`,
+		`process.env.POCKET_STUDIO_AGENT || "kilo"`,
+		`event: "done"`,
+		`message: "任务已完成"`,
+	} {
+		if !strings.Contains(plugin, want) {
+			t.Fatalf("pocketStudioKiloPlugin() missing %q:\n%s", want, plugin)
+		}
+	}
+}
+
+func TestPiExtensionPostsAgentEndCompletion(t *testing.T) {
+	extension := pocketStudioPiExtension()
+	for _, want := range []string{
+		`pi.on("agent_end"`,
+		`event?.willRetry`,
+		`process.env.POCKET_STUDIO_HOOK_URL`,
+		`process.env.POCKET_STUDIO_PROJECT_ID`,
+		`process.env.POCKET_STUDIO_TERMINAL_ID`,
+		`process.env.POCKET_STUDIO_AGENT || "pi"`,
+		`event: "done"`,
+		`message: "任务已完成"`,
+	} {
+		if !strings.Contains(extension, want) {
+			t.Fatalf("pocketStudioPiExtension() missing %q:\n%s", want, extension)
+		}
+	}
+}
+
+func TestTerminalNotifyScriptPostsCompletionAndRunsPreviousNotify(t *testing.T) {
+	previousPath := filepath.Join(t.TempDir(), "previous.json")
+	script := pocketStudioTerminalNotifyScript(&previousPath)
+	for _, want := range []string{
+		`process.env.POCKET_STUDIO_HOOK_URL`,
+		`process.env.POCKET_STUDIO_PROJECT_ID`,
+		`process.env.POCKET_STUDIO_TERMINAL_ID`,
+		`process.env.POCKET_STUDIO_AGENT || "agent"`,
+		`event: "done"`,
+		`message: messageFromPayload(payload)`,
+		`runPreviousNotify(payloadArg)`,
+		previousPath,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("pocketStudioTerminalNotifyScript() missing %q:\n%s", want, script)
+		}
 	}
 }
 
@@ -83,6 +205,16 @@ func TestPrepareTerminalAgentHooksWritesClaudeStopHook(t *testing.T) {
 	if !strings.Contains(string(raw), `"Stop"`) || !strings.Contains(string(raw), scriptPath) {
 		t.Fatalf("claude settings missing Stop hook script path:\n%s", raw)
 	}
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			return strings.TrimPrefix(item, prefix)
+		}
+	}
+	return ""
 }
 
 func TestPrepareTerminalAgentHooksWrapsCodexNotify(t *testing.T) {
@@ -152,5 +284,19 @@ func TestTmuxNewSessionCommandInjectsHookEnv(t *testing.T) {
 		if !strings.Contains(args, want) {
 			t.Fatalf("tmuxNewSessionCommand() args missing %q in %#v", want, cmd.Args)
 		}
+	}
+}
+
+func TestTerminalAgentCommandWithHooksAddsPiExtension(t *testing.T) {
+	command := terminalAgentCommandWithHooks("pi", "pi", []string{
+		"POCKET_STUDIO_PI_EXTENSION=/tmp/pocket-studio.ts",
+	})
+	if command != "pi --extension /tmp/pocket-studio.ts" {
+		t.Fatalf("terminalAgentCommandWithHooks() = %q, want pi extension flag", command)
+	}
+	if got := terminalAgentCommandWithHooks(command, "pi", []string{
+		"POCKET_STUDIO_PI_EXTENSION=/tmp/pocket-studio.ts",
+	}); got != command {
+		t.Fatalf("terminalAgentCommandWithHooks() duplicated extension: %q", got)
 	}
 }

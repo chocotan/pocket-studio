@@ -2862,7 +2862,8 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	initialTitle := initialTerminalTitle(req.Command, req.InitialTitle)
 	agentName := agentTerminalCommand(req.Command)
 	agentHooks := d.prepareTerminalAgentHooks(workspace.Path, req.ProjectID, req.TerminalID, agentName)
-	cmd, err := tmuxNewSessionCommand(sessionName, initialTitle, workspace.Path, req.Command, agentHooks.env)
+	command := terminalAgentCommandWithHooks(req.Command, agentName, agentHooks.env)
+	cmd, err := tmuxNewSessionCommand(sessionName, initialTitle, workspace.Path, command, agentHooks.env)
 	if err != nil {
 		log.Printf("daemon failed to prepare tmux config: %v. falling back to user shell.", err)
 		cmd = nil
@@ -3411,6 +3412,9 @@ func (d *Daemon) prepareTerminalAgentHooks(workspacePath string, projectID strin
 		"POCKET_STUDIO_TERMINAL_ID=" + terminalID,
 		"POCKET_STUDIO_AGENT=" + agent,
 	}
+	if configEnv := terminalAgentPluginConfigEnv(agent); configEnv != "" {
+		hooks.env = append(hooks.env, configEnv)
+	}
 	return hooks
 }
 
@@ -3427,12 +3431,48 @@ func writeAgentHookPlugin(agent string) error {
 		)
 	case "kilo", "kilocode":
 		return writeFileIfChanged(
-			filepath.Join(userConfigDir(), "kilo", "plugin", "pocket-studio.ts"),
+			kiloPocketStudioPluginPath(),
 			pocketStudioKiloPlugin(),
+		)
+	case "pi":
+		return writeFileIfChanged(
+			piPocketStudioExtensionPath(),
+			pocketStudioPiExtension(),
 		)
 	default:
 		return nil
 	}
+}
+
+func terminalAgentPluginConfigEnv(agent string) string {
+	switch agent {
+	case "kilo", "kilocode":
+		raw, err := json.Marshal(map[string][]string{
+			"plugin": {kiloPocketStudioPluginPath()},
+		})
+		if err != nil {
+			return ""
+		}
+		return "KILO_CONFIG_CONTENT=" + string(raw)
+	case "pi":
+		return "POCKET_STUDIO_PI_EXTENSION=" + piPocketStudioExtensionPath()
+	default:
+		return ""
+	}
+}
+
+func kiloPocketStudioPluginPath() string {
+	return filepath.Join(userConfigDir(), "kilo", "plugin", "pocket-studio.ts")
+}
+
+func piPocketStudioExtensionPath() string {
+	if dir := strings.TrimSpace(os.Getenv("PI_CODING_AGENT_DIR")); dir != "" {
+		return filepath.Join(dir, "extensions", "pocket-studio.ts")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".pi", "agent", "extensions", "pocket-studio.ts")
+	}
+	return filepath.Join(".pi", "agent", "extensions", "pocket-studio.ts")
 }
 
 func writeClaudeHookIntegration() error {
@@ -3812,7 +3852,7 @@ func pocketStudioOpenCodePlugin() string {
 }
 
 func pocketStudioKiloPlugin() string {
-	return `const server = async () => ({
+	return `export default async () => ({
   event: async ({ event }) => {
     if (event.type !== "session.idle") return
     const url = process.env.POCKET_STUDIO_HOOK_URL
@@ -3831,8 +3871,37 @@ func pocketStudioKiloPlugin() string {
     }).catch(() => {})
   }
 })
+`
+}
 
-export default { id: "pocket-studio", server }
+func pocketStudioPiExtension() string {
+	return `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+
+async function postPocketStudio() {
+  const url = process.env.POCKET_STUDIO_HOOK_URL
+  if (!url) return
+  const body = {
+    token: process.env.POCKET_STUDIO_HOOK_TOKEN,
+    project_id: process.env.POCKET_STUDIO_PROJECT_ID,
+    terminal_id: process.env.POCKET_STUDIO_TERMINAL_ID,
+    agent: process.env.POCKET_STUDIO_AGENT || "pi",
+    event: "done",
+    message: "任务已完成"
+  }
+  if (!body.token || !body.project_id || !body.terminal_id) return
+  await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  }).catch(() => {})
+}
+
+export default function (pi: ExtensionAPI) {
+  pi.on("agent_end", async (event) => {
+    if (event?.willRetry) return
+    await postPocketStudio()
+  })
+}
 `
 }
 
@@ -3957,11 +4026,36 @@ main().catch(() => {})
 
 func supportsPluginTerminalAgent(agent string) bool {
 	switch agent {
-	case "claude", "claude_code", "claude-code", "codex", "opencode", "kilo", "kilocode":
+	case "claude", "claude_code", "claude-code", "codex", "opencode", "kilo", "kilocode", "pi":
 		return true
 	default:
 		return false
 	}
+}
+
+func terminalAgentCommandWithHooks(command string, agent string, env []string) string {
+	if agent != "pi" || strings.TrimSpace(command) == "" {
+		return command
+	}
+	extensionPath := ""
+	for _, item := range env {
+		if value, ok := strings.CutPrefix(item, "POCKET_STUDIO_PI_EXTENSION="); ok {
+			extensionPath = strings.TrimSpace(value)
+			break
+		}
+	}
+	if extensionPath == "" || commandHasPiExtension(command, extensionPath) {
+		return command
+	}
+	return command + " --extension " + shellQuote(extensionPath)
+}
+
+func commandHasPiExtension(command string, extensionPath string) bool {
+	if strings.Contains(command, "--extension "+extensionPath) || strings.Contains(command, "--extension="+extensionPath) {
+		return true
+	}
+	quoted := shellQuote(extensionPath)
+	return strings.Contains(command, "--extension "+quoted) || strings.Contains(command, "--extension="+quoted)
 }
 
 func agentTerminalCommand(command string) string {

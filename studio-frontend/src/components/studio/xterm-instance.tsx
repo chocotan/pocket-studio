@@ -360,6 +360,7 @@ export function XtermInstance({
     let cancelCopyPasteShortcut: (() => void) | null = null;
     let cancelPasteHandler: (() => void) | null = null;
     let cancelFocusHandler: (() => void) | null = null;
+    let titleDisposable: { dispose: () => void } | null = null;
     let osc52Disposable: { dispose: () => void } | null = null;
     const postOpenResizeTimers: number[] = [];
 
@@ -395,6 +396,11 @@ export function XtermInstance({
       fitAddon = new FitAddon();
       fitAddonRef.current = fitAddon;
       term.loadAddon(fitAddon);
+
+      titleDisposable = term.onTitleChange((title) => {
+        const nextTitle = title.trim();
+        if (nextTitle) onTitleChangeRef.current?.(nextTitle);
+      });
 
       osc52Disposable = term.parser.registerOscHandler(52, (data) => {
         const text = osc52ClipboardText(data);
@@ -624,6 +630,7 @@ export function XtermInstance({
       terminalReadyRef.current = false;
       incomingBuf.current = [];
       ro.disconnect();
+      if (titleDisposable) titleDisposable.dispose();
       if (osc52Disposable) osc52Disposable.dispose();
       if (connectFrame !== null) window.cancelAnimationFrame(connectFrame);
       if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {

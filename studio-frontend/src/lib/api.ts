@@ -6,6 +6,7 @@ export interface ClientConfig {
 
 export const DEFAULT_SERVER_URL = "http://127.0.0.1:18080";
 const LOCAL_CONFIG_KEY = "pocket_studio_client_config";
+const DEFAULT_LOCAL_DEV_ACCESS_TOKEN = "ps_local_dev";
 
 let activeConfig: ClientConfig = {
   server_url: defaultServerURL(),
@@ -72,6 +73,7 @@ export async function loadClientConfig(): Promise<ClientConfig> {
       ...storedConfig,
       ...(isHTTPPage() ? { server_url: window.location.origin, local_mode: isLocalHost(window.location.hostname) } : {}),
       ...urlConfig,
+      ...defaultLocalDevAccessTokenPatch(urlConfig.access_token ?? storedConfig?.access_token),
     });
     applyClientConfig(cfg);
     saveConfigToStorage(cfg);
@@ -81,6 +83,7 @@ export async function loadClientConfig(): Promise<ClientConfig> {
     const cfg = normalizeConfig({
       ...(isHTTPPage() ? { server_url: window.location.origin, local_mode: isLocalHost(window.location.hostname) } : {}),
       ...storedConfig,
+      ...defaultLocalDevAccessTokenPatch(storedConfig.access_token),
     });
     applyClientConfig(cfg);
     return cfg;
@@ -89,7 +92,7 @@ export async function loadClientConfig(): Promise<ClientConfig> {
     const cfg = normalizeConfig({
       server_url: window.location.origin,
       local_mode: isLocalHost(window.location.hostname),
-      access_token: activeConfig.access_token,
+      access_token: activeConfig.access_token || defaultLocalDevAccessToken(),
     });
     applyClientConfig(cfg);
     return cfg;
@@ -214,6 +217,19 @@ function isHTTPPage(): boolean {
 
 function isLocalHost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function defaultLocalDevAccessTokenPatch(currentToken: string | undefined): Partial<ClientConfig> {
+  if (currentToken && currentToken.trim()) return {};
+  const token = defaultLocalDevAccessToken();
+  return token ? { access_token: token } : {};
+}
+
+function defaultLocalDevAccessToken(): string {
+  if (!import.meta.env.DEV || !isHTTPPage() || !isLocalHost(window.location.hostname)) {
+    return "";
+  }
+  return import.meta.env.VITE_LOCAL_ACCESS_TOKEN || DEFAULT_LOCAL_DEV_ACCESS_TOKEN;
 }
 
 function joinPath(basePath: string, path: string): string {
