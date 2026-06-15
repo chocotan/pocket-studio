@@ -21,6 +21,7 @@ interface ProjectNavMenuProps {
   projects: Project[];
   devices: Device[];
   currentProjectId?: string;
+  alertProjectIds?: Set<string>;
   onSelectProject: (projectId: string) => void;
   className?: string;
 }
@@ -39,6 +40,7 @@ export function ProjectSwitcher({
   const searchRef = useRef<HTMLInputElement>(null);
   const currentProject = projects.find((project) => project.id === currentProjectId);
   const currentDevice = currentProject ? deviceForProject(devices, currentProject) : undefined;
+  const currentDeviceName = currentDevice ? deviceDisplayName(currentDevice, currentProject?.device_id) : "";
   const visibleProjects = useMemo(() => {
     const term = query.trim().toLowerCase();
     if (!term) return projects;
@@ -82,10 +84,10 @@ export function ProjectSwitcher({
       >
         {currentProject ? (
           <>
-            {currentDevice && (
+            {currentDeviceName && (
               <>
-                <span className="truncate max-w-[120px] font-semibold text-slate-500 dark:text-slate-400" title={currentDevice.name || currentDevice.id}>
-                  {currentDevice.name || currentDevice.id}
+                <span className="truncate max-w-[120px] font-semibold text-slate-500 dark:text-slate-400" title={currentDeviceName}>
+                  {currentDeviceName}
                 </span>
                 <span className="text-slate-300 dark:text-slate-600">/</span>
               </>
@@ -136,6 +138,7 @@ export function ProjectSwitcher({
                   {visibleProjects.map((project) => {
                     const fullIndex = projects.findIndex((item) => item.id === project.id);
                     const device = deviceForProject(devices, project);
+                    const deviceName = deviceDisplayName(device, project.device_id);
                     const selected = project.id === currentProjectId;
                     const online = Boolean(device?.workspaces);
                     return (
@@ -162,7 +165,7 @@ export function ProjectSwitcher({
                                 </span>
                                 <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-slate-500">
                                   <Server className="h-3 w-3 shrink-0" />
-                                  <span className="truncate">{device?.name || project.device_id}</span>
+                                  <span className="truncate">{deviceName}</span>
                                   <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", online ? "bg-emerald-500" : "bg-slate-300")} />
                                 </span>
                               </span>
@@ -216,6 +219,7 @@ export function ProjectNavMenu({
   projects,
   devices,
   currentProjectId = "",
+  alertProjectIds = new Set<string>(),
   onSelectProject,
   className,
 }: ProjectNavMenuProps) {
@@ -234,7 +238,9 @@ export function ProjectNavMenu({
         ) : (
           projects.map((project, index) => {
             const device = deviceForProject(devices, project);
+            const deviceName = deviceDisplayName(device, project.device_id);
             const selected = project.id === currentProjectId;
+            const alerting = alertProjectIds.has(project.id);
             const online = Boolean(device?.workspaces);
             return (
               <div key={project.id} className="flex shrink-0 items-center gap-1">
@@ -242,19 +248,20 @@ export function ProjectNavMenu({
                 <button
                   type="button"
                   onClick={() => onSelectProject(project.id)}
+                  data-alert={alerting ? "true" : "false"}
                   className={cn(
-                    "flex h-7 min-w-0 items-center gap-1.5 rounded-md border px-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400",
+                    "studio-project-nav-item relative flex h-7 min-w-0 items-center gap-1.5 overflow-hidden rounded-md border px-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400",
                     selected
                       ? "border-indigo-200 bg-indigo-50 text-indigo-700 shadow-sm shadow-indigo-500/5 dark:border-indigo-900/70 dark:bg-indigo-950/35 dark:text-indigo-300"
                       : "border-transparent bg-slate-50/70 text-slate-600 hover:border-slate-200 hover:bg-white dark:bg-slate-900/45 dark:text-slate-400 dark:hover:border-slate-800 dark:hover:bg-slate-800/70"
                   )}
-                  title={`${device?.name || project.device_id} / ${project.name}`}
+                  title={`${deviceName} / ${project.name}`}
                   aria-current={selected ? "page" : undefined}
                 >
-                  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", online ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600")} />
-                  <span className="flex min-w-0 max-w-[240px] items-center gap-1 text-[11px] leading-none">
+                  <span className={cn("relative z-10 h-1.5 w-1.5 shrink-0 rounded-full", online ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600")} />
+                  <span className="relative z-10 flex min-w-0 max-w-[240px] items-center gap-1 text-[11px] leading-none">
                     <span className="truncate font-semibold text-slate-500 dark:text-slate-400">
-                      {device?.name || project.device_id}
+                      {deviceName}
                     </span>
                     <span className="text-slate-300 dark:text-slate-600">/</span>
                     <span className={cn("truncate font-bold", selected ? "text-indigo-700 dark:text-indigo-200" : "text-slate-700 dark:text-slate-300")}>
@@ -273,4 +280,12 @@ export function ProjectNavMenu({
 
 function deviceForProject(devices: Device[], project: Project) {
   return devices.find((device) => device.id === project.device_id);
+}
+
+function deviceDisplayName(device: Device | undefined, fallback = "") {
+  const raw = (device?.name || fallback).trim();
+  if (!raw) return fallback;
+  const withoutProtocol = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  const host = withoutProtocol.split(/[/:?#]/, 1)[0] || withoutProtocol;
+  return host.split(".")[0] || host || raw;
 }

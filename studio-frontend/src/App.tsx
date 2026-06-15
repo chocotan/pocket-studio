@@ -1,11 +1,13 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { StudioDashboard, type Project } from "./components/studio/studio-dashboard";
 import { StudioWorkspace } from "./components/studio/studio-workspace";
+import type { NotificationJumpTarget, TerminalAlertEvent, TerminalNotification } from "./components/studio/terminal-notifications";
 import type { Device } from "./lib/types";
-import { getJSON, loadClientConfig } from "./lib/api";
+import { getJSON, loadClientConfig, websocketURL } from "./lib/api";
 import { loadZoom, saveZoom, type PageZoom } from "./lib/zoom";
 
 const PROJECT_ORDER_KEY = "pocket-studio-project-order";
+const MAX_TERMINAL_NOTIFICATIONS = 100;
 
 export default function App() {
   const initialProjectId = projectIdFromPath();
@@ -17,7 +19,16 @@ export default function App() {
   const [projectOrder, setProjectOrder] = useState<string[]>(() => loadProjectOrder());
   const [selectedProjectId, setSelectedProjectId] = useState<string>(initialProjectId);
   const [pageZoom, setPageZoom] = useState<PageZoom>(() => loadZoom());
+  const [terminalNotifications, setTerminalNotifications] = useState<TerminalNotification[]>([]);
+  const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
+  const [notificationJumpTarget, setNotificationJumpTarget] = useState<NotificationJumpTarget | null>(null);
+  const notificationDedupRef = useRef<Map<string, number>>(new Map());
   const orderedProjects = useMemo(() => orderProjects(projects, projectOrder), [projectOrder, projects]);
+  const unreadProjectIds = useMemo(() => new Set(terminalNotifications.filter((item) => !item.read).map((item) => item.projectId)), [terminalNotifications]);
+  const unreadTerminalIds = useMemo(
+    () => new Set(terminalNotifications.filter((item) => !item.read && item.projectId === selectedProjectId).map((item) => item.tabId)),
+    [selectedProjectId, terminalNotifications]
+  );
 
   useEffect(() => {
     saveZoom(pageZoom);
@@ -32,6 +43,47 @@ export default function App() {
       syncAppImageURL(cfg.server_url, cfg.access_token || "");
     }).finally(refreshAll);
   }, []);
+
+  useEffect(() => {
+    let closed = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+
+    const connect = () => {
+      if (closed) return;
+      socket = new WebSocket(websocketURL("/ws/web"));
+      socket.onmessage = (event) => {
+        if (typeof event.data !== "string") return;
+        try {
+          const env = JSON.parse(event.data) as { type?: string; payload?: any };
+          if (env.type !== "terminal.stream.alert") return;
+          const payload = typeof env.payload === "string" ? JSON.parse(env.payload) : env.payload;
+          if (!payload?.project_id || !payload?.terminal_id) return;
+          addTerminalNotification({
+            projectId: payload.project_id,
+            tabId: payload.terminal_id,
+            panelId: payload.panel_id || "",
+            title: payload.title || "Terminal",
+            reason: payload.reason || "bell",
+            message: payload.message || "",
+          });
+        } catch {
+          // Ignore non-envelope messages.
+        }
+      };
+      socket.onclose = () => {
+        if (closed) return;
+        reconnectTimer = window.setTimeout(connect, 1500);
+      };
+    };
+
+    connect();
+    return () => {
+      closed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+  }, [projects]);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -78,6 +130,68 @@ export default function App() {
     pushPath(studioPath(`/projects/${encodeURIComponent(projectId)}`));
   }
 
+  function addTerminalNotification(event: TerminalAlertEvent & { projectId: string }) {
+    const project = orderedProjects.find((item) => item.id === event.projectId) || projects.find((item) => item.id === event.projectId);
+    const device = project ? devices.find((item) => item.id === project.device_id) : undefined;
+    const dedupKey = `${event.projectId}:${event.tabId}:${event.reason || ""}:${event.message || ""}`;
+    const now = Date.now();
+    const lastSeen = notificationDedupRef.current.get(dedupKey) || 0;
+    if (now - lastSeen < 800) return;
+    notificationDedupRef.current.set(dedupKey, now);
+    for (const [key, value] of notificationDedupRef.current) {
+      if (now - value > 10_000) notificationDedupRef.current.delete(key);
+    }
+    setTerminalNotifications((current) => [
+      {
+        id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
+        projectId: event.projectId,
+        projectName: project?.name || event.projectId,
+        deviceName: displayDeviceName(device?.name || project?.device_id || ""),
+        panelId: event.panelId,
+        tabId: event.tabId,
+        terminalTitle: event.title || "Terminal",
+        message: (event.message || "").trim(),
+        reason: event.reason,
+        createdAt: now,
+        read: false,
+      },
+      ...current,
+    ].slice(0, MAX_TERMINAL_NOTIFICATIONS));
+  }
+
+  function handleSelectNotification(notification: TerminalNotification) {
+    setNotificationJumpTarget({
+      projectId: notification.projectId,
+      panelId: notification.panelId,
+      tabId: notification.tabId,
+      nonce: Date.now(),
+    });
+    setNotificationCenterOpen(false);
+    handleSelectProject(notification.projectId);
+  }
+
+  function handleNotificationJumpHandled(nonce: number) {
+    setNotificationJumpTarget((current) => current?.nonce === nonce ? null : current);
+  }
+
+  function handleTerminalFocused(projectId: string, tabId: string) {
+    setTerminalNotifications((current) => {
+      let changed = false;
+      const now = Date.now();
+      const next = current.map((item) => {
+        if (item.projectId !== projectId || item.tabId !== tabId || item.read) return item;
+        changed = true;
+        return { ...item, read: true, readAt: now };
+      });
+      return changed ? next : current;
+    });
+  }
+
+  function handleMarkAllNotificationsRead() {
+    const now = Date.now();
+    setTerminalNotifications((current) => current.map((item) => item.read ? item : { ...item, read: true, readAt: now }));
+  }
+
   function handleMoveProject(projectId: string, direction: "up" | "down") {
     setProjectOrder((current) => moveProjectInOrder(current, orderedProjects, projectId, direction));
   }
@@ -94,6 +208,11 @@ export default function App() {
           onRefreshProjects={refreshAll}
           pageZoom={pageZoom}
           onPageZoomChange={setPageZoom}
+          notifications={terminalNotifications}
+          notificationCenterOpen={notificationCenterOpen}
+          onNotificationCenterOpenChange={setNotificationCenterOpen}
+          onSelectNotification={handleSelectNotification}
+          onMarkAllNotificationsRead={handleMarkAllNotificationsRead}
         />
       ) : (
         activeProject && (
@@ -105,6 +224,16 @@ export default function App() {
             pageZoom={pageZoom}
             onPageZoomChange={setPageZoom}
             onSelectProject={handleSelectProject}
+            onTerminalFocused={handleTerminalFocused}
+            notificationJumpTarget={notificationJumpTarget}
+            onNotificationJumpHandled={handleNotificationJumpHandled}
+            alertProjectIds={unreadProjectIds}
+            alertTerminalIds={unreadTerminalIds}
+            notifications={terminalNotifications}
+            notificationCenterOpen={notificationCenterOpen}
+            onNotificationCenterOpenChange={setNotificationCenterOpen}
+            onSelectNotification={handleSelectNotification}
+            onMarkAllNotificationsRead={handleMarkAllNotificationsRead}
             onBackToDashboard={() => {
               refreshAll();
               setView("studio_dashboard");
@@ -191,6 +320,14 @@ function moveProjectInOrder(order: string[], projects: Project[], projectId: str
   if (swapWith < 0 || swapWith >= nextOrder.length) return nextOrder;
   [nextOrder[index], nextOrder[swapWith]] = [nextOrder[swapWith], nextOrder[index]];
   return nextOrder;
+}
+
+function displayDeviceName(value: string) {
+  const raw = value.trim();
+  if (!raw) return "";
+  const withoutProtocol = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  const host = withoutProtocol.split(/[/:?#]/, 1)[0] || withoutProtocol;
+  return host.split(".")[0] || host || raw;
 }
 
 function syncAppImageURL(serverURL: string, token: string) {
