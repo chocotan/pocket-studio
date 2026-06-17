@@ -9,3 +9,4 @@ user-frontend/node_modules/
 user-frontend/dist/
 user-frontend/tsconfig.tsbuildinfo
 *.log
+.omo

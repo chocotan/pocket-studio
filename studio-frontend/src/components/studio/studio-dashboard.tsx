@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import type { Device } from "../../lib/types";
 import { clearClientConfig, loadClientConfig, postJSON, saveClientConfig, type ClientConfig } from "../../lib/api";
+import { pocketElectronAPI } from "@/lib/electron-api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -874,7 +875,7 @@ async function syncAppImageDaemon(cfg: ClientConfig) {
   if (!isAppImagePage()) {
     return;
   }
-  const electronAPI = (window as any).electronAPI;
+  const electronAPI = pocketElectronAPI();
   if (!electronAPI?.syncDaemonConfig) {
     return;
   }
@@ -885,7 +886,7 @@ async function syncAppImageDaemon(cfg: ClientConfig) {
 }
 
 async function switchAppImageToLocalMode(): Promise<{ server_url: string }> {
-  const electronAPI = (window as any).electronAPI;
+  const electronAPI = pocketElectronAPI();
   if (!electronAPI?.switchToLocalMode) {
     throw new Error("当前环境不支持本机模式切换");
   }

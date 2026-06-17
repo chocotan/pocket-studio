@@ -206,3 +206,26 @@ export function collectAllTabs(node: LayoutNode | null): StudioTab[] {
   }
   return node.children.flatMap(collectAllTabs);
 }
+
+export function updateTabPropertiesInTree(node: LayoutNode, tabId: string, props: Partial<StudioTab>): LayoutNode {
+  if (node.type === "panel") {
+    let changed = false;
+    const tabs = node.tabs.map((tab) => {
+      if (tab.id !== tabId) return tab;
+      changed = true;
+      return {
+        ...tab,
+        ...props,
+      };
+    });
+    return changed ? { ...node, tabs } : node;
+  }
+  let changed = false;
+  const children = node.children.map((child) => {
+    const next = updateTabPropertiesInTree(child, tabId, props);
+    if (next !== child) changed = true;
+    return next;
+  });
+  return changed ? { ...node, children } : node;
+}
+

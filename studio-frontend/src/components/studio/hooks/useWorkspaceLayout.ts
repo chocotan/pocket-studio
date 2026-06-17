@@ -6,10 +6,12 @@ import {
   createTerminalTab,
   createTerminalPanel,
   createFileViewerTab,
+  createAgentChatTab,
   cleanLayoutTitles,
   setFocusInLayout,
   type LayoutNode,
   type TerminalPanel,
+  type StudioTab,
 } from "../studio-layout";
 import {
   makeId,
@@ -34,6 +36,7 @@ import {
   replaceOrAddFileViewer,
   setActiveTabInTree,
   updateTabTitleInTree,
+  updateTabPropertiesInTree,
   closeTabInTree,
   findPanel,
   findPanelForTab,
@@ -227,6 +230,9 @@ export function useWorkspaceLayout({
       if (explorerTabs.length === 0) {
         explorerTabs.push(createFileExplorerTab());
       }
+      if (editorTabs.length === 0) {
+        editorTabs.push(createTerminalTab("bash"));
+      }
       if (terminalTabs.length === 0) {
         terminalTabs.push(createTerminalTab("bash"));
       }
@@ -242,8 +248,8 @@ export function useWorkspaceLayout({
       const rightTopPanel: TerminalPanel = {
         type: "panel",
         id: makeId("panel"),
-        tabs: editorTabs.length > 0 ? editorTabs : [createTerminalTab("bash")],
-        activeTabId: editorTabs.length > 0 ? editorTabs[0].id : editorTabs[0]?.id || "",
+        tabs: editorTabs,
+        activeTabId: editorTabs[0].id,
         focus: false,
       };
 
@@ -413,6 +419,19 @@ export function useWorkspaceLayout({
     setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : null));
     setFocusedId(panelId);
     setAddMenuPanelId(null);
+    setLayoutVersion((value) => value + 1);
+  }
+
+  function handleAddAgentChat(panelId: string, agentKind: string) {
+    const tab = createAgentChatTab(agentKind);
+    setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : null));
+    setFocusedId(panelId);
+    setAddMenuPanelId(null);
+    setLayoutVersion((value) => value + 1);
+  }
+
+  function handleUpdateTabProperties(tabId: string, props: Partial<StudioTab>) {
+    setLayoutTree((prev) => (prev ? updateTabPropertiesInTree(prev, tabId, props) : null));
     setLayoutVersion((value) => value + 1);
   }
 
@@ -674,6 +693,8 @@ export function useWorkspaceLayout({
     handleClosePanel,
     handleAddTab,
     handleAddFileExplorer,
+    handleAddAgentChat,
+    handleUpdateTabProperties,
     handleOpenFile,
     handleCloseTab,
     activateTerminalTab,

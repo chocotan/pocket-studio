@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal } from "lucide-react";
+import { OpenCode, Codex, ClaudeCode, Antigravity, KiloCode } from "@lobehub/icons";
 import {
   Tooltip,
   TooltipContent,
@@ -9,9 +10,10 @@ import { XtermInstance } from "./xterm-instance";
 import { FileExplorerTab } from "./file-explorer-tab";
 import { FileViewerTab } from "./file-viewer-tab";
 import { SplitBottomIcon, SplitLeftIcon, SplitRightIcon, SplitTopIcon } from "./split-icons";
-import type { TerminalPanel } from "./studio-layout";
+import type { TerminalPanel, StudioTab } from "./studio-layout";
+import { AgentChatTab } from "./agent-chat/agent-chat-tab";
+import type { Project } from "./studio-dashboard";
 import {
-  TERMINAL_TYPES,
   cleanTerminalTitle,
   terminalType,
   terminalTypeFromCommand,
@@ -19,6 +21,7 @@ import {
   type TerminalKind,
   type TerminalTitleState,
   type StudioTheme,
+  TERMINAL_TYPES,
 } from "./terminal-types";
 
 
@@ -28,12 +31,15 @@ interface TerminalPanelViewProps {
   dragTarget: { panelId: string; insertIndex: number } | null;
   isDraggingTab: boolean;
   projectId: string;
+  project: Project;
   workspacePath: string;
   onFocus: (id: string) => void;
   onAddMenu: (id: string) => void;
   onSplitSelect: (id: string, dir: SplitDirection, kind: TerminalKind) => void;
   onAddTab: (id: string, kind: TerminalKind) => void;
   onAddFileExplorer: (id: string) => void;
+  onAddAgentChat: (panelId: string, agentKind: string) => void;
+  onUpdateTabProperties: (tabId: string, props: Partial<StudioTab>) => void;
   onOpenFile: (panelId: string, path: string) => void;
   onActiveTab: (panelId: string, tabId: string) => void;
   onCloseTab: (panelId: string, tabId: string) => void;
@@ -56,12 +62,15 @@ function TerminalPanelViewComponent({
   dragTarget,
   isDraggingTab,
   projectId,
+  project,
   workspacePath,
   onFocus,
   onAddMenu,
   onSplitSelect,
   onAddTab,
   onAddFileExplorer,
+  onAddAgentChat,
+  onUpdateTabProperties,
   onOpenFile,
   onActiveTab,
   onCloseTab,
@@ -113,7 +122,6 @@ function TerminalPanelViewComponent({
     lime: "bg-lime-100 text-lime-700 ring-1 ring-lime-200/70 dark:bg-lime-400/16 dark:text-lime-200 dark:ring-lime-300/20",
   };
   const panelAlert = panel.tabs.some((tab) => alertTerminalIds.has(tab.id));
-
   function updateScrollState() {
     const scroller = tabScrollerRef.current;
     if (!scroller) return;
@@ -150,6 +158,7 @@ function TerminalPanelViewComponent({
   function displayTitleForTab(tab: TerminalPanel["tabs"][number]) {
     if (tab.kind === "file_explorer") return "文件";
     if (tab.kind === "file_viewer") return tab.title;
+    if (tab.kind === "agent_chat") return tab.title;
     const liveTitle = terminalTitles[tab.id];
     return cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType);
   }
@@ -157,6 +166,7 @@ function TerminalPanelViewComponent({
   function fullTitleForTab(tab: TerminalPanel["tabs"][number]) {
     if (tab.kind === "file_explorer") return "文件";
     if (tab.kind === "file_viewer") return tab.title;
+    if (tab.kind === "agent_chat") return tab.title;
     const liveTitle = terminalTitles[tab.id];
     const rawTitle = (liveTitle?.fullTitle || liveTitle?.title || tab.title || "").trim();
     return rawTitle || terminalType(tab.termType).title;
@@ -313,7 +323,11 @@ function TerminalPanelViewComponent({
             const isFileViewer = tab.kind === "file_viewer";
             const liveTitle = tab.kind === "terminal" ? terminalTitles[tab.id] : undefined;
             const activeCommand = liveTitle?.command || tab.activeCommand || "";
-            const displayType = terminalType(terminalTypeFromCommand(activeCommand, tab.termType));
+            const displayType = terminalType(
+              tab.kind === "agent_chat"
+                ? (tab.agentKind as TerminalKind || "opencode")
+                : terminalTypeFromCommand(activeCommand, tab.termType)
+            );
             const displayTitle = displayTitleForTab(tab);
             const fullTitle = fullTitleForTab(tab);
             const active = tab.id === panel.activeTabId;
@@ -452,6 +466,7 @@ function TerminalPanelViewComponent({
             style={addMenuPosition}
             onSelect={(kind) => onAddTab(panel.id, kind)}
             onFileExplorer={() => onAddFileExplorer(panel.id)}
+            onAddAgentChat={(agentKind) => onAddAgentChat(panel.id, agentKind)}
           />
         )}
 
@@ -568,6 +583,14 @@ function TerminalPanelViewComponent({
                     dragSuspended={isDraggingTab}
                     theme={theme}
                   />
+                ) : tab.kind === "agent_chat" ? (
+                  <AgentChatTab
+                    project={project}
+                    tab={tab}
+                    active={active}
+                    workspacePath={workspacePath}
+                    onUpdateTabProperties={onUpdateTabProperties}
+                  />
                 ) : (
                   <XtermInstance
                     projectId={projectId}
@@ -596,41 +619,137 @@ function TerminalTypeMenu({
   style,
   onSelect,
   onFileExplorer,
+  onAddAgentChat,
 }: {
   align: "left" | "right";
   style?: React.CSSProperties;
   onSelect: (kind: TerminalKind) => void;
   onFileExplorer: () => void;
+  onAddAgentChat: (agentKind: string) => void;
 }) {
+  const [showAgents, setShowAgents] = useState(false);
+
   return (
     <div
-      className={`absolute top-6 z-50 w-40 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
+      className={`absolute top-6 z-50 w-44 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
       style={style}
       onClick={(event) => event.stopPropagation()}
     >
-      {TERMINAL_TYPES.map((item) => (
-        <button
-          key={item.value}
-          type="button"
-          onClick={() => onSelect(item.value)}
-          className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
-        >
-          <span className="flex h-5 w-5 items-center justify-center rounded-md bg-slate-100 text-slate-600">
-            {item.logo}
-          </span>
-          <span className="truncate">{item.label}</span>
-        </button>
-      ))}
-      <button
-        type="button"
-        onClick={onFileExplorer}
-        className="flex w-full items-center gap-2 border-t border-slate-100 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
-      >
-        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-100 text-sky-700">
-          <FolderTree className="h-3.5 w-3.5" />
-        </span>
-        <span className="truncate">文件</span>
-      </button>
+      {!showAgents ? (
+        <>
+          <div className="px-2.5 py-1 text-[9px] font-bold text-slate-400 uppercase select-none">新建终端</div>
+          {TERMINAL_TYPES.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              onClick={() => onSelect(item.value)}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+            >
+              <span className="flex h-5 w-5 items-center justify-center rounded-md bg-slate-100 text-slate-600">
+                {item.logo}
+              </span>
+              <span className="truncate">{item.label}</span>
+            </button>
+          ))}
+
+          <div className="border-t border-slate-100 my-1" />
+          <div className="px-2.5 py-1 text-[9px] font-bold text-slate-400 uppercase select-none">新建工具</div>
+          <button
+            type="button"
+            onClick={onFileExplorer}
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+          >
+            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-100 text-sky-750">
+              <FolderTree className="h-3.5 w-3.5" />
+            </span>
+            <span className="truncate">文件管理器</span>
+          </button>
+
+          <div className="border-t border-slate-100 my-1" />
+          <div className="px-2.5 py-1 text-[9px] font-bold text-slate-400 uppercase select-none">新建对话</div>
+          <button
+            type="button"
+            onClick={() => setShowAgents(true)}
+            className="flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+          >
+            <div className="flex items-center gap-2">
+              <span className="flex h-5 w-5 items-center justify-center rounded-md bg-amber-100 text-amber-750">
+                <Cpu className="h-3.5 w-3.5" />
+              </span>
+              <span className="truncate">Agent 对话</span>
+            </div>
+            <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+          </button>
+        </>
+      ) : (
+        <>
+          <div className="flex items-center gap-1 px-1.5 py-1 border-b border-slate-100 bg-slate-50/50">
+            <button
+              type="button"
+              onClick={() => setShowAgents(false)}
+              className="p-1 rounded hover:bg-slate-200/50 text-slate-500 cursor-pointer"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </button>
+            <span className="text-[9px] font-bold text-slate-400 uppercase select-none">选择 Agent</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => onAddAgentChat("opencode")}
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+          >
+            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-amber-100 text-amber-750">
+              <OpenCode width={14} height={14} />
+            </span>
+            <span className="truncate font-semibold text-slate-750">OpenCode</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onAddAgentChat("codex")}
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+          >
+            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-emerald-100 text-emerald-700">
+              <Codex width={14} height={14} />
+            </span>
+            <span className="truncate font-semibold text-slate-750">Codex</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onAddAgentChat("claude")}
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+          >
+            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-violet-100 text-violet-750">
+              <ClaudeCode width={14} height={14} />
+            </span>
+            <span className="truncate font-semibold text-slate-750">Claude Code</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onAddAgentChat("agy")}
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+          >
+            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-rose-100 text-rose-750">
+              <Antigravity width={14} height={14} />
+            </span>
+            <span className="truncate font-semibold text-slate-750">Antigravity</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onAddAgentChat("kilo")}
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+          >
+            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-lime-100 text-lime-750">
+              <KiloCode width={14} height={14} />
+            </span>
+            <span className="truncate font-semibold text-slate-755">Kilo Code</span>
+          </button>
+        </>
+      )}
     </div>
   );
 }

@@ -17,6 +17,18 @@ export function apiURL(path: string): string {
   return `${serverBaseURL()}${path}`;
 }
 
+export function eventStreamURL(path: string, params?: URLSearchParams): string {
+  const base = new URL(serverBaseURL() || window.location.origin);
+  base.pathname = joinPath(base.pathname, path);
+  const streamParams = params ? new URLSearchParams(params) : new URLSearchParams();
+  if (activeConfig.access_token) {
+    streamParams.set("token", activeConfig.access_token);
+  }
+  base.search = streamParams.toString();
+  base.hash = "";
+  return base.toString();
+}
+
 export function websocketURL(path: string, params?: URLSearchParams): string {
   const base = new URL(serverBaseURL() || window.location.origin);
   base.protocol = base.protocol === "https:" ? "wss:" : "ws:";
@@ -30,7 +42,7 @@ export function websocketURL(path: string, params?: URLSearchParams): string {
   return base.toString();
 }
 
-export async function postJSON<T>(url: string, body: any): Promise<T> {
+export async function postJSON<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(apiURL(url), {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
@@ -71,7 +83,7 @@ export async function loadClientConfig(): Promise<ClientConfig> {
     }
     const cfg = normalizeConfig({
       ...storedConfig,
-      ...(isHTTPPage() ? { server_url: window.location.origin, local_mode: isLocalHost(window.location.hostname) } : {}),
+      ...(isHTTPPage() ? { server_url: import.meta.env.DEV ? DEFAULT_SERVER_URL : window.location.origin, local_mode: isLocalHost(window.location.hostname) } : {}),
       ...urlConfig,
       ...defaultLocalDevAccessTokenPatch(urlConfig.access_token ?? storedConfig?.access_token),
     });
@@ -81,7 +93,7 @@ export async function loadClientConfig(): Promise<ClientConfig> {
   }
   if (storedConfig) {
     const cfg = normalizeConfig({
-      ...(isHTTPPage() ? { server_url: window.location.origin, local_mode: isLocalHost(window.location.hostname) } : {}),
+      ...(isHTTPPage() ? { server_url: import.meta.env.DEV ? DEFAULT_SERVER_URL : window.location.origin, local_mode: isLocalHost(window.location.hostname) } : {}),
       ...storedConfig,
       ...defaultLocalDevAccessTokenPatch(storedConfig.access_token),
     });
@@ -90,7 +102,7 @@ export async function loadClientConfig(): Promise<ClientConfig> {
   }
   if (isHTTPPage()) {
     const cfg = normalizeConfig({
-      server_url: window.location.origin,
+      server_url: import.meta.env.DEV ? DEFAULT_SERVER_URL : window.location.origin,
       local_mode: isLocalHost(window.location.hostname),
       access_token: activeConfig.access_token || defaultLocalDevAccessToken(),
     });
@@ -196,7 +208,7 @@ function normalizeConfig(cfg: Partial<ClientConfig>): ClientConfig {
   };
 }
 
-function authHeaders(base?: HeadersInit): HeadersInit {
+export function authHeaders(base?: HeadersInit): HeadersInit {
   const headers = new Headers(base);
   if (activeConfig.access_token) {
     headers.set("Authorization", `Bearer ${activeConfig.access_token}`);
@@ -205,6 +217,9 @@ function authHeaders(base?: HeadersInit): HeadersInit {
 }
 
 function defaultServerURL(): string {
+  if (import.meta.env.DEV) {
+    return DEFAULT_SERVER_URL;
+  }
   if (isHTTPPage()) {
     return window.location.origin;
   }

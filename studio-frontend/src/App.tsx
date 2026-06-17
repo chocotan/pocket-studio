@@ -3,9 +3,11 @@ import { StudioDashboard, type Project } from "./components/studio/studio-dashbo
 import { StudioWorkspace } from "./components/studio/studio-workspace";
 import type { NotificationJumpTarget, TerminalAlertEvent, TerminalNotification } from "./components/studio/terminal-notifications";
 import type { Device } from "./lib/types";
-import { getJSON, loadClientConfig, websocketURL } from "./lib/api";
+import { getJSON, loadClientConfig } from "./lib/api";
+import { pocketElectronAPI } from "./lib/electron-api";
 import { loadZoom, saveZoom, type PageZoom } from "./lib/zoom";
 import { isTerminalKind, terminalType, type TerminalKind } from "./components/studio/terminal-types";
+import { createStudioWebTransport, type StudioWebTransport, type StudioEnvelope } from "./components/studio/web-transport";
 
 const PROJECT_ORDER_KEY = "pocket-studio-project-order";
 const MAX_TERMINAL_NOTIFICATIONS = 100;
@@ -28,7 +30,9 @@ export default function App() {
   const devicesRef = useRef<Device[]>([]);
   const projectsRef = useRef<Project[]>([]);
   const orderedProjectsRef = useRef<Project[]>([]);
+  const webTransportRef = useRef<StudioWebTransport | null>(null);
   const orderedProjects = useMemo(() => orderProjects(projects, projectOrder), [projectOrder, projects]);
+  const envelopeHandlerRef = useRef<(envelope: StudioEnvelope) => void>(() => {});
   const unreadProjectIds = useMemo(() => new Set(terminalNotifications.filter((item) => !item.read).map((item) => item.projectId)), [terminalNotifications]);
   const unreadTerminalIds = useMemo(
     () => new Set(terminalNotifications.filter((item) => !item.read && item.projectId === selectedProjectId).map((item) => item.tabId)),
@@ -53,6 +57,24 @@ export default function App() {
   }, [orderedProjects, projects]);
 
   useEffect(() => {
+    envelopeHandlerRef.current = (envelope) => {
+      if (envelope.type !== "terminal.stream.alert") return;
+      const payload = envelope.payload;
+      if (!payload || typeof payload !== "object") return;
+      const alert = payload as Record<string, unknown>;
+      if (typeof alert.project_id !== "string" || typeof alert.terminal_id !== "string") return;
+      addTerminalNotification({
+        projectId: alert.project_id,
+        tabId: alert.terminal_id,
+        panelId: typeof alert.panel_id === "string" ? alert.panel_id : "",
+        title: notificationTerminalTitle(alert.title, alert.agent),
+        reason: typeof alert.reason === "string" ? alert.reason : "bell",
+        message: typeof alert.message === "string" ? alert.message : "",
+      });
+    };
+  }, []);
+
+  useEffect(() => {
     void loadClientConfig().then((cfg) => {
       syncAppImageURL(cfg.server_url, cfg.access_token || "");
     }).finally(() => {
@@ -62,44 +84,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    let closed = false;
-    let socket: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
-
-    const connect = () => {
-      if (closed) return;
-      socket = new WebSocket(websocketURL("/ws/web"));
-      socket.onmessage = (event) => {
-        if (typeof event.data !== "string") return;
-        try {
-          const env = JSON.parse(event.data) as { type?: string; payload?: any };
-          if (env.type !== "terminal.stream.alert") return;
-          const payload = typeof env.payload === "string" ? JSON.parse(env.payload) : env.payload;
-          if (!payload?.project_id || !payload?.terminal_id) return;
-          addTerminalNotification({
-            projectId: payload.project_id,
-            tabId: payload.terminal_id,
-            panelId: payload.panel_id || "",
-            title: notificationTerminalTitle(payload.title, payload.agent),
-            reason: payload.reason || "bell",
-            message: payload.message || "",
-          });
-        } catch {
-          // Ignore non-envelope messages.
-        }
-      };
-      socket.onclose = () => {
-        if (closed) return;
-        reconnectTimer = window.setTimeout(connect, 1500);
-      };
-    };
-
     if (!clientConfigLoaded) return;
-    connect();
+    const transport = createStudioWebTransport({
+      onEnvelope: (envelope) => envelopeHandlerRef.current(envelope),
+    });
+    webTransportRef.current = transport;
     return () => {
-      closed = true;
-      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-      socket?.close();
+      if (webTransportRef.current === transport) webTransportRef.current = null;
+      transport.close();
     };
   }, [clientConfigLoaded]);
 
@@ -124,17 +116,17 @@ export default function App() {
 
   async function refreshAll() {
     try {
-      const stateData = await getJSON<any>("/api/state");
-      if (stateData && stateData.devices) {
+      const stateData = await getJSON<unknown>("/api/state");
+      if (isObject(stateData) && Array.isArray(stateData.devices)) {
         setDevices(stateData.devices);
       } else if (Array.isArray(stateData)) {
-        setDevices(stateData);
+        setDevices(stateData.filter(isDevice));
       }
 
-      const projectData = await getJSON<any>("/api/project/list");
+      const projectData = await getJSON<unknown>("/api/project/list");
       if (Array.isArray(projectData)) {
-        setProjects(projectData);
-      } else if (projectData && projectData.projects) {
+        setProjects(projectData.filter(isProject));
+      } else if (isObject(projectData) && Array.isArray(projectData.projects)) {
         setProjects(projectData.projects);
       }
     } catch (err) {
@@ -362,7 +354,6 @@ function terminalKindFromAgent(agent: unknown): TerminalKind | "" {
   if (normalized === "claude-code") return "claude";
   if (normalized === "kilocode" || normalized === "kilo-code") return "kilo";
   if (normalized === "antigravity") return "agy";
-  if (normalized === "acpx") return "online";
   return isTerminalKind(normalized) ? normalized : "";
 }
 
@@ -388,7 +379,7 @@ function syncAppImageURL(serverURL: string, token: string) {
 }
 
 async function syncAppImageDaemon(serverURL: string, token: string) {
-  const electronAPI = (window as any).electronAPI;
+  const electronAPI = pocketElectronAPI();
   if (!electronAPI?.syncDaemonConfig) {
     return;
   }
@@ -396,4 +387,20 @@ async function syncAppImageDaemon(serverURL: string, token: string) {
     server_url: serverURL,
     token,
   });
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isDevice(value: unknown): value is Device {
+  return isObject(value) && typeof value.id === "string" && typeof value.name === "string";
+}
+
+function isProject(value: unknown): value is Project {
+  return isObject(value)
+    && typeof value.id === "string"
+    && typeof value.name === "string"
+    && typeof value.device_id === "string"
+    && typeof value.workspace_path === "string";
 }

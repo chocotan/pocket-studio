@@ -123,6 +123,8 @@ export function StudioWorkspace({
     handleClosePanel,
     handleAddTab,
     handleAddFileExplorer,
+    handleAddAgentChat,
+    handleUpdateTabProperties,
     handleOpenFile,
     handleActiveTab,
     handleCloseTab,
@@ -160,22 +162,15 @@ export function StudioWorkspace({
           dragTarget={tabDragTarget}
           isDraggingTab={isDraggingTab}
           projectId={projectId}
+          project={project}
           workspacePath={project.workspace_path}
           onFocus={handleFocus}
-          onAddMenu={(panelId) => {
-            // Wait, we need to set it, does the hook return setAddMenuPanelId? Yes!
-            // Let's call the hook's setAddMenuPanelId
-            // But wait, the hook returns setAddMenuPanelId, so we can just use a wrapper or pass it directly.
-            // Let's check how the hook returns setAddMenuPanelId.
-            // In the hook: setAddMenuPanelId
-            // Yes, we can just do:
-            // onAddMenu={(panelId) => setAddMenuPanelId((prev) => prev === panelId ? null : panelId)}
-            // Wait, in React, when you do setAddMenuPanelId, since setAddMenuPanelId is returned, we can use it!
-            setAddMenuPanelId((prev) => prev === panelId ? null : panelId);
-          }}
+          onAddMenu={(panelId) => setAddMenuPanelId((prev) => prev === panelId ? null : panelId)}
           onSplitSelect={handleSplit}
           onAddTab={handleAddTab}
           onAddFileExplorer={handleAddFileExplorer}
+          onAddAgentChat={handleAddAgentChat}
+          onUpdateTabProperties={handleUpdateTabProperties}
           onOpenFile={handleOpenFile}
           onActiveTab={handleActiveTab}
           onCloseTab={handleCloseTab}
@@ -433,7 +428,10 @@ export function StudioWorkspace({
             {layoutTree ? (
               renderNode(layoutTree)
             ) : (
-              <EmptyWorkspace onCreate={handleCreateInitialPanel} onCreateFileExplorer={handleCreateInitialFileExplorer} />
+              <EmptyWorkspace
+                onCreate={handleCreateInitialPanel}
+                onCreateFileExplorer={handleCreateInitialFileExplorer}
+              />
             )}
           </div>
         </div>

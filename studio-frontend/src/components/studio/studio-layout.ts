@@ -8,7 +8,7 @@ import {
   terminalType,
 } from "./terminal-types";
 
-export type StudioTabKind = "terminal" | "file_explorer" | "file_viewer";
+export type StudioTabKind = "terminal" | "file_explorer" | "file_viewer" | "agent_chat";
 
 export interface StudioTab {
   id: string;
@@ -19,6 +19,8 @@ export interface StudioTab {
   titleSource?: TerminalTitleSource;
   filePath?: string;
   fileKind?: "text" | "image" | "unknown";
+  agentSessionId?: string;
+  agentKind?: string;
 }
 
 export interface TerminalPanel {
@@ -83,6 +85,19 @@ export function createFileViewerTab(path: string, kind: "text" | "image" | "unkn
   };
 }
 
+export function createAgentChatTab(agentKind: string, agentSessionId?: string, title?: string): StudioTab {
+  return {
+    id: makeId("chat"),
+    kind: "agent_chat",
+    title: title || `Agent对话 (${agentKind})`,
+    termType: "bash",
+    activeCommand: "",
+    titleSource: "initial",
+    agentKind,
+    agentSessionId,
+  };
+}
+
 export function createTerminalPanel(kind: TerminalKind, id = makeId("panel")): TerminalPanel {
   const tab = createTerminalTab(kind);
   return {
@@ -137,7 +152,7 @@ function createLayoutIDTracker(): LayoutIDTracker {
   };
 }
 
-function uniqueLayoutID(value: unknown, prefix: "panel" | "split" | "term" | "file" | "view", used: Set<string>): string {
+function uniqueLayoutID(value: unknown, prefix: "panel" | "split" | "term" | "file" | "view" | "chat", used: Set<string>): string {
   const id = typeof value === "string" && value ? value : makeId(prefix);
   if (!used.has(id)) {
     used.add(id);
@@ -157,11 +172,12 @@ export function sanitizeLayoutNode(value: unknown, tracker = createLayoutIDTrack
 
   if (node.type === "panel") {
     const tabs = Array.isArray(node.tabs)
-      ? node.tabs.map((tab) => sanitizeTab(tab, tracker)).filter((tab): tab is TerminalTab => tab !== null)
+      ? node.tabs.map((tab) => sanitizeTab(tab, tracker)).filter((tab): tab is StudioTab => tab !== null)
       : [];
+    if (tabs.length === 0) return null;
     const activeTabId = typeof node.activeTabId === "string" && tabs.some((tab) => tab.id === node.activeTabId)
       ? node.activeTabId
-      : (tabs.length > 0 ? tabs[0].id : "");
+      : tabs[0].id;
     return {
       type: "panel",
       id: uniqueLayoutID(node.id, "panel", tracker.panels),
@@ -234,9 +250,7 @@ export function cleanLayoutTitles(node: LayoutNode | null): LayoutNode | null {
       ...node,
       tabs: node.tabs.map((tab) => ({
         ...tab,
-        title: tab.kind === "file_explorer" || tab.kind === "file_viewer"
-          ? tab.kind === "file_explorer" ? "文件" : tab.title
-          : cleanTerminalTitle(tab.title, terminalType(tab.termType).title, tab.termType),
+        title: cleanTitleForTab(tab),
         titleSource: tab.titleSource || "initial",
       })),
     };
@@ -256,32 +270,56 @@ export function sizesFromLayoutMap(node: SplitGroup, layout: Record<string, numb
   return node.children.map((child) => layout[child.id] || 0);
 }
 
-function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): TerminalTab | null {
+function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): StudioTab | null {
   if (!value || typeof value !== "object") return null;
   const tab = value as Record<string, unknown>;
-  const tabKind: StudioTabKind = tab.kind === "file_explorer"
-    ? "file_explorer"
-    : tab.kind === "file_viewer"
-      ? "file_viewer"
-      : "terminal";
+  const tabKind = sanitizeTabKind(tab.kind);
+  if (!tabKind) return null;
   const kind = isTerminalKind(tab.termType) ? tab.termType : "bash";
   const type = terminalType(kind);
-  const idPrefix = tabKind === "file_explorer" ? "file" : tabKind === "file_viewer" ? "view" : "term";
+  const idPrefix = idPrefixForTabKind(tabKind);
   const filePath = typeof tab.filePath === "string" ? tab.filePath : "";
+  const id = tracker ? uniqueLayoutID(tab.id, idPrefix, tracker.tabs) : (typeof tab.id === "string" && tab.id ? tab.id : makeId(idPrefix));
+
   return {
-    id: tracker ? uniqueLayoutID(tab.id, idPrefix, tracker.tabs) : (typeof tab.id === "string" && tab.id ? tab.id : makeId(idPrefix)),
+    id,
     kind: tabKind,
     title: tabKind === "file_explorer"
       ? "文件"
       : tabKind === "file_viewer"
         ? (typeof tab.title === "string" && tab.title ? tab.title : basename(filePath) || "文件")
+      : tabKind === "agent_chat"
+        ? (typeof tab.title === "string" && tab.title ? tab.title : `Agent对话 (${tab.agentKind || ""})`)
       : cleanTerminalTitle(typeof tab.title === "string" ? tab.title : "", type.title, kind),
     termType: kind,
     activeCommand: typeof tab.activeCommand === "string" ? tab.activeCommand : "",
     titleSource: tab.titleSource === "tmux" ? tab.titleSource : "initial",
     filePath,
     fileKind: tab.fileKind === "text" || tab.fileKind === "image" ? tab.fileKind : "unknown",
+    agentSessionId: typeof tab.agentSessionId === "string" ? tab.agentSessionId : undefined,
+    agentKind: typeof tab.agentKind === "string" ? tab.agentKind : undefined,
   };
+}
+
+function sanitizeTabKind(value: unknown): StudioTabKind | null {
+  if (value === "terminal" || value === "file_explorer" || value === "file_viewer" || value === "agent_chat") {
+    return value;
+  }
+  return null;
+}
+
+function idPrefixForTabKind(kind: StudioTabKind): "term" | "file" | "view" | "chat" {
+  if (kind === "file_explorer") return "file";
+  if (kind === "file_viewer") return "view";
+  if (kind === "agent_chat") return "chat";
+  return "term";
+}
+
+function cleanTitleForTab(tab: StudioTab): string {
+  if (tab.kind === "file_explorer") return "文件";
+  if (tab.kind === "file_viewer") return tab.title;
+  if (tab.kind === "agent_chat") return tab.title;
+  return cleanTerminalTitle(tab.title, terminalType(tab.termType).title, tab.termType);
 }
 
 function basename(path: string) {

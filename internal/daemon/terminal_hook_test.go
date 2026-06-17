@@ -284,17 +284,34 @@ func TestOnlineTerminalCommandMapsToACPX(t *testing.T) {
 	if got := d.normalizeTerminalCommand("acpx codex"); got != "acpx codex" {
 		t.Fatalf("normalizeTerminalCommand(acpx codex) = %q, want explicit command preserved", got)
 	}
-	if got := initialTerminalTitle("acpx claude", ""); got != "在线类型" {
-		t.Fatalf("initialTerminalTitle(acpx claude) = %q, want 在线类型", got)
+	if got := initialTerminalTitle("acpx claude", ""); got != "ACPX" {
+		t.Fatalf("initialTerminalTitle(acpx claude) = %q, want ACPX", got)
 	}
 	if got := agentTerminalCommand("acpx claude"); got != "acpx" {
 		t.Fatalf("agentTerminalCommand(acpx claude) = %q, want acpx", got)
 	}
-	if got := agentDisplayName("acpx"); got != "在线类型" {
-		t.Fatalf("agentDisplayName(acpx) = %q, want 在线类型", got)
+	if got := agentDisplayName("acpx"); got != "ACPX" {
+		t.Fatalf("agentDisplayName(acpx) = %q, want ACPX", got)
 	}
 	if supportsPluginTerminalAgent("acpx") {
 		t.Fatal("supportsPluginTerminalAgent(acpx) = true, want false")
+	}
+}
+
+func TestTerminalTitleFromPaneInfoUsesRuntimePaneFields(t *testing.T) {
+	if got := terminalTitleFromPaneInfo("nvim", "/repo", "nvim"); got != "nvim" {
+		t.Fatalf("terminalTitleFromPaneInfo() = %q, want pane title", got)
+	}
+	if got := terminalTitleFromPaneInfo("", "/repo", "zsh"); got != "zsh" {
+		t.Fatalf("terminalTitleFromPaneInfo(empty pane title) = %q, want current command", got)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("home directory is not available")
+	}
+	currentPath := filepath.Join(home, "work")
+	if got := terminalTitleFromPaneInfo("~/work", currentPath, "zsh"); got != "~/work" {
+		t.Fatalf("terminalTitleFromPaneInfo(short path) = %q, want ~/work", got)
 	}
 }
 

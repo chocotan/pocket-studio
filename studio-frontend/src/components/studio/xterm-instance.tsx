@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { StudioTheme } from "./terminal-types";
 import { websocketURL } from "@/lib/api";
+import { pocketElectronAPI } from "@/lib/electron-api";
 
 export function getXtermTheme(theme: StudioTheme) {
   if (theme === "dark") {
@@ -182,7 +183,7 @@ function osc52ClipboardText(data: string) {
 }
 
 function writeClipboardText(text: string) {
-  const electronAPI = (window as any).electronAPI;
+  const electronAPI = pocketElectronAPI();
   if (electronAPI?.writeClipboardText) {
     return Promise.resolve(electronAPI.writeClipboardText(text)).then(() => undefined);
   }
@@ -360,7 +361,6 @@ export function XtermInstance({
     let cancelCopyPasteShortcut: (() => void) | null = null;
     let cancelPasteHandler: (() => void) | null = null;
     let cancelFocusHandler: (() => void) | null = null;
-    let titleDisposable: { dispose: () => void } | null = null;
     let osc52Disposable: { dispose: () => void } | null = null;
     const postOpenResizeTimers: number[] = [];
 
@@ -396,11 +396,6 @@ export function XtermInstance({
       fitAddon = new FitAddon();
       fitAddonRef.current = fitAddon;
       term.loadAddon(fitAddon);
-
-      titleDisposable = term.onTitleChange((title) => {
-        const nextTitle = title.trim();
-        if (nextTitle) onTitleChangeRef.current?.(nextTitle);
-      });
 
       osc52Disposable = term.parser.registerOscHandler(52, (data) => {
         const text = osc52ClipboardText(data);
@@ -630,7 +625,6 @@ export function XtermInstance({
       terminalReadyRef.current = false;
       incomingBuf.current = [];
       ro.disconnect();
-      if (titleDisposable) titleDisposable.dispose();
       if (osc52Disposable) osc52Disposable.dispose();
       if (connectFrame !== null) window.cancelAnimationFrame(connectFrame);
       if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {

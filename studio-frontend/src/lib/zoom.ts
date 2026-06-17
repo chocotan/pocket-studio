@@ -28,7 +28,7 @@ export function saveZoom(zoom: PageZoom) {
 
 export function applyZoom(zoom: PageZoom) {
   if (typeof document === "undefined") return;
-  const electronAPI = (window as any).electronAPI;
+  const electronAPI = pocketElectronAPI();
   if (electronAPI?.setZoom) {
     document.documentElement.style.zoom = "";
     void electronAPI.setZoom(zoom);
@@ -36,3 +36,4 @@ export function applyZoom(zoom: PageZoom) {
   }
   document.documentElement.style.zoom = `${zoom}%`;
 }
+import { pocketElectronAPI } from "./electron-api";

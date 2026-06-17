@@ -97,6 +97,7 @@ type DaemonHeartbeat struct {
 }
 
 type TaskDispatch struct {
+	RequestID       string      `json:"request_id,omitempty"`
 	TaskID          string      `json:"task_id"`
 	WorkspaceID     string      `json:"workspace_id,omitempty"`
 	WorkspacePath   string      `json:"workspace_path"`
@@ -110,6 +111,7 @@ type TaskDispatch struct {
 }
 
 type SessionCreate struct {
+	RequestID     string      `json:"request_id,omitempty"`
 	TaskID        string      `json:"task_id"`
 	WorkspaceID   string      `json:"workspace_id,omitempty"`
 	WorkspacePath string      `json:"workspace_path"`
@@ -158,16 +160,19 @@ type TaskSnapshot struct {
 }
 
 type TaskStop struct {
-	TaskID string `json:"task_id"`
-	Reason string `json:"reason"`
+	RequestID string `json:"request_id,omitempty"`
+	TaskID    string `json:"task_id"`
+	Reason    string `json:"reason"`
 }
 
 type TaskSetModel struct {
-	TaskID  string `json:"task_id"`
-	ModelID string `json:"model_id"`
+	RequestID string `json:"request_id,omitempty"`
+	TaskID    string `json:"task_id"`
+	ModelID   string `json:"model_id"`
 }
 
 type SessionDelete struct {
+	RequestID     string `json:"request_id,omitempty"`
 	TaskID        string `json:"task_id"`
 	Agent         string `json:"agent,omitempty"`
 	SessionName   string `json:"session_name,omitempty"`
@@ -270,8 +275,12 @@ type TerminalResult struct {
 }
 
 type ServerError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id,omitempty"`
+	TaskID    string `json:"task_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Agent     string `json:"agent,omitempty"`
 }
 
 type TerminalStreamStart struct {

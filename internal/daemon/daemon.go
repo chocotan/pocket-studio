@@ -535,7 +535,7 @@ func lookPathAny(names ...string) string {
 func agentDisplayName(agent string) string {
 	switch strings.ToLower(strings.TrimSpace(agent)) {
 	case "acpx", "online":
-		return "在线类型"
+		return "ACPX"
 	case "claude", "claude_code", "claude-code":
 		return "Claude Code"
 	case "codex":
@@ -589,35 +589,35 @@ func (d *Daemon) handleEnvelope(ctx context.Context, env protocol.Envelope) {
 	case protocol.TypeSessionCreate:
 		session, err := protocol.DecodePayload[protocol.SessionCreate](env)
 		if err != nil {
-			d.emitError("", "bad_payload", err.Error())
+			d.emitRequestError(requestIDFromEnvelope(env), "bad_payload", err.Error())
 			return
 		}
 		go d.createSession(ctx, session)
 	case protocol.TypeTaskDispatch:
 		task, err := protocol.DecodePayload[protocol.TaskDispatch](env)
 		if err != nil {
-			d.emitError("", "bad_payload", err.Error())
+			d.emitRequestError(requestIDFromEnvelope(env), "bad_payload", err.Error())
 			return
 		}
 		go d.startTask(ctx, task)
 	case protocol.TypeTaskStop:
 		stop, err := protocol.DecodePayload[protocol.TaskStop](env)
 		if err != nil {
-			d.emitError("", "bad_payload", err.Error())
+			d.emitRequestError(requestIDFromEnvelope(env), "bad_payload", err.Error())
 			return
 		}
 		d.stopTask(stop.TaskID)
 	case protocol.TypeTaskSetModel:
 		change, err := protocol.DecodePayload[protocol.TaskSetModel](env)
 		if err != nil {
-			d.emitError("", "bad_payload", err.Error())
+			d.emitRequestError(requestIDFromEnvelope(env), "bad_payload", err.Error())
 			return
 		}
 		go d.setTaskModel(ctx, change)
 	case protocol.TypeSessionDelete:
 		remove, err := protocol.DecodePayload[protocol.SessionDelete](env)
 		if err != nil {
-			d.emitError("", "bad_payload", err.Error())
+			d.emitRequestError(requestIDFromEnvelope(env), "bad_payload", err.Error())
 			return
 		}
 		go d.deleteSession(ctx, remove)
@@ -707,6 +707,7 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 		return
 	}
 	task := protocol.TaskDispatch{
+		RequestID:     session.RequestID,
 		TaskID:        session.TaskID,
 		WorkspaceID:   workspace.ID,
 		WorkspacePath: workspace.Path,
@@ -1280,26 +1281,16 @@ func isACPXStatusLine(text string) bool {
 }
 
 type agentOutputAdapter struct {
-	emitter         *taskEmitter
-	assistantText   strings.Builder
-	assistantRaw    json.RawMessage
-	thinkingText    strings.Builder
-	thinkingRaw     json.RawMessage
-	toolRawByID     map[string]json.RawMessage
-	toolNameByID    map[string]string
-	toolInputByID   map[string]any
-	toolStatusByID  map[string]string
-	toolEmittedByID map[string]bool
+	emitter       *taskEmitter
+	assistantText strings.Builder
+	assistantRaw  json.RawMessage
+	thinkingText  strings.Builder
+	thinkingRaw   json.RawMessage
 }
 
 func newAgentOutputAdapter(emitter *taskEmitter) *agentOutputAdapter {
 	return &agentOutputAdapter{
-		emitter:         emitter,
-		toolRawByID:     make(map[string]json.RawMessage),
-		toolNameByID:    make(map[string]string),
-		toolInputByID:   make(map[string]any),
-		toolStatusByID:  make(map[string]string),
-		toolEmittedByID: make(map[string]bool),
+		emitter: emitter,
 	}
 }
 
@@ -1356,10 +1347,15 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 			return true
 		}
 		if _, ok := msg["result"]; ok {
+			endTurn := false
 			if result, _ := msg["result"].(map[string]any); stringField(result, "stopReason") == "end_turn" {
 				a.emitter.markEndTurn()
+				endTurn = true
 			}
 			a.flush()
+			if endTurn {
+				a.emitter.emit("turn.completed", map[string]string{"stop_reason": "end_turn"}, nil)
+			}
 			if hasAvailableModels(msg) {
 				a.emitter.emit("model.list", nil, raw)
 				return true
@@ -1391,7 +1387,7 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 		a.emitter.emit("metric.updated", nil, raw)
 	case "tool_call", "tool_call_update":
 		a.flush()
-		a.emitToolUpdate(update, raw)
+		a.emitRawToolUpdate(update, raw)
 	default:
 		a.flush()
 		a.emitter.emit("acpx.raw", nil, raw)
@@ -1417,80 +1413,25 @@ func (a *agentOutputAdapter) appendThinkingChunk(update map[string]any, raw json
 	a.thinkingRaw = raw
 }
 
-func (a *agentOutputAdapter) emitToolUpdate(update map[string]any, raw json.RawMessage) {
+func (a *agentOutputAdapter) emitRawToolUpdate(update map[string]any, raw json.RawMessage) {
 	id := stringField(update, "toolCallId", "tool_call_id", "id")
 	if id == "" {
 		id = protocol.NewID("tool")
 	}
-	if name := stringField(update, "title", "kind", "name"); name != "" {
-		a.toolNameByID[id] = name
+	data := map[string]any{
+		"tool_use_id": id,
+		"name":        stringField(update, "title", "kind", "name"),
+		"status":      stringField(update, "status"),
+		"input":       update["rawInput"],
+		"output":      update["rawOutput"],
 	}
-	if status := stringField(update, "status"); status != "" {
-		a.toolStatusByID[id] = status
+	eventType := "tool.call"
+	if hasAnyKey(update, "rawOutput") {
+		eventType = "tool.output"
+	} else if status := stringField(update, "status"); statusIndicatesError(status) {
+		eventType = "tool.output"
 	}
-	if input, ok := update["rawInput"]; ok {
-		a.toolInputByID[id] = input
-	}
-	if !a.toolEmittedByID[id] {
-		a.emitNormalizedToolCall(id)
-	}
-	if hasAnyKey(update, "rawOutput", "status") {
-		if !hasAnyKey(update, "rawOutput") && strings.EqualFold(stringField(update, "status"), "pending") {
-			a.emitter.emit("acpx.raw", nil, raw)
-			return
-		}
-		result := map[string]any{
-			"tool_use_id": id,
-			"type":        "tool_result",
-			"content":     acpxToolOutput(update),
-			"is_error":    statusIndicatesError(stringField(update, "status")),
-		}
-		normalized := map[string]any{
-			"type": "user",
-			"message": map[string]any{
-				"role":    "user",
-				"content": []any{result},
-			},
-		}
-		a.emitter.emit("tool.output", nil, mustJSON(normalized))
-		return
-	}
-	a.toolRawByID[id] = raw
-}
-
-func (a *agentOutputAdapter) emitNormalizedToolCall(id string) {
-	a.toolEmittedByID[id] = true
-	call := map[string]any{
-		"type":   "tool_use",
-		"id":     id,
-		"name":   valueOrDefault(a.toolNameByID[id], "tool_call"),
-		"status": valueOrDefault(a.toolStatusByID[id], "pending"),
-		"input":  valueOrDefaultAny(a.toolInputByID[id], map[string]any{}),
-	}
-	normalized := map[string]any{
-		"type": "assistant",
-		"message": map[string]any{
-			"role":    "assistant",
-			"content": []any{call},
-		},
-	}
-	callRaw := mustJSON(normalized)
-	a.toolRawByID[id] = callRaw
-	a.emitter.emit("tool.call", nil, callRaw)
-}
-
-func hasNonEmptyInput(update map[string]any) bool {
-	value, ok := update["rawInput"]
-	if !ok || value == nil {
-		return false
-	}
-	if object, ok := value.(map[string]any); ok {
-		return len(object) > 0
-	}
-	if text, ok := value.(string); ok {
-		return strings.TrimSpace(text) != ""
-	}
-	return true
+	a.emitter.emit(eventType, data, raw)
 }
 
 func textFromACPXContent(value any) string {
@@ -1502,16 +1443,6 @@ func textFromACPXContent(value any) string {
 	default:
 		return ""
 	}
-}
-
-func acpxToolOutput(update map[string]any) string {
-	if output, ok := update["rawOutput"]; ok {
-		return stringifyValue(output)
-	}
-	if status := stringField(update, "status"); status != "" {
-		return status
-	}
-	return ""
 }
 
 func stringifyValue(value any) string {
@@ -1558,20 +1489,6 @@ func hasAvailableModels(msg map[string]any) bool {
 	models, _ := result["models"].(map[string]any)
 	available, ok := models["availableModels"].([]any)
 	return ok && len(available) > 0
-}
-
-func valueOrDefault(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
-}
-
-func valueOrDefaultAny(value any, fallback any) any {
-	if value == nil {
-		return fallback
-	}
-	return value
 }
 
 func statusIndicatesError(status string) bool {
@@ -1678,6 +1595,10 @@ func (d *Daemon) setTaskModel(parent context.Context, change protocol.TaskSetMod
 	taskID := strings.TrimSpace(change.TaskID)
 	modelID := strings.TrimSpace(change.ModelID)
 	if taskID == "" || modelID == "" {
+		if taskID == "" {
+			d.emitRequestError(change.RequestID, "bad_payload", "task.set_model requires task_id and model_id")
+			return
+		}
 		d.emitError(taskID, "bad_payload", "task.set_model requires task_id and model_id")
 		return
 	}
@@ -1754,7 +1675,7 @@ func (d *Daemon) setTaskModel(parent context.Context, change protocol.TaskSetMod
 func (d *Daemon) deleteSession(parent context.Context, remove protocol.SessionDelete) {
 	taskID := strings.TrimSpace(remove.TaskID)
 	if taskID == "" {
-		d.emitError("", "bad_payload", "session.delete requires task_id")
+		d.emitRequestError(remove.RequestID, "bad_payload", "session.delete requires task_id")
 		return
 	}
 	d.mu.Lock()
@@ -2693,6 +2614,23 @@ func (d *Daemon) emitError(taskID, code, message string) {
 	d.emitTaskEvent(taskID, "task.failed", 0, map[string]string{"code": code, "message": message}, nil)
 }
 
+func (d *Daemon) emitRequestError(requestID, code, message string) {
+	d.send <- protocol.NewEnvelope(protocol.TypeServerError, "daemon", protocol.ServerError{
+		Code:      code,
+		Message:   message,
+		RequestID: requestID,
+	})
+}
+
+func requestIDFromEnvelope(env protocol.Envelope) string {
+	var obj map[string]any
+	if err := json.Unmarshal(env.Payload, &obj); err != nil {
+		return ""
+	}
+	requestID, _ := obj["request_id"].(string)
+	return requestID
+}
+
 func (d *Daemon) emitTaskEvent(taskID, eventType string, sequence int64, data any, raw json.RawMessage) {
 	var dataRaw json.RawMessage
 	if data != nil {
@@ -2726,7 +2664,7 @@ func (d *Daemon) recordTaskEvent(event protocol.TaskEvent) {
 		record.StartedAt = now
 	}
 	record.UpdatedAt = now
-	record.Events = appendBounded(record.Events, event, 1000)
+	record.Events = append(record.Events, event)
 	d.history[event.TaskID] = record
 }
 
@@ -3127,33 +3065,38 @@ func (d *Daemon) watchTerminalTitle(ctx context.Context, projectID string, termi
 }
 
 func tmuxTerminalInfo(sessionName string) (string, string, string) {
-	cmd := tmuxCommand("display-message", "-p", "-t", sessionName, "#{window_name}\t#{pane_title}\t#{pane_current_path}\t#{pane_current_command}")
+	cmd := tmuxCommand("display-message", "-p", "-t", sessionName, "#{pane_title}\t#{pane_current_path}\t#{pane_current_command}")
 	raw, err := cmd.Output()
 	if err != nil {
 		return "", "", ""
 	}
 	parts := strings.Split(strings.TrimSpace(string(raw)), "\t")
-	title := strings.TrimSpace(parts[0])
-	paneTitle := ""
-	if len(parts) > 1 {
-		paneTitle = strings.TrimSpace(parts[1])
-	}
+	paneTitle := strings.TrimSpace(parts[0])
 	currentPath := ""
-	if len(parts) > 2 {
-		currentPath = strings.TrimSpace(parts[2])
+	if len(parts) > 1 {
+		currentPath = strings.TrimSpace(parts[1])
 	}
 	command := ""
-	if len(parts) > 3 {
-		command = strings.TrimSpace(parts[3])
+	if len(parts) > 2 {
+		command = strings.TrimSpace(parts[2])
 	}
+	title := terminalTitleFromPaneInfo(paneTitle, currentPath, command)
+	fullTitle := fullTerminalTitle(title, paneTitle, currentPath)
+	return title, fullTitle, command
+}
+
+func terminalTitleFromPaneInfo(paneTitle string, currentPath string, command string) string {
+	paneTitle = strings.TrimSpace(paneTitle)
+	currentPath = strings.TrimSpace(currentPath)
+	command = strings.TrimSpace(command)
+	title := paneTitle
 	if title == "" {
 		title = command
 	}
-	fullTitle := fullTerminalTitle(title, paneTitle, currentPath)
 	if currentPath != "" && tmuxTitleLooksShortenedPath(title) {
 		title = compactPathTitle(currentPath)
 	}
-	return title, fullTitle, command
+	return title
 }
 
 func fullTerminalTitle(title string, paneTitle string, currentPath string) string {
@@ -3378,7 +3321,7 @@ func initialTerminalTitle(command string, fallback string) string {
 	}
 	switch {
 	case command == "online" || command == "acpx" || strings.HasPrefix(command, "acpx "):
-		return "在线类型"
+		return "ACPX"
 	case strings.Contains(command, "claude"):
 		return "Claude Code"
 	case strings.Contains(command, "codex"):
