@@ -17,7 +17,7 @@ export function ZoomSelect({ value, onChange, compact = false }: ZoomSelectProps
   return (
     <label
       className={cn(
-        "flex items-center rounded-lg border border-slate-200/70 bg-white text-[11px] font-semibold text-slate-500 shadow-sm dark:border-slate-700/70 dark:bg-slate-800/70 dark:text-slate-400",
+        "flex items-center rounded-lg border border-border bg-card text-[11px] font-semibold text-muted-foreground shadow-sm",
         compact ? "gap-0 px-1 py-0.5" : "gap-1.5 px-2 py-1"
       )}
     >
@@ -27,7 +27,7 @@ export function ZoomSelect({ value, onChange, compact = false }: ZoomSelectProps
         value={value}
         onChange={(event) => handleChange(event.target.value)}
         className={cn(
-          "h-5 rounded-md border border-slate-200 bg-slate-50 px-1 text-[11px] font-bold text-slate-700 outline-none transition-colors hover:bg-white focus:border-indigo-400 dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-200 dark:hover:bg-slate-900",
+          "h-5 rounded-md border border-border bg-muted/50 px-1 text-[11px] font-bold text-foreground outline-none transition-colors hover:bg-card focus:border-primary",
           compact ? "min-w-10" : "min-w-16"
         )}
         title="面板缩放比例"

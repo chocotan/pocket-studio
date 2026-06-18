@@ -24,6 +24,23 @@
       "--approve-all"
     ]
   },
+  "direct_acp": {
+    "enabled": true,
+    "agents": {
+      "codex": {
+        "command": "npx",
+        "args": ["@zed-industries/codex-acp@latest"]
+      },
+      "opencode": {
+        "command": "opencode",
+        "args": ["acp"]
+      },
+      "kilo": {
+        "command": "kilo",
+        "args": ["acp"]
+      }
+    }
+  },
   "workspaces": [
     {
       "id": "pocket-studio",

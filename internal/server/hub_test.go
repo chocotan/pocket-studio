@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"remote-agent/internal/auth"
@@ -48,7 +47,7 @@ func TestServerErrorForEnvelopeExtractsCorrelationFromBadPayload(t *testing.T) {
 	}
 }
 
-func TestTaskEventsAfterIsScopedByUserTaskAndCursor(t *testing.T) {
+func TestTaskHistoryIsScopedByUserTask(t *testing.T) {
 	h := NewHub(auth.NewOpen(""))
 	now := int64(100)
 	h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")] = protocol.TaskRecord{
@@ -67,12 +66,73 @@ func TestTaskEventsAfterIsScopedByUserTaskAndCursor(t *testing.T) {
 		},
 	}
 
-	events, record, ok := h.taskEventsAfter(auth.OwnerAdmin, "task-1", 1, 20)
-	if !ok || record.TaskID != "task-1" {
-		t.Fatalf("taskEventsAfter record = %#v, ok=%v", record, ok)
+	events := h.taskHistory(auth.OwnerAdmin, "task-1")
+	if len(events) != 2 || events[0].EventID != "evt-1" || events[1].EventID != "evt-2" {
+		t.Fatalf("taskHistory events = %#v, want task-1 history", events)
 	}
-	if len(events) != 1 || events[0].EventID != "evt-2" {
-		t.Fatalf("taskEventsAfter events = %#v, want only evt-2", events)
+	events[0].EventID = "mutated"
+	if h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")].Events[0].EventID == "mutated" {
+		t.Fatal("taskHistory returned mutable backing slice")
+	}
+}
+
+func TestTaskHistorySynthesizesMissingUserPromptFromRecordPrompt(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")] = protocol.TaskRecord{
+		TaskID:    "task-1",
+		Prompt:    "show disk usage",
+		StartedAt: 100,
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "evt-assistant", EventType: "assistant.message", Sequence: 8, Timestamp: 101},
+		},
+	}
+
+	events := h.taskHistory(auth.OwnerAdmin, "task-1")
+	if len(events) != 2 || events[0].EventType != "user.prompt" || events[0].EventID != "history-user-prompt-task-1" {
+		t.Fatalf("taskHistory events = %#v, want synthetic user prompt first", events)
+	}
+	var data map[string]string
+	if err := json.Unmarshal(events[0].Data, &data); err != nil {
+		t.Fatalf("decode synthetic prompt data: %v", err)
+	}
+	if data["prompt"] != "show disk usage" {
+		t.Fatalf("synthetic prompt = %q", data["prompt"])
+	}
+}
+
+func TestTaskHistorySynthesizesMissingUserPromptBeforeLastStartedTurn(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")] = protocol.TaskRecord{
+		TaskID: "task-1",
+		Prompt: "second prompt",
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "evt-start-1", EventType: "task.started", Sequence: 1, Timestamp: 100},
+			{TaskID: "task-1", EventID: "evt-assistant-1", EventType: "assistant.message", Sequence: 2, Timestamp: 101},
+			{TaskID: "task-1", EventID: "evt-start-2", EventType: "task.started", Sequence: 3, Timestamp: 110},
+			{TaskID: "task-1", EventID: "evt-assistant-2", EventType: "assistant.message", Sequence: 4, Timestamp: 111},
+		},
+	}
+
+	events := h.taskHistory(auth.OwnerAdmin, "task-1")
+	if len(events) != 5 || events[2].EventType != "user.prompt" || events[3].EventID != "evt-start-2" {
+		t.Fatalf("taskHistory events = %#v, want synthetic prompt before last task.started", events)
+	}
+}
+
+func TestTaskHistoryDoesNotDuplicateExistingUserPrompt(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")] = protocol.TaskRecord{
+		TaskID: "task-1",
+		Prompt: "show disk usage",
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "evt-user", EventType: "user.prompt", Sequence: 1},
+			{TaskID: "task-1", EventID: "evt-assistant", EventType: "assistant.message", Sequence: 2},
+		},
+	}
+
+	events := h.taskHistory(auth.OwnerAdmin, "task-1")
+	if len(events) != 2 || events[0].EventID != "evt-user" {
+		t.Fatalf("taskHistory events = %#v, want existing prompt unchanged", events)
 	}
 }
 
@@ -120,20 +180,35 @@ func TestNextTaskEventSequenceAvoidsDuplicateAndZeroSequences(t *testing.T) {
 	}
 }
 
-func TestWriteSSEEnvelopeUsesEnvelopeEventType(t *testing.T) {
-	var out strings.Builder
-	env := taskEventEnvelope(protocol.TaskEvent{
-		TaskID:    "task-1",
-		EventID:   "evt-1",
-		EventType: "tool.output",
-		Sequence:  1,
-	})
-	if err := writeSSEEnvelope(&out, env); err != nil {
-		t.Fatalf("writeSSEEnvelope: %v", err)
+func TestMergeTaskRecordEventsDeduplicatesSameEventDataWithDifferentRaw(t *testing.T) {
+	data := json.RawMessage(`{"text":"same assistant answer"}`)
+	base := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "evt-history",
+			EventType: "assistant.message",
+			Sequence:  5,
+			Data:      data,
+			Raw:       json.RawMessage(`{"type":"assistant","message":{"content":[{"text":"same assistant answer"}]}}`),
+		},
 	}
-	got := out.String()
-	if !strings.HasPrefix(got, "event: task.event\n") || !strings.Contains(got, `"task_id":"task-1"`) {
-		t.Fatalf("SSE frame = %q", got)
+	extra := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "evt-live",
+			EventType: "assistant.message",
+			Sequence:  8,
+			Data:      data,
+			Raw:       json.RawMessage(`{"jsonrpc":"2.0","method":"session/update"}`),
+		},
+	}
+
+	merged := mergeTaskRecordEvents(base, extra)
+	if len(merged) != 1 || merged[0].EventID != "evt-history" {
+		t.Fatalf("merged events = %#v, want one history event", merged)
+	}
+	if !hasTaskEventSignature(base, extra[0]) {
+		t.Fatal("hasTaskEventSignature() = false, want same data signature match")
 	}
 }
 
@@ -154,5 +229,45 @@ func TestTaskEventEnvelopeCarriesNormalizedSequenceAndRawPayload(t *testing.T) {
 	}
 	if env.To.TaskID != "task-1" || got.Sequence != 7 || string(got.Raw) != string(raw) {
 		t.Fatalf("envelope = %#v, payload = %#v", env, got)
+	}
+}
+
+func TestHandleDaemonMessageDoesNotBroadcastDuplicateTaskEvent(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	dc := &daemonConn{userID: auth.OwnerAdmin, deviceID: "device-1"}
+	wc := &webConn{userID: auth.OwnerAdmin, send: make(chan protocol.Envelope, 4)}
+	h.webs[wc] = struct{}{}
+
+	existing := protocol.TaskEvent{
+		TaskID:    "task-1",
+		EventID:   "evt-server",
+		EventType: "user.prompt",
+		Source:    "web",
+		Sequence:  1,
+		Timestamp: 100,
+		Data:      []byte(`{"prompt":"debug duplicate prompt 1781804971820"}`),
+	}
+	h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")] = protocol.TaskRecord{
+		TaskID: "task-1",
+		Events: []protocol.TaskEvent{
+			existing,
+		},
+	}
+
+	duplicate := existing
+	duplicate.EventID = "evt-daemon"
+	duplicate.Sequence = 8
+	duplicate.Timestamp = 101
+	h.handleDaemonMessage(dc, protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", duplicate))
+
+	select {
+	case got := <-wc.send:
+		t.Fatalf("broadcasted duplicate event: %#v", got)
+	default:
+	}
+
+	record := h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")]
+	if len(record.Events) != 1 || record.Events[0].EventID != "evt-server" {
+		t.Fatalf("record events = %#v, want original event only", record.Events)
 	}
 }

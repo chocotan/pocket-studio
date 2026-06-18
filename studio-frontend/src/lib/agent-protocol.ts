@@ -34,6 +34,21 @@ export type AgentModelList = {
   models: AgentModelInfo[];
 };
 
+export type AgentConfigOptionChoice = {
+  description?: string;
+  id: string;
+  name: string;
+};
+
+export type AgentConfigOption = {
+  category?: string;
+  currentValue?: string;
+  description?: string;
+  id: string;
+  name: string;
+  options: AgentConfigOptionChoice[];
+};
+
 type AgentEventLike = {
   id: string;
   seq: number;
@@ -370,10 +385,11 @@ export function buildAgentToolCallItems(
       }
     }
 
+    const nextStatus = mergeToolStatus(existing?.status, getToolStatus(update));
     const next: AgentToolCallItem = {
       id: toolId,
       title: getToolCardTitle(update, event.content, existing?.title),
-      status: getToolStatus(update) ?? existing?.status,
+      status: nextStatus,
       kind: getToolKind(update) ?? existing?.kind,
       input: hasToolValue(input) ? input : existing?.input,
       output: nextOutput,
@@ -388,6 +404,17 @@ export function buildAgentToolCallItems(
     (left, right) =>
       new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
   );
+}
+
+function isTerminalToolStatus(status: unknown) {
+  return status === "completed" || status === "success" || status === "failed" || status === "error";
+}
+
+function mergeToolStatus(existing?: string, incoming?: string) {
+  if (isTerminalToolStatus(existing) && !isTerminalToolStatus(incoming)) {
+    return existing;
+  }
+  return incoming ?? existing;
 }
 
 function getToolUpdateFromEvent(
@@ -742,6 +769,19 @@ export function extractAgentModelsFromEvents(
   return { models: [] };
 }
 
+export function extractAgentConfigOptionsFromEvents(
+  events: AgentEventLike[]
+): AgentConfigOption[] {
+  const sorted = [...events].sort((left, right) => right.seq - left.seq);
+  for (const event of sorted) {
+    const options = getConfigOptionsFromMetadata(event.metadata);
+    if (options.length > 0) {
+      return options;
+    }
+  }
+  return [];
+}
+
 export function extractAgentModelsFromStatus(value: unknown): AgentModelList {
   const record = getProtocolRecord(value);
   if (!record) {
@@ -777,6 +817,20 @@ export function extractAgentModelsFromStatus(value: unknown): AgentModelList {
   });
 }
 
+function getConfigOptionsFromMetadata(
+  metadata: Record<string, unknown> | undefined
+): AgentConfigOption[] {
+  const record = getProtocolRecord(metadata);
+  const result = record ? getNestedRecord(record, "result") : null;
+  const resultOptions = normalizeAgentConfigOptions(
+    result?.configOptions ?? result?.config_options
+  );
+  if (resultOptions.length > 0) {
+    return resultOptions;
+  }
+  return normalizeAgentConfigOptions(record?.configOptions ?? record?.config_options);
+}
+
 function getModelsRecordFromMetadata(
   metadata: Record<string, unknown> | undefined
 ): Record<string, unknown> | null {
@@ -785,6 +839,10 @@ function getModelsRecordFromMetadata(
   const resultModels = result ? getNestedRecord(result, "models") : null;
   if (resultModels) {
     return resultModels;
+  }
+  const resultConfigModel = getModelConfigOption(result);
+  if (resultConfigModel) {
+    return resultConfigModel;
   }
   const directModels = record ? getNestedRecord(record, "models") : null;
   if (directModels) {
@@ -813,6 +871,108 @@ function getModelsRecordFromMetadata(
       availableModels: acpx.available_models,
       currentModelId: acpx.current_model_id,
     };
+  }
+  const configModel = getModelConfigOption(record);
+  if (configModel) {
+    return configModel;
+  }
+  return null;
+}
+
+function normalizeAgentConfigOptions(value: unknown): AgentConfigOption[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map(normalizeAgentConfigOption)
+    .filter((option): option is AgentConfigOption => Boolean(option));
+}
+
+function normalizeAgentConfigOption(value: unknown): AgentConfigOption | null {
+  const record = getProtocolRecord(value);
+  if (!record) {
+    return null;
+  }
+  const id = String(record.id || record.configId || record.config_id || "").trim();
+  if (!id) {
+    return null;
+  }
+  const options = Array.isArray(record.options)
+    ? record.options
+    : Array.isArray(record.availableValues)
+      ? record.availableValues
+      : Array.isArray(record.available_values)
+        ? record.available_values
+        : [];
+  const normalizedOptions = options
+    .map(normalizeAgentConfigOptionChoice)
+    .filter((option): option is AgentConfigOptionChoice => Boolean(option));
+  if (normalizedOptions.length === 0) {
+    return null;
+  }
+  return {
+    category: typeof record.category === "string" ? record.category : undefined,
+    currentValue:
+      typeof record.currentValue === "string"
+        ? record.currentValue
+        : typeof record.current_value === "string"
+          ? record.current_value
+          : normalizedOptions[0].id,
+    description: typeof record.description === "string" ? record.description : undefined,
+    id,
+    name:
+      typeof record.name === "string"
+        ? record.name
+        : typeof record.label === "string"
+          ? record.label
+          : id,
+    options: normalizedOptions,
+  };
+}
+
+function normalizeAgentConfigOptionChoice(value: unknown): AgentConfigOptionChoice | null {
+  if (typeof value === "string") {
+    const id = value.trim();
+    return id ? { id, name: id } : null;
+  }
+  const record = getProtocolRecord(value);
+  if (!record) {
+    return null;
+  }
+  const id = String(record.id || record.value || record.name || "").trim();
+  if (!id) {
+    return null;
+  }
+  return {
+    description: typeof record.description === "string" ? record.description : undefined,
+    id,
+    name:
+      typeof record.name === "string"
+        ? record.name
+        : typeof record.label === "string"
+          ? record.label
+          : id,
+  };
+}
+
+function getModelConfigOption(
+  record: Record<string, unknown> | null
+): Record<string, unknown> | null {
+  const configOptions = record && Array.isArray(record.configOptions)
+    ? record.configOptions
+    : record && Array.isArray(record.config_options)
+      ? record.config_options
+      : [];
+  for (const option of configOptions) {
+    const optionRecord = getProtocolRecord(option);
+    if (!optionRecord) {
+      continue;
+    }
+    const category = String(optionRecord.category || "").toLowerCase();
+    const id = String(optionRecord.id || optionRecord.configId || optionRecord.config_id || "");
+    if (category === "model" || id === "model") {
+      return optionRecord;
+    }
   }
   return null;
 }

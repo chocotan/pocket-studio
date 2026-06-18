@@ -150,6 +150,23 @@ export function findPanelForTab(node: LayoutNode, tabId: string, preferredPanelI
   return null;
 }
 
+export function findPanelForTabOrAgentSession(node: LayoutNode, tabId: string, preferredPanelId = ""): { panel: TerminalPanel; tabId: string } | null {
+  if (preferredPanelId) {
+    const preferred = findPanel(node, preferredPanelId);
+    const tab = preferred?.tabs.find((item) => item.id === tabId || (item.kind === "agent_chat" && item.agentSessionId === tabId));
+    if (preferred && tab) return { panel: preferred, tabId: tab.id };
+  }
+  if (node.type === "panel") {
+    const tab = node.tabs.find((item) => item.id === tabId || (item.kind === "agent_chat" && item.agentSessionId === tabId));
+    return tab ? { panel: node, tabId: tab.id } : null;
+  }
+  for (const child of node.children) {
+    const target = findPanelForTabOrAgentSession(child, tabId);
+    if (target) return target;
+  }
+  return null;
+}
+
 export function findNextPanelId(node: LayoutNode, panelId: string): string {
   const panels: TerminalPanel[] = [];
   const collect = (item: LayoutNode) => {
@@ -228,4 +245,3 @@ export function updateTabPropertiesInTree(node: LayoutNode, tabId: string, props
   });
   return changed ? { ...node, children } : node;
 }
-

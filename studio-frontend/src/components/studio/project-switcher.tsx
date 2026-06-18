@@ -285,6 +285,8 @@ function deviceForProject(devices: Device[], project: Project) {
 function deviceDisplayName(device: Device | undefined, fallback = "") {
   const raw = (device?.name || fallback).trim();
   if (!raw) return fallback;
+  const withoutAddress = raw.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  if (withoutAddress) return withoutAddress;
   const withoutProtocol = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
   const host = withoutProtocol.split(/[/:?#]/, 1)[0] || withoutProtocol;
   return host.split(".")[0] || host || raw;

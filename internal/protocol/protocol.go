@@ -16,9 +16,12 @@ const (
 	TypeWebHello             = "web.hello"
 	TypeTaskDispatch         = "task.dispatch"
 	TypeTaskEvent            = "task.event"
+	TypeTaskHistoryGet       = "task.history.get"
+	TypeTaskHistoryResult    = "task.history.result"
 	TypeTaskSnapshot         = "task.snapshot"
 	TypeTaskStop             = "task.stop"
 	TypeTaskSetModel         = "task.set_model"
+	TypeTaskSetConfigOption  = "task.set_config_option"
 	TypeSessionDelete        = "session.delete"
 	TypeSessionCreate        = "session.create"
 	TypeWorkspaceList        = "workspace.list"
@@ -102,6 +105,7 @@ type TaskDispatch struct {
 	WorkspaceID     string      `json:"workspace_id,omitempty"`
 	WorkspacePath   string      `json:"workspace_path"`
 	Agent           string      `json:"agent"`
+	AgentRuntime    string      `json:"agent_runtime,omitempty"`
 	SessionName     string      `json:"session_name,omitempty"`
 	ModelID         string      `json:"model_id,omitempty"`
 	Prompt          string      `json:"prompt"`
@@ -116,6 +120,7 @@ type SessionCreate struct {
 	WorkspaceID   string      `json:"workspace_id,omitempty"`
 	WorkspacePath string      `json:"workspace_path"`
 	Agent         string      `json:"agent"`
+	AgentRuntime  string      `json:"agent_runtime,omitempty"`
 	SessionName   string      `json:"session_name,omitempty"`
 	Options       TaskOptions `json:"options"`
 }
@@ -143,6 +148,7 @@ type TaskRecord struct {
 	WorkspaceID   string      `json:"workspace_id,omitempty"`
 	WorkspacePath string      `json:"workspace_path"`
 	Agent         string      `json:"agent,omitempty"`
+	AgentRuntime  string      `json:"agent_runtime,omitempty"`
 	SessionName   string      `json:"session_name,omitempty"`
 	ModelID       string      `json:"model_id,omitempty"`
 	Prompt        string      `json:"prompt"`
@@ -152,6 +158,18 @@ type TaskRecord struct {
 	StartedAt     int64       `json:"started_at"`
 	UpdatedAt     int64       `json:"updated_at"`
 	Events        []TaskEvent `json:"events"`
+}
+
+type TaskHistoryGet struct {
+	RequestID string `json:"request_id,omitempty"`
+	TaskID    string `json:"task_id"`
+}
+
+type TaskHistoryResult struct {
+	RequestID string      `json:"request_id,omitempty"`
+	TaskID    string      `json:"task_id"`
+	Record    *TaskRecord `json:"record,omitempty"`
+	Events    []TaskEvent `json:"events,omitempty"`
 }
 
 type TaskSnapshot struct {
@@ -171,10 +189,18 @@ type TaskSetModel struct {
 	ModelID   string `json:"model_id"`
 }
 
+type TaskSetConfigOption struct {
+	RequestID string `json:"request_id,omitempty"`
+	TaskID    string `json:"task_id"`
+	ConfigID  string `json:"config_id"`
+	Value     string `json:"value"`
+}
+
 type SessionDelete struct {
 	RequestID     string `json:"request_id,omitempty"`
 	TaskID        string `json:"task_id"`
 	Agent         string `json:"agent,omitempty"`
+	AgentRuntime  string `json:"agent_runtime,omitempty"`
 	SessionName   string `json:"session_name,omitempty"`
 	WorkspaceID   string `json:"workspace_id,omitempty"`
 	WorkspacePath string `json:"workspace_path,omitempty"`
@@ -371,6 +397,7 @@ type TerminalStreamTitle struct {
 type TerminalStreamAlert struct {
 	ProjectID  string `json:"project_id"`
 	TerminalID string `json:"terminal_id"`
+	Title      string `json:"title,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	Message    string `json:"message,omitempty"`
 	Agent      string `json:"agent,omitempty"`
@@ -384,8 +411,9 @@ type TerminalStreamResize struct {
 }
 
 type TerminalStreamExit struct {
-	ProjectID  string `json:"project_id"`
-	TerminalID string `json:"terminal_id"`
+	ProjectID    string `json:"project_id"`
+	TerminalID   string `json:"terminal_id"`
+	CloseSession bool   `json:"close_session,omitempty"`
 }
 
 func NewEnvelope(messageType, from string, payload any) Envelope {

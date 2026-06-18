@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,6 +62,7 @@ func main() {
 	mux.Handle("/api/tokens/", authHTTP)
 	mux.HandleFunc("/ws/web", hub.ServeWebSocket)
 	mux.HandleFunc("/ws/daemon", hub.ServeDaemonSocket)
+	mux.HandleFunc("/ws/acpx", hub.ServeACPXWebSocket)
 	mux.HandleFunc("/ws/terminal", hub.ServeTerminalWebSocket)
 	mux.HandleFunc("/api/", hub.ServeAPI)
 
@@ -123,9 +125,22 @@ func allowedOrigin(origin string) bool {
 	if origin == "pocket-studio://app" {
 		return true
 	}
-	return strings.HasPrefix(origin, "http://127.0.0.1:") ||
-		strings.HasPrefix(origin, "http://localhost:") ||
-		strings.HasPrefix(origin, "http://[::1]:")
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate()
 }
 
 func findUserWebDist() (http.FileSystem, bool) {

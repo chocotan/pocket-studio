@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"remote-agent/internal/protocol"
 )
 
 func TestTerminalHookAlertDeduplicatesBriefRepeats(t *testing.T) {
@@ -26,6 +28,86 @@ func TestTerminalHookAlertDeduplicatesBriefRepeats(t *testing.T) {
 	}
 	if second := d.terminalHookAlert(event); second != nil {
 		t.Fatalf("terminalHookAlert() duplicate = %#v, want nil", second)
+	}
+}
+
+func TestAgentCompletionAlertMapsTaskToSavedAgentTab(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := Config{Device: DeviceConfig{ID: "device-1"}}
+	d := New(cfg)
+	projectID := d.projectIDForWorkspacePath(workspace)
+	d.projectStates[projectID] = json.RawMessage(`{
+		"layoutTree": {
+			"type": "panel",
+			"id": "panel-1",
+			"tabs": [
+				{
+					"id": "chat-1",
+					"kind": "agent_chat",
+					"agentSessionId": "acpx-task-1",
+					"agentRuntime": "acpx",
+					"agentKind": "opencode"
+				}
+			]
+		}
+	}`)
+
+	d.history["acpx-task-1"] = protocol.TaskRecord{
+		TaskID:        "acpx-task-1",
+		WorkspacePath: workspace,
+		Agent:         "opencode",
+		AgentRuntime:  "acpx",
+		SessionName:   "acpx-task-1",
+	}
+	d.emitTaskEvent("acpx-task-1", "task.completed", 0, map[string]any{"exit_code": 0}, nil)
+
+	events := drainEnvelopes(d.send)
+	var alert protocol.TerminalStreamAlert
+	for _, env := range events {
+		if env.Type != protocol.TypeTerminalStreamAlert {
+			continue
+		}
+		if err := json.Unmarshal(env.Payload, &alert); err != nil {
+			t.Fatalf("decode alert: %v", err)
+		}
+	}
+	if alert.ProjectID != projectID || alert.TerminalID != "chat-1" || alert.Reason != "agent_done" || alert.Message != "任务已完成" {
+		t.Fatalf("agent completion alert = %#v, want saved chat tab completion", alert)
+	}
+	if alert.Title != "ACPX会话 (opencode)" {
+		t.Fatalf("alert title = %q, want ACPX title", alert.Title)
+	}
+}
+
+func TestDirectACPCompletionAlertUsesTaskIDWhenNoSavedTab(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := Config{Device: DeviceConfig{ID: "device-1"}}
+	d := New(cfg)
+	projectID := d.projectIDForWorkspacePath(workspace)
+	d.history["direct-task-1"] = protocol.TaskRecord{
+		TaskID:        "direct-task-1",
+		WorkspacePath: workspace,
+		Agent:         "codex",
+		AgentRuntime:  "direct_acp",
+		SessionName:   "direct-task-1",
+	}
+	d.emitTaskEvent("direct-task-1", "task.failed", 0, map[string]any{"error": "boom"}, nil)
+
+	events := drainEnvelopes(d.send)
+	var alert protocol.TerminalStreamAlert
+	for _, env := range events {
+		if env.Type != protocol.TypeTerminalStreamAlert {
+			continue
+		}
+		if err := json.Unmarshal(env.Payload, &alert); err != nil {
+			t.Fatalf("decode alert: %v", err)
+		}
+	}
+	if alert.ProjectID != projectID || alert.TerminalID != "direct-task-1" || alert.Message != "任务执行失败" {
+		t.Fatalf("direct ACP alert = %#v, want fallback task id failure alert", alert)
+	}
+	if alert.Title != "Direct ACP对话 (codex)" {
+		t.Fatalf("alert title = %q, want Direct ACP title", alert.Title)
 	}
 }
 
@@ -257,6 +339,35 @@ func TestPrepareTerminalAgentHooksWrapsCodexNotify(t *testing.T) {
 	}
 }
 
+func TestPrepareTerminalAgentHooksWritesAntigravityStopHook(t *testing.T) {
+	d := New(Config{})
+	d.hookURL = "http://127.0.0.1:1/terminal-event"
+	d.hookToken = "token"
+	configHome := t.TempDir()
+	antigravityDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("ANTIGRAVITY_CONFIG_DIR", antigravityDir)
+
+	hooks := d.prepareTerminalAgentHooks(t.TempDir(), "project", "terminal", "antigravity")
+	if len(hooks.env) == 0 {
+		t.Fatal("prepareTerminalAgentHooks() env is empty, want hook env for antigravity")
+	}
+	scriptPath := filepath.Join(configHome, "pocket-studio", "hooks", "antigravity-stop.js")
+	if raw, err := os.ReadFile(scriptPath); err != nil {
+		t.Fatalf("antigravity hook script was not written: %v", err)
+	} else if !strings.Contains(string(raw), "POCKET_STUDIO_HOOK_URL") {
+		t.Fatalf("antigravity hook script missing Pocket Studio hook post:\n%s", raw)
+	}
+	settingsPath := filepath.Join(antigravityDir, "settings.json")
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("antigravity settings were not written: %v", err)
+	}
+	if !strings.Contains(string(raw), `"Stop"`) || !strings.Contains(string(raw), scriptPath) {
+		t.Fatalf("antigravity settings missing Stop hook script path:\n%s", raw)
+	}
+}
+
 func TestPrepareTerminalAgentHooksSkipsUnknownAgents(t *testing.T) {
 	d := New(Config{})
 	d.hookURL = "http://127.0.0.1:1/terminal-event"
@@ -345,5 +456,17 @@ func TestTerminalAgentCommandWithHooksAddsPiExtension(t *testing.T) {
 		"POCKET_STUDIO_PI_EXTENSION=/tmp/pocket-studio.ts",
 	}); got != command {
 		t.Fatalf("terminalAgentCommandWithHooks() duplicated extension: %q", got)
+	}
+}
+
+func drainEnvelopes(ch <-chan protocol.Envelope) []protocol.Envelope {
+	var events []protocol.Envelope
+	for {
+		select {
+		case env := <-ch:
+			events = append(events, env)
+		default:
+			return events
+		}
 	}
 }

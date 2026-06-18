@@ -8,12 +8,12 @@ import {
   createFileViewerTab,
   createAgentChatTab,
   cleanLayoutTitles,
-  setFocusInLayout,
   type LayoutNode,
   type TerminalPanel,
   type StudioTab,
 } from "../studio-layout";
 import {
+  agentNameForRuntime,
   makeId,
   isPlaceholderTerminalTitle,
   type TerminalKind,
@@ -39,13 +39,13 @@ import {
   updateTabPropertiesInTree,
   closeTabInTree,
   findPanel,
-  findPanelForTab,
+  findPanelForTabOrAgentSession,
   findNextPanelId,
   findTab,
   removeTabForMove,
   editableTargetShouldKeepKeyboard,
 } from "../studio-layout-ops";
-import { getJSON, postJSON } from "@/lib/api";
+import { getJSON, postJSON, websocketURL } from "@/lib/api";
 import type { NotificationJumpTarget } from "../terminal-notifications";
 
 interface UseWorkspaceLayoutProps {
@@ -79,6 +79,61 @@ export function useWorkspaceLayout({
   const [loadedProjectId, setLoadedProjectId] = useState("");
 
   const skipSaveRef = useRef(true);
+
+  function deleteAgentSession(tab: StudioTab) {
+    if (tab.kind !== "agent_chat" || !tab.agentSessionId) return;
+    const socket = new WebSocket(websocketURL("/ws/acpx", new URLSearchParams({ task_id: tab.agentSessionId })));
+    const message = JSON.stringify({
+      id: makeId("msg"),
+      type: "session.delete",
+      version: 1,
+      timestamp: Math.floor(Date.now() / 1000),
+      from: "web",
+      to: { device_id: project.device_id },
+      payload: {
+        task_id: tab.agentSessionId,
+        workspace_path: project.workspace_path,
+        agent: agentNameForRuntime(tab.agentKind, tab.agentRuntime),
+        agent_runtime: tab.agentRuntime,
+        session_name: tab.agentSessionId,
+      },
+    });
+    socket.onopen = () => {
+      socket.send(message);
+      socket.close();
+    };
+    socket.onerror = (error) => {
+      console.error("Failed to delete agent session", error);
+    };
+  }
+
+  function closeTerminalSession(tab: StudioTab) {
+    if (tab.kind !== "terminal") return;
+    const socket = new WebSocket(websocketURL("/ws/terminal", new URLSearchParams({
+      project_id: projectId,
+      terminal_id: tab.id,
+      command: tab.activeCommand || "",
+    })));
+    const message = JSON.stringify({ type: "exit", close_session: true });
+    socket.onopen = () => {
+      socket.send(message);
+      socket.close();
+    };
+    socket.onerror = (error) => {
+      console.error("Failed to close terminal session", error);
+    };
+  }
+
+  function closeBackendResources(tab: StudioTab) {
+    deleteAgentSession(tab);
+    closeTerminalSession(tab);
+  }
+
+  function closeBackendResourcesForTabs(tabs: StudioTab[]) {
+    for (const tab of tabs) {
+      closeBackendResources(tab);
+    }
+  }
 
   useEffect(() => {
     terminalTitlesRef.current = terminalTitles;
@@ -163,9 +218,9 @@ export function useWorkspaceLayout({
   useEffect(() => {
     if (!stateLoaded || loadedProjectId !== projectId || !layoutTree || !notificationJumpTarget) return;
     if (notificationJumpTarget.projectId !== projectId) return;
-    const target = findPanelForTab(layoutTree, notificationJumpTarget.tabId, notificationJumpTarget.panelId);
+    const target = findPanelForTabOrAgentSession(layoutTree, notificationJumpTarget.tabId, notificationJumpTarget.panelId);
     if (target) {
-      activateTerminalTab(target.id, notificationJumpTarget.tabId);
+      activateTerminalTab(target.panel.id, target.tabId);
       onNotificationJumpHandled(notificationJumpTarget.nonce);
       return;
     }
@@ -176,8 +231,13 @@ export function useWorkspaceLayout({
   useEffect(() => {
     if (!stateLoaded || !layoutTree || alertTerminalIds.size === 0) return;
     const focusedPanel = focusedId ? findPanel(layoutTree, focusedId) : null;
-    if (focusedPanel?.activeTabId && alertTerminalIds.has(focusedPanel.activeTabId)) {
-      onTerminalFocused(projectId, focusedPanel.activeTabId);
+    const activeTab = focusedPanel?.tabs.find((tab) => tab.id === focusedPanel.activeTabId);
+    if (activeTab?.id && alertTerminalIds.has(activeTab.id)) {
+      onTerminalFocused(projectId, activeTab.id);
+      return;
+    }
+    if (activeTab?.kind === "agent_chat" && activeTab.agentSessionId && alertTerminalIds.has(activeTab.agentSessionId)) {
+      onTerminalFocused(projectId, activeTab.agentSessionId);
     }
   }, [alertTerminalIds, focusedId, layoutTree, projectId, stateLoaded]);
 
@@ -375,7 +435,6 @@ export function useWorkspaceLayout({
 
   function handleFocus(panelId: string) {
     setFocusedId(panelId);
-    setLayoutTree((prev) => (prev ? setFocusInLayout(prev, panelId) : prev));
   }
 
   function handleSplit(panelId: string, dir: SplitDirection, kind: TerminalKind) {
@@ -392,6 +451,10 @@ export function useWorkspaceLayout({
 
   function handleClosePanel(panelId: string) {
     if (!layoutTree) return;
+    const panel = findPanel(layoutTree, panelId);
+    if (panel) {
+      closeBackendResourcesForTabs(panel.tabs);
+    }
     const isFocused = focusedId === panelId;
     const nextFocused = isFocused ? findNextPanelId(layoutTree, panelId) : focusedId;
     const nextTree = removePanel(layoutTree, panelId);
@@ -422,8 +485,8 @@ export function useWorkspaceLayout({
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleAddAgentChat(panelId: string, agentKind: string) {
-    const tab = createAgentChatTab(agentKind);
+  function handleAddAgentChat(panelId: string, agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "acpx") {
+    const tab = createAgentChatTab(agentKind, undefined, undefined, agentRuntime);
     setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : null));
     setFocusedId(panelId);
     setAddMenuPanelId(null);
@@ -443,6 +506,12 @@ export function useWorkspaceLayout({
   }
 
   function handleCloseTab(panelId: string, tabId: string) {
+    if (layoutTree) {
+      const tab = findTab(layoutTree, panelId, tabId);
+      if (tab) {
+        closeBackendResources(tab);
+      }
+    }
     setLayoutTree((prev) => {
       if (!prev) return null;
       const nextTree = closeTabInTree(prev, panelId, tabId);

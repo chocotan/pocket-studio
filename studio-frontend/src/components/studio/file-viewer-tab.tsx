@@ -169,7 +169,7 @@ export function FileViewerTab({ projectId, path, active, dragSuspended, theme = 
                 height="100%"
                 language={language}
                 value={content}
-                theme={theme === "light" || theme === "claude" ? "vs" : "vs-dark"}
+                theme={theme === "light" || theme === "claude" || theme === "sandalwood" ? "vs" : "vs-dark"}
                 options={{
                   minimap: { enabled: false },
                   fontSize: 12,

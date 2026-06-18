@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal } from "lucide-react";
-import { OpenCode, Codex, ClaudeCode, Antigravity, KiloCode } from "@lobehub/icons";
+import { OpenCode, Codex, ClaudeCode, KiloCode } from "@lobehub/icons";
 import {
   Tooltip,
   TooltipContent,
@@ -27,6 +27,7 @@ import {
 
 interface TerminalPanelViewProps {
   panel: TerminalPanel;
+  focused: boolean;
   addMenuPanelId: string | null;
   dragTarget: { panelId: string; insertIndex: number } | null;
   isDraggingTab: boolean;
@@ -38,7 +39,7 @@ interface TerminalPanelViewProps {
   onSplitSelect: (id: string, dir: SplitDirection, kind: TerminalKind) => void;
   onAddTab: (id: string, kind: TerminalKind) => void;
   onAddFileExplorer: (id: string) => void;
-  onAddAgentChat: (panelId: string, agentKind: string) => void;
+  onAddAgentChat: (panelId: string, agentKind: string, agentRuntime?: StudioTab["agentRuntime"]) => void;
   onUpdateTabProperties: (tabId: string, props: Partial<StudioTab>) => void;
   onOpenFile: (panelId: string, path: string) => void;
   onActiveTab: (panelId: string, tabId: string) => void;
@@ -58,6 +59,7 @@ interface TerminalPanelViewProps {
 
 function TerminalPanelViewComponent({
   panel,
+  focused,
   addMenuPanelId,
   dragTarget,
   isDraggingTab,
@@ -94,7 +96,7 @@ function TerminalPanelViewComponent({
   const [scrollState, setScrollState] = useState({ canLeft: false, canRight: false });
   const [addMenuPosition, setAddMenuPosition] = useState({ left: 4, top: 26 });
   const [dropIndex, setDropIndex] = useState<number | null>(null);
-  const isFocused = panel.focus;
+  const isFocused = focused;
   const splitActions = [
     { dir: "left" as const, Icon: SplitLeftIcon, label: "向左分割" },
     { dir: "right" as const, Icon: SplitRightIcon, label: "向右分割" },
@@ -466,7 +468,7 @@ function TerminalPanelViewComponent({
             style={addMenuPosition}
             onSelect={(kind) => onAddTab(panel.id, kind)}
             onFileExplorer={() => onAddFileExplorer(panel.id)}
-            onAddAgentChat={(agentKind) => onAddAgentChat(panel.id, agentKind)}
+            onAddAgentChat={(agentKind, agentRuntime) => onAddAgentChat(panel.id, agentKind, agentRuntime)}
           />
         )}
 
@@ -625,35 +627,28 @@ function TerminalTypeMenu({
   style?: React.CSSProperties;
   onSelect: (kind: TerminalKind) => void;
   onFileExplorer: () => void;
-  onAddAgentChat: (agentKind: string) => void;
+  onAddAgentChat: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"]) => void;
 }) {
-  const [showAgents, setShowAgents] = useState(false);
+  const [submenu, setSubmenu] = useState<"terminal" | "acpx" | "acp" | null>(null);
+  const terminalMenuItems = TERMINAL_TYPES
+    .map((item) => ({
+      ...item,
+      menuLabel: terminalMenuLabel(item.value),
+    }))
+    .sort((left, right) => terminalMenuOrder(left.value) - terminalMenuOrder(right.value));
 
   return (
     <div
-      className={`absolute top-6 z-50 w-44 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
+      className={`absolute top-6 z-50 w-48 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
       style={style}
       onClick={(event) => event.stopPropagation()}
     >
-      {!showAgents ? (
+      {!submenu ? (
         <>
-          <div className="px-2.5 py-1 text-[9px] font-bold text-slate-400 uppercase select-none">新建终端</div>
-          {TERMINAL_TYPES.map((item) => (
-            <button
-              key={item.value}
-              type="button"
-              onClick={() => onSelect(item.value)}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-            >
-              <span className="flex h-5 w-5 items-center justify-center rounded-md bg-slate-100 text-slate-600">
-                {item.logo}
-              </span>
-              <span className="truncate">{item.label}</span>
-            </button>
-          ))}
-
+          <MenuBranch label="终端类型" icon={<Terminal className="h-3.5 w-3.5" />} tone="slate" onClick={() => setSubmenu("terminal")} />
+          <MenuBranch label="ACPX会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="amber" onClick={() => setSubmenu("acpx")} />
+          <MenuBranch label="ACP会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="emerald" onClick={() => setSubmenu("acp")} />
           <div className="border-t border-slate-100 my-1" />
-          <div className="px-2.5 py-1 text-[9px] font-bold text-slate-400 uppercase select-none">新建工具</div>
           <button
             type="button"
             onClick={onFileExplorer}
@@ -664,94 +659,143 @@ function TerminalTypeMenu({
             </span>
             <span className="truncate">文件管理器</span>
           </button>
-
-          <div className="border-t border-slate-100 my-1" />
-          <div className="px-2.5 py-1 text-[9px] font-bold text-slate-400 uppercase select-none">新建对话</div>
-          <button
-            type="button"
-            onClick={() => setShowAgents(true)}
-            className="flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-          >
-            <div className="flex items-center gap-2">
-              <span className="flex h-5 w-5 items-center justify-center rounded-md bg-amber-100 text-amber-750">
-                <Cpu className="h-3.5 w-3.5" />
-              </span>
-              <span className="truncate">Agent 对话</span>
-            </div>
-            <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
-          </button>
+        </>
+      ) : submenu === "terminal" ? (
+        <>
+          <MenuHeader label="终端类型" onBack={() => setSubmenu(null)} />
+          {terminalMenuItems.map((item) => (
+            <MenuItem
+              key={item.value}
+              label={item.menuLabel}
+              icon={item.logo}
+              tone={item.accent}
+              onClick={() => onSelect(item.value)}
+            />
+          ))}
+        </>
+      ) : submenu === "acpx" ? (
+        <>
+          <MenuHeader label="ACPX会话" onBack={() => setSubmenu(null)} />
+          <MenuItem label="opencode" icon={<OpenCode width={14} height={14} />} tone="amber" onClick={() => onAddAgentChat("opencode", "acpx")} />
+          <MenuItem label="claude code" icon={<ClaudeCode width={14} height={14} />} tone="violet" onClick={() => onAddAgentChat("claude", "acpx")} />
+          <MenuItem label="pi" icon={<span className="text-[10px] font-black leading-none">π</span>} tone="cyan" onClick={() => onAddAgentChat("pi", "acpx")} />
         </>
       ) : (
         <>
-          <div className="flex items-center gap-1 px-1.5 py-1 border-b border-slate-100 bg-slate-50/50">
-            <button
-              type="button"
-              onClick={() => setShowAgents(false)}
-              className="p-1 rounded hover:bg-slate-200/50 text-slate-500 cursor-pointer"
-            >
-              <ChevronLeft className="h-3.5 w-3.5" />
-            </button>
-            <span className="text-[9px] font-bold text-slate-400 uppercase select-none">选择 Agent</span>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => onAddAgentChat("opencode")}
-            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-          >
-            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-amber-100 text-amber-750">
-              <OpenCode width={14} height={14} />
-            </span>
-            <span className="truncate font-semibold text-slate-750">OpenCode</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onAddAgentChat("codex")}
-            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-          >
-            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-emerald-100 text-emerald-700">
-              <Codex width={14} height={14} />
-            </span>
-            <span className="truncate font-semibold text-slate-750">Codex</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onAddAgentChat("claude")}
-            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-          >
-            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-violet-100 text-violet-750">
-              <ClaudeCode width={14} height={14} />
-            </span>
-            <span className="truncate font-semibold text-slate-750">Claude Code</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onAddAgentChat("agy")}
-            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-          >
-            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-rose-100 text-rose-750">
-              <Antigravity width={14} height={14} />
-            </span>
-            <span className="truncate font-semibold text-slate-750">Antigravity</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onAddAgentChat("kilo")}
-            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-          >
-            <span className="flex h-5 w-5 items-center justify-center rounded-md bg-lime-100 text-lime-750">
-              <KiloCode width={14} height={14} />
-            </span>
-            <span className="truncate font-semibold text-slate-755">Kilo Code</span>
-          </button>
+          <MenuHeader label="ACP会话" onBack={() => setSubmenu(null)} />
+          <MenuItem label="opencode" icon={<OpenCode width={14} height={14} />} tone="amber" onClick={() => onAddAgentChat("opencode", "direct_acp")} />
+          <MenuItem label="kilo code" icon={<KiloCode width={14} height={14} />} tone="lime" onClick={() => onAddAgentChat("kilo", "direct_acp")} />
+          <MenuItem label="codex" icon={<Codex width={14} height={14} />} tone="emerald" onClick={() => onAddAgentChat("codex", "direct_acp")} />
         </>
       )}
     </div>
   );
+}
+
+function terminalMenuOrder(kind: TerminalKind) {
+  const order: TerminalKind[] = ["bash", "opencode", "codex", "claude", "kilo", "pi", "agy"];
+  const index = order.indexOf(kind);
+  return index === -1 ? order.length : index;
+}
+
+function terminalMenuLabel(kind: TerminalKind) {
+  switch (kind) {
+    case "bash":
+      return "普通终端";
+    case "claude":
+      return "claude code";
+    default:
+      return kind;
+  }
+}
+
+function MenuHeader({ label, onBack }: { label: string; onBack: () => void }) {
+  return (
+    <div className="flex items-center gap-1 px-1.5 py-1 border-b border-slate-100 bg-slate-50/50">
+      <button
+        type="button"
+        onClick={onBack}
+        className="p-1 rounded hover:bg-slate-200/50 text-slate-500 cursor-pointer"
+      >
+        <ChevronLeft className="h-3.5 w-3.5" />
+      </button>
+      <span className="text-[9px] font-bold text-slate-400 uppercase select-none">{label}</span>
+    </div>
+  );
+}
+
+function MenuBranch({
+  label,
+  icon,
+  tone,
+  onClick,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  tone: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+    >
+      <div className="flex items-center gap-2">
+        <span className={`flex h-5 w-5 items-center justify-center rounded-md ${menuToneClass(tone)}`}>
+          {icon}
+        </span>
+        <span className="truncate">{label}</span>
+      </div>
+      <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+    </button>
+  );
+}
+
+function MenuItem({
+  label,
+  icon,
+  tone,
+  onClick,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  tone: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+    >
+      <span className={`flex h-5 w-5 items-center justify-center rounded-md ${menuToneClass(tone)}`}>
+        {icon}
+      </span>
+      <span className="truncate font-semibold text-slate-750">{label}</span>
+    </button>
+  );
+}
+
+function menuToneClass(tone: string) {
+  switch (tone) {
+    case "amber":
+      return "bg-amber-100 text-amber-750";
+    case "emerald":
+      return "bg-emerald-100 text-emerald-700";
+    case "violet":
+      return "bg-violet-100 text-violet-750";
+    case "lime":
+      return "bg-lime-100 text-lime-750";
+    case "cyan":
+      return "bg-cyan-100 text-cyan-750";
+    case "rose":
+      return "bg-rose-100 text-rose-750";
+    case "sky":
+      return "bg-sky-100 text-sky-750";
+    default:
+      return "bg-slate-100 text-slate-600";
+  }
 }
 
 function TabDropMarker({ panelId, index }: { panelId: string; index: number }) {

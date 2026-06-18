@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"mime"
@@ -78,6 +77,7 @@ type Hub struct {
 	projects      map[string]Project
 	termMu        sync.RWMutex
 	terminalConns map[string]map[*terminalConn]struct{}
+	acpxConns     map[string]map[*acpxConn]struct{}
 }
 
 type daemonConn struct {
@@ -104,6 +104,13 @@ type webConn struct {
 type terminalConn struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
+}
+
+type acpxConn struct {
+	userID string
+	taskID string
+	conn   *websocket.Conn
+	send   chan protocol.Envelope
 }
 
 type DeviceView struct {
@@ -133,6 +140,7 @@ func NewHub(authManager *auth.Manager) *Hub {
 		pending:       make(map[string]chan protocol.Envelope),
 		projects:      make(map[string]Project),
 		terminalConns: make(map[string]map[*terminalConn]struct{}),
+		acpxConns:     make(map[string]map[*acpxConn]struct{}),
 	}
 	return h
 }
@@ -370,6 +378,35 @@ func (h *Hub) ServeDaemonSocket(w http.ResponseWriter, r *http.Request) {
 	h.readDaemonLoop(dc)
 }
 
+func (h *Hub) ServeACPXWebSocket(w http.ResponseWriter, r *http.Request) {
+	userID, ok := h.authenticate(w, r)
+	if !ok {
+		return
+	}
+	taskID := strings.TrimSpace(r.URL.Query().Get("task_id"))
+	if taskID == "" {
+		writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "task_id is required"})
+		return
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("upgrade acpx: %v", err)
+		return
+	}
+	ac := &acpxConn{userID: userID, taskID: taskID, conn: conn, send: make(chan protocol.Envelope, 128)}
+	key := scopedKey(userID, taskID)
+	h.mu.Lock()
+	if h.acpxConns[key] == nil {
+		h.acpxConns[key] = make(map[*acpxConn]struct{})
+	}
+	h.acpxConns[key][ac] = struct{}{}
+	h.mu.Unlock()
+
+	go writeLoop(conn, ac.send)
+	h.requestTaskHistoryForACPX(ac)
+	h.readACPXLoop(ac)
+}
+
 func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.authenticate(w, r)
 	if !ok {
@@ -378,14 +415,6 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(auth.WithUserID(r.Context(), userID))
 	if r.URL.Path == "/api/state" && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, h.stateView(userID))
-		return
-	}
-	if r.URL.Path == "/api/acpx/events" && r.Method == http.MethodGet {
-		h.serveACPXEvents(w, r, userID)
-		return
-	}
-	if r.URL.Path == "/api/acpx/command" && r.Method == http.MethodPost {
-		h.serveACPXCommand(w, r, userID)
 		return
 	}
 	if r.URL.Path == "/api/project/list" && r.Method == http.MethodGet {
@@ -641,27 +670,6 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (h *Hub) serveACPXCommand(w http.ResponseWriter, r *http.Request, userID string) {
-	var env protocol.Envelope
-	if !decodeJSON(w, r, &env) {
-		return
-	}
-	if env.From == "" {
-		env.From = "web"
-	}
-	if errEnv, ok := h.forwardACPXCommand(userID, env); !ok {
-		status := http.StatusBadRequest
-		if isDeviceRoutingError(errEnv) {
-			status = http.StatusBadGateway
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(errEnv)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true})
-}
-
 func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol.Envelope, bool) {
 	switch env.Type {
 	case protocol.TypeSessionCreate:
@@ -687,6 +695,7 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 			record.WorkspaceID = session.WorkspaceID
 			record.WorkspacePath = session.WorkspacePath
 			record.Agent = session.Agent
+			record.AgentRuntime = session.AgentRuntime
 			record.SessionName = session.SessionName
 			record.Prompt = ""
 			record.Status = "created"
@@ -724,7 +733,9 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 			return serverErrorForTaskDispatch(task, "device_offline", "target device is offline"), false
 		}
 		if userPromptEvent.TaskID != "" {
-			h.broadcastToUser(userID, taskEventEnvelope(userPromptEvent))
+			forwardEvent := taskEventEnvelope(userPromptEvent)
+			h.broadcastToUser(userID, forwardEvent)
+			h.broadcastToTask(userID, task.TaskID, forwardEvent)
 		}
 		forward := env
 		forward.From = "server"
@@ -768,6 +779,25 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 		forward.From = "server"
 		dc.send <- forward
 		return protocol.Envelope{}, true
+	case protocol.TypeTaskSetConfigOption:
+		change, err := protocol.DecodePayload[protocol.TaskSetConfigOption](env)
+		if err != nil {
+			return serverErrorForEnvelope(env, "bad_payload", err.Error()), false
+		}
+		if change.TaskID == "" || change.ConfigID == "" {
+			return serverErrorForTaskSetConfigOption(change, "bad_payload", "task.set_config_option requires task_id and config_id"), false
+		}
+		h.mu.RLock()
+		deviceID := h.taskDevices[scopedKey(userID, change.TaskID)]
+		dc := h.daemons[daemonKey(userID, deviceID)]
+		h.mu.RUnlock()
+		if dc == nil {
+			return serverErrorForTaskSetConfigOption(change, "task_not_routable", "task has no connected daemon"), false
+		}
+		forward := env
+		forward.From = "server"
+		dc.send <- forward
+		return protocol.Envelope{}, true
 	case protocol.TypeSessionDelete:
 		remove, err := protocol.DecodePayload[protocol.SessionDelete](env)
 		if err != nil {
@@ -795,61 +825,6 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 	}
 }
 
-func (h *Hub) serveACPXEvents(w http.ResponseWriter, r *http.Request, userID string) {
-	taskID := strings.TrimSpace(r.URL.Query().Get("task_id"))
-	if taskID == "" {
-		writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "task_id is required"})
-		return
-	}
-	after := parseEventCursor(r.URL.Query().Get("after"))
-	limit := parseEventLimit(r.URL.Query().Get("limit"))
-	if r.URL.Query().Get("stream") != "true" {
-		events, _, _ := h.taskEventsAfter(userID, taskID, after, limit)
-		writeJSON(w, http.StatusOK, map[string]any{"events": taskEventEnvelopes(events)})
-		return
-	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeJSON(w, http.StatusInternalServerError, protocol.ServerError{Code: "stream_unsupported", Message: "streaming is not supported"})
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache, no-transform")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
-	cursor := after
-	idleChecks := 0
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		events, record, exists := h.taskEventsAfter(userID, taskID, cursor, limit)
-		for _, event := range events {
-			if event.Sequence > cursor {
-				cursor = event.Sequence
-			}
-			if err := writeSSEEnvelope(w, taskEventEnvelope(event)); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
-		if len(events) > 0 || (exists && isActiveTaskStatus(record.Status)) {
-			idleChecks = 0
-		} else {
-			idleChecks++
-			if (exists && isTerminalTaskStatus(record.Status) && idleChecks >= 4) || idleChecks >= 20 {
-				return
-			}
-		}
-		select {
-		case <-r.Context().Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
 func (h *Hub) prepareTaskDispatchRecordLocked(userID string, deviceID string, task protocol.TaskDispatch) protocol.TaskEvent {
 	h.taskDevices[scopedKey(userID, task.TaskID)] = deviceID
 	now := time.Now().Unix()
@@ -862,6 +837,7 @@ func (h *Hub) prepareTaskDispatchRecordLocked(userID string, deviceID string, ta
 	record.WorkspaceID = task.WorkspaceID
 	record.WorkspacePath = task.WorkspacePath
 	record.Agent = task.Agent
+	record.AgentRuntime = task.AgentRuntime
 	record.SessionName = task.SessionName
 	record.ModelID = task.ModelID
 	record.Prompt = task.Prompt
@@ -880,7 +856,7 @@ func (h *Hub) prepareTaskDispatchRecordLocked(userID string, deviceID string, ta
 		Timestamp: now,
 		Data:      MarshalPayload(map[string]string{"prompt": task.Prompt}),
 	}
-		record.Events = append(record.Events, userEvent)
+	record.Events = append(record.Events, userEvent)
 	h.taskRecords[scopedKey(userID, task.TaskID)] = record
 	return userEvent
 }
@@ -901,9 +877,7 @@ func (h *Hub) readWebLoop(wc *webConn) {
 		}
 		switch env.Type {
 		case protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeSessionDelete:
-			if errEnv, ok := h.forwardACPXCommand(wc.userID, env); !ok {
-				wc.send <- errEnv
-			}
+			wc.send <- serverError("unsupported_type", "agent chat commands require /ws/acpx")
 		case protocol.TypeWorkspaceList, protocol.TypeWorkspaceRead, protocol.TypeWorkspaceWrite, protocol.TypeTerminalRun:
 			deviceID := env.To.DeviceID
 			if deviceID == "" {
@@ -927,6 +901,69 @@ func (h *Hub) readWebLoop(wc *webConn) {
 			wc.send <- serverError("unsupported_type", "unsupported web message type")
 		}
 	}
+}
+
+func (h *Hub) readACPXLoop(ac *acpxConn) {
+	defer func() {
+		key := scopedKey(ac.userID, ac.taskID)
+		h.mu.Lock()
+		if conns := h.acpxConns[key]; conns != nil {
+			delete(conns, ac)
+			if len(conns) == 0 {
+				delete(h.acpxConns, key)
+			}
+		}
+		h.mu.Unlock()
+		close(ac.send)
+		_ = ac.conn.Close()
+	}()
+
+	for {
+		var env protocol.Envelope
+		if err := ac.conn.ReadJSON(&env); err != nil {
+			return
+		}
+		if env.From == "" {
+			env.From = "web"
+		}
+		if !isACPXCommandType(env.Type) {
+			ac.send <- serverError("unsupported_type", "unsupported ACPX websocket message type")
+			continue
+		}
+		if !envelopeMatchesTask(env, ac.taskID) {
+			ac.send <- serverError("task_mismatch", "message task_id does not match websocket task_id")
+			continue
+		}
+		if errEnv, ok := h.forwardACPXCommand(ac.userID, env); !ok {
+			ac.send <- errEnv
+		}
+	}
+}
+
+func (h *Hub) requestTaskHistoryForACPX(ac *acpxConn) {
+	h.mu.RLock()
+	record := h.taskRecords[scopedKey(ac.userID, ac.taskID)]
+	deviceID := record.DeviceID
+	if deviceID == "" {
+		deviceID = h.taskDevices[scopedKey(ac.userID, ac.taskID)]
+	}
+	dc := h.daemons[daemonKey(ac.userID, deviceID)]
+	h.mu.RUnlock()
+
+	if dc == nil {
+		for _, event := range h.taskHistory(ac.userID, ac.taskID) {
+			ac.send <- taskEventEnvelope(event)
+		}
+		return
+	}
+
+	requestID := protocol.NewID("req")
+	env := protocol.NewEnvelope(protocol.TypeTaskHistoryGet, "server", protocol.TaskHistoryGet{
+		RequestID: requestID,
+		TaskID:    ac.taskID,
+	})
+	env.To.TaskID = ac.taskID
+	dc.send <- env
 }
 
 func (h *Hub) closeTerminal(userID string, projectID string, terminalID string) {
@@ -995,158 +1032,209 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			log.Printf("daemon %s sent invalid json frame: %v", dc.deviceID, err)
 			continue
 		}
-		switch env.Type {
-		case protocol.TypeDaemonHello:
-			hello, err := protocol.DecodePayload[protocol.DaemonHello](env)
-			if err != nil {
-				dc.send <- serverError("bad_payload", err.Error())
+		h.handleDaemonMessage(dc, env)
+	}
+}
+
+func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
+	switch env.Type {
+	case protocol.TypeDaemonHello:
+		hello, err := protocol.DecodePayload[protocol.DaemonHello](env)
+		if err != nil {
+			dc.send <- serverError("bad_payload", err.Error())
+			return
+		}
+		dc.deviceID = hello.DeviceID
+		dc.deviceName = hostinfo.ResolveDeviceName(hello.DeviceName)
+		dc.agent = hello.Agent
+		dc.agentLabel = hello.AgentLabel
+		dc.agents = hello.Agents
+		dc.workspaces = hello.Workspaces
+		dc.terminalBinary = hasFeature(hello.Features, protocol.FeatureTerminalBinaryV1)
+		dc.lastSeen = time.Now()
+		h.mu.Lock()
+		key := daemonKey(dc.userID, hello.DeviceID)
+		if old := h.daemons[key]; old != nil && old != dc {
+			_ = old.conn.Close()
+		}
+		h.daemons[key] = dc
+		h.mu.Unlock()
+		if dc.terminalBinary {
+			dc.send <- protocol.NewEnvelope(protocol.TypeServerHello, "server", protocol.ServerHello{
+				Features: []string{protocol.FeatureTerminalBinaryV1},
+			})
+		}
+		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
+	case protocol.TypeDaemonHeartbeat, protocol.TypeDaemonSnapshot:
+		dc.lastSeen = time.Now()
+		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
+	case protocol.TypeTaskSnapshot:
+		snapshot, err := protocol.DecodePayload[protocol.TaskSnapshot](env)
+		if err != nil {
+			dc.send <- serverError("bad_payload", err.Error())
+			return
+		}
+		h.mu.Lock()
+		seen := make(map[string]struct{}, len(snapshot.Tasks))
+		for _, record := range snapshot.Tasks {
+			taskKey := scopedKey(dc.userID, record.TaskID)
+			seen[taskKey] = struct{}{}
+			h.taskDevices[taskKey] = snapshot.DeviceID
+			record.DeviceID = snapshot.DeviceID
+			if existing := h.taskRecords[taskKey]; len(existing.Events) > 0 {
+				record.Events = mergeTaskRecordEvents(record.Events, existing.Events)
+				if existing.Status == "running" || existing.Status == "stopping" {
+					record.Status = existing.Status
+				}
+				if existing.UpdatedAt > record.UpdatedAt {
+					record.UpdatedAt = existing.UpdatedAt
+				}
+				if record.SessionID == "" {
+					record.SessionID = existing.SessionID
+				}
+				if record.ModelID == "" {
+					record.ModelID = existing.ModelID
+				}
+			}
+			h.taskRecords[taskKey] = record
+		}
+		for taskID, deviceID := range h.taskDevices {
+			if !strings.HasPrefix(taskID, dc.userID+"\x00") {
 				continue
 			}
-			dc.deviceID = hello.DeviceID
-			dc.deviceName = hostinfo.ResolveDeviceName(hello.DeviceName)
-			dc.agent = hello.Agent
-			dc.agentLabel = hello.AgentLabel
-			dc.agents = hello.Agents
-			dc.workspaces = hello.Workspaces
-			dc.terminalBinary = hasFeature(hello.Features, protocol.FeatureTerminalBinaryV1)
-			dc.lastSeen = time.Now()
-			h.mu.Lock()
-			key := daemonKey(dc.userID, hello.DeviceID)
-			if old := h.daemons[key]; old != nil && old != dc {
-				_ = old.conn.Close()
-			}
-			h.daemons[key] = dc
-			h.mu.Unlock()
-			if dc.terminalBinary {
-				dc.send <- protocol.NewEnvelope(protocol.TypeServerHello, "server", protocol.ServerHello{
-					Features: []string{protocol.FeatureTerminalBinaryV1},
-				})
-			}
-			h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
-		case protocol.TypeDaemonHeartbeat, protocol.TypeDaemonSnapshot:
-			dc.lastSeen = time.Now()
-			h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
-		case protocol.TypeTaskSnapshot:
-			snapshot, err := protocol.DecodePayload[protocol.TaskSnapshot](env)
-			if err != nil {
-				dc.send <- serverError("bad_payload", err.Error())
+			if deviceID != snapshot.DeviceID {
 				continue
 			}
+			if _, ok := seen[taskID]; ok {
+				continue
+			}
+			delete(h.taskDevices, taskID)
+			delete(h.taskRecords, taskID)
+			delete(h.taskEvents, taskID)
+		}
+		h.mu.Unlock()
+		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
+	case protocol.TypeTaskEvent:
+		taskEvent, err := protocol.DecodePayload[protocol.TaskEvent](env)
+		forward := env
+		shouldForward := true
+		if err == nil && taskEvent.TaskID != "" {
 			h.mu.Lock()
-			seen := make(map[string]struct{}, len(snapshot.Tasks))
-			for _, record := range snapshot.Tasks {
-				taskKey := scopedKey(dc.userID, record.TaskID)
-				seen[taskKey] = struct{}{}
-				h.taskDevices[taskKey] = snapshot.DeviceID
-				record.DeviceID = snapshot.DeviceID
-				h.taskRecords[taskKey] = record
+			taskKey := scopedKey(dc.userID, taskEvent.TaskID)
+			if dc.deviceID != "" {
+				h.taskDevices[taskKey] = dc.deviceID
 			}
-			for taskID, deviceID := range h.taskDevices {
-				if !strings.HasPrefix(taskID, dc.userID+"\x00") {
-					continue
-				}
-				if deviceID != snapshot.DeviceID {
-					continue
-				}
-				if _, ok := seen[taskID]; ok {
-					continue
-				}
-				delete(h.taskDevices, taskID)
-				delete(h.taskRecords, taskID)
-				delete(h.taskEvents, taskID)
-			}
-			h.mu.Unlock()
-			h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
-		case protocol.TypeTaskEvent:
-			taskEvent, err := protocol.DecodePayload[protocol.TaskEvent](env)
-			forward := env
-			if err == nil && taskEvent.TaskID != "" {
-				h.mu.Lock()
-				taskKey := scopedKey(dc.userID, taskEvent.TaskID)
-				if dc.deviceID != "" {
-					h.taskDevices[taskKey] = dc.deviceID
-				}
 			h.taskEvents[taskKey] = append(h.taskEvents[taskKey], env)
-				record := h.taskRecords[taskKey]
-				record.TaskID = taskEvent.TaskID
-				if sessionID := extractSessionID(taskEvent); sessionID != "" {
-					record.SessionID = sessionID
-				}
+			record := h.taskRecords[taskKey]
+			record.TaskID = taskEvent.TaskID
+			if sessionID := extractSessionID(taskEvent); sessionID != "" {
+				record.SessionID = sessionID
+			}
+			if dc.deviceID != "" {
+				record.DeviceID = dc.deviceID
+			}
+			if modelID := extractModelID(taskEvent); modelID != "" {
+				record.ModelID = modelID
+			}
+			record.Status = statusFromEvent(taskEvent.EventType, record.Status)
+			record.UpdatedAt = time.Now().Unix()
+			if taskEvent.Timestamp == 0 {
+				taskEvent.Timestamp = record.UpdatedAt
+			}
+			taskEvent.Sequence = nextTaskEventSequence(record.Events, taskEvent.Sequence)
+			if !hasTaskEventSignature(record.Events, taskEvent) {
+				record.Events = append(record.Events, taskEvent)
+				h.taskRecords[taskKey] = record
+			} else {
+				h.taskRecords[taskKey] = record
+				shouldForward = false
+			}
+			h.mu.Unlock()
+			forward = taskEventEnvelope(taskEvent)
+		}
+		if !shouldForward {
+			return
+		}
+		forward.From = "server"
+		h.broadcastToUser(dc.userID, forward)
+		if taskEvent.TaskID != "" {
+			h.broadcastToTask(dc.userID, taskEvent.TaskID, forward)
+		}
+	case protocol.TypeTaskHistoryResult:
+		result, err := protocol.DecodePayload[protocol.TaskHistoryResult](env)
+		if err == nil && result.TaskID != "" {
+			if result.Record != nil {
+				h.mu.Lock()
+				taskKey := scopedKey(dc.userID, result.TaskID)
+				record := *result.Record
 				if dc.deviceID != "" {
 					record.DeviceID = dc.deviceID
+					h.taskDevices[taskKey] = dc.deviceID
 				}
-				if modelID := extractModelID(taskEvent); modelID != "" {
-					record.ModelID = modelID
-				}
-				record.Status = statusFromEvent(taskEvent.EventType, record.Status)
-				record.UpdatedAt = time.Now().Unix()
-				if taskEvent.Timestamp == 0 {
-					taskEvent.Timestamp = record.UpdatedAt
-				}
-				taskEvent.Sequence = nextTaskEventSequence(record.Events, taskEvent.Sequence)
-			record.Events = append(record.Events, taskEvent)
 				h.taskRecords[taskKey] = record
 				h.mu.Unlock()
-				forward = taskEventEnvelope(taskEvent)
 			}
-			forward.From = "server"
-			h.broadcastToUser(dc.userID, forward)
-		case protocol.TypeTerminalStreamData:
-			streamData, err := protocol.DecodePayload[protocol.TerminalStreamData](env)
-			if err == nil {
-				h.forwardTerminalStreamData(dc.userID, streamData)
-			}
-		case protocol.TypeTerminalStreamTitle:
-			streamTitle, err := protocol.DecodePayload[protocol.TerminalStreamTitle](env)
-			if err == nil {
-				key := terminalKey(dc.userID, streamTitle.ProjectID, streamTitle.TerminalID)
-				for _, wc := range h.terminalSubscribers(key) {
-					wc.mu.Lock()
-					_ = wc.conn.WriteJSON(map[string]string{
-						"type":       "title",
-						"title":      streamTitle.Title,
-						"full_title": streamTitle.FullTitle,
-						"command":    streamTitle.Command,
-					})
-					wc.mu.Unlock()
-				}
-			}
-		case protocol.TypeTerminalStreamAlert:
-			_, err := protocol.DecodePayload[protocol.TerminalStreamAlert](env)
-			if err == nil {
-				forward := env
+			for _, event := range result.Events {
+				forward := taskEventEnvelope(event)
 				forward.From = "server"
-				h.broadcastToUser(dc.userID, forward)
+				h.broadcastToTask(dc.userID, result.TaskID, forward)
 			}
-		case protocol.TypeTerminalStreamExit:
-			streamExit, err := protocol.DecodePayload[protocol.TerminalStreamExit](env)
-			if err == nil {
-				key := terminalKey(dc.userID, streamExit.ProjectID, streamExit.TerminalID)
-				conns := h.terminalSubscribers(key)
-				h.termMu.Lock()
-				delete(h.terminalConns, key)
-				h.termMu.Unlock()
-				for _, wc := range conns {
-					_ = wc.conn.Close()
-				}
-			}
-		case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult, protocol.TypeProjectResult:
-			if h.resolvePending(dc.userID, env) {
-				continue
-			}
-			forward := env
-			forward.From = "server"
-			h.broadcastToUser(dc.userID, forward)
-		case protocol.TypeServerError:
-			if h.resolvePending(dc.userID, env) {
-				continue
-			}
-			forward := env
-			forward.From = "server"
-			h.broadcastToUser(dc.userID, forward)
-		default:
-			log.Printf("daemon %s sent unsupported type %s", dc.deviceID, env.Type)
 		}
+	case protocol.TypeTerminalStreamData:
+		streamData, err := protocol.DecodePayload[protocol.TerminalStreamData](env)
+		if err == nil {
+			h.forwardTerminalStreamData(dc.userID, streamData)
+		}
+	case protocol.TypeTerminalStreamTitle:
+		streamTitle, err := protocol.DecodePayload[protocol.TerminalStreamTitle](env)
+		if err == nil {
+			key := terminalKey(dc.userID, streamTitle.ProjectID, streamTitle.TerminalID)
+			for _, wc := range h.terminalSubscribers(key) {
+				wc.mu.Lock()
+				_ = wc.conn.WriteJSON(map[string]string{
+					"type":       "title",
+					"title":      streamTitle.Title,
+					"full_title": streamTitle.FullTitle,
+					"command":    streamTitle.Command,
+				})
+				wc.mu.Unlock()
+			}
+		}
+	case protocol.TypeTerminalStreamAlert:
+		_, err := protocol.DecodePayload[protocol.TerminalStreamAlert](env)
+		if err == nil {
+			forward := env
+			forward.From = "server"
+			h.broadcastToUser(dc.userID, forward)
+		}
+	case protocol.TypeTerminalStreamExit:
+		streamExit, err := protocol.DecodePayload[protocol.TerminalStreamExit](env)
+		if err == nil {
+			key := terminalKey(dc.userID, streamExit.ProjectID, streamExit.TerminalID)
+			conns := h.terminalSubscribers(key)
+			h.termMu.Lock()
+			delete(h.terminalConns, key)
+			h.termMu.Unlock()
+			for _, wc := range conns {
+				_ = wc.conn.Close()
+			}
+		}
+	case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult, protocol.TypeProjectResult:
+		if h.resolvePending(dc.userID, env) {
+			return
+		}
+		forward := env
+		forward.From = "server"
+		h.broadcastToUser(dc.userID, forward)
+	case protocol.TypeServerError:
+		if h.resolvePending(dc.userID, env) {
+			return
+		}
+		forward := env
+		forward.From = "server"
+		h.broadcastToUser(dc.userID, forward)
+	default:
+		log.Printf("daemon %s sent unsupported type %s", dc.deviceID, env.Type)
 	}
 }
 
@@ -1184,74 +1272,67 @@ func (h *Hub) stateView(userID string) StateView {
 	return StateView{Devices: devices, Tasks: tasks}
 }
 
-func (h *Hub) taskEventsAfter(userID string, taskID string, after int64, limit int) ([]protocol.TaskEvent, protocol.TaskRecord, bool) {
+func (h *Hub) taskHistory(userID string, taskID string) []protocol.TaskEvent {
 	h.mu.RLock()
-	record, exists := h.taskRecords[scopedKey(userID, taskID)]
+	record := h.taskRecords[scopedKey(userID, taskID)]
 	h.mu.RUnlock()
-	if !exists || record.TaskID == "" {
-		return nil, protocol.TaskRecord{}, false
+	if record.TaskID == "" {
+		return nil
 	}
-	events := make([]protocol.TaskEvent, 0, len(record.Events))
-	for _, event := range record.Events {
-		if event.Sequence <= after {
-			continue
-		}
-		events = append(events, event)
-		if limit > 0 && len(events) >= limit {
-			break
-		}
+	events := make([]protocol.TaskEvent, len(record.Events))
+	copy(events, record.Events)
+	if strings.TrimSpace(record.Prompt) != "" && !hasUserPromptEvent(events) {
+		promptEvent := taskRecordPromptEvent(record)
+		insertAt := promptEventInsertIndex(events)
+		events = append(events, protocol.TaskEvent{})
+		copy(events[insertAt+1:], events[insertAt:])
+		events[insertAt] = promptEvent
 	}
-	return events, record, true
+	return events
 }
 
-func taskEventEnvelopes(events []protocol.TaskEvent) []protocol.Envelope {
-	envelopes := make([]protocol.Envelope, 0, len(events))
+func hasUserPromptEvent(events []protocol.TaskEvent) bool {
 	for _, event := range events {
-		envelopes = append(envelopes, taskEventEnvelope(event))
+		if event.EventType == "user.prompt" {
+			return true
+		}
 	}
-	return envelopes
+	return false
+}
+
+func taskRecordPromptEvent(record protocol.TaskRecord) protocol.TaskEvent {
+	timestamp := record.StartedAt
+	if timestamp == 0 {
+		timestamp = record.UpdatedAt
+	}
+	return protocol.TaskEvent{
+		TaskID:    record.TaskID,
+		EventID:   "history-user-prompt-" + record.TaskID,
+		EventType: "user.prompt",
+		Source:    "server",
+		Sequence:  0,
+		Timestamp: timestamp,
+		Data:      MarshalPayload(map[string]string{"prompt": record.Prompt}),
+	}
+}
+
+func promptEventInsertIndex(events []protocol.TaskEvent) int {
+	lastTaskStarted := -1
+	for idx, event := range events {
+		if event.EventType == "task.started" {
+			lastTaskStarted = idx
+		}
+	}
+	if lastTaskStarted >= 0 {
+		return lastTaskStarted
+	}
+	return 0
 }
 
 func taskEventEnvelope(event protocol.TaskEvent) protocol.Envelope {
 	env := protocol.NewEnvelope(protocol.TypeTaskEvent, "server", event)
 	env.To.TaskID = event.TaskID
 	return env
-}
-
-func writeSSEEnvelope(w io.Writer, env protocol.Envelope) error {
-	raw, err := json.Marshal(env)
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(w, "event: %s\n", env.Type); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {
-		return err
-	}
-	return nil
-}
-
-func parseEventCursor(value string) int64 {
-	if value == "" {
-		return 0
-	}
-	cursor, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || cursor < 0 {
-		return 0
-	}
-	return cursor
-}
-
-func parseEventLimit(value string) int {
-	if value == "" {
-		return 0
-	}
-	limit, err := strconv.Atoi(value)
-	if err != nil || limit <= 0 {
-		return 0
-	}
-	return limit
 }
 
 func isActiveTaskStatus(status string) bool {
@@ -1426,6 +1507,22 @@ func (h *Hub) broadcastToUser(userID string, env protocol.Envelope) {
 	}
 }
 
+func (h *Hub) broadcastToTask(userID string, taskID string, env protocol.Envelope) {
+	key := scopedKey(userID, taskID)
+	h.mu.RLock()
+	conns := make([]*acpxConn, 0, len(h.acpxConns[key]))
+	for conn := range h.acpxConns[key] {
+		conns = append(conns, conn)
+	}
+	h.mu.RUnlock()
+	for _, conn := range conns {
+		select {
+		case conn.send <- env:
+		default:
+		}
+	}
+}
+
 func writeLoop(conn *websocket.Conn, ch <-chan protocol.Envelope, writeMu ...*sync.Mutex) {
 	for env := range ch {
 		if len(writeMu) > 0 && writeMu[0] != nil {
@@ -1460,16 +1557,33 @@ func enableTCPNoDelay(conn *websocket.Conn) {
 	}
 }
 
-func serverError(code, message string) protocol.Envelope {
-	return protocol.NewEnvelope(protocol.TypeServerError, "server", protocol.ServerError{Code: code, Message: message})
-}
-
-func isDeviceRoutingError(errEnv protocol.Envelope) bool {
-	var err protocol.ServerError
-	if json.Unmarshal(errEnv.Payload, &err) != nil {
+func isACPXCommandType(messageType string) bool {
+	switch messageType {
+	case protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete:
+		return true
+	default:
 		return false
 	}
-	return err.Code == "device_offline" || err.Code == "task_not_routable"
+}
+
+func envelopeMatchesTask(env protocol.Envelope, taskID string) bool {
+	if env.To.TaskID != "" && env.To.TaskID != taskID {
+		return false
+	}
+	if len(env.Payload) == 0 {
+		return true
+	}
+	var payload struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return true
+	}
+	return payload.TaskID == "" || payload.TaskID == taskID
+}
+
+func serverError(code, message string) protocol.Envelope {
+	return protocol.NewEnvelope(protocol.TypeServerError, "server", protocol.ServerError{Code: code, Message: message})
 }
 
 func serverErrorForEnvelope(env protocol.Envelope, code, message string) protocol.Envelope {
@@ -1515,6 +1629,15 @@ func serverErrorForTaskStop(stop protocol.TaskStop, code, message string) protoc
 }
 
 func serverErrorForTaskSetModel(change protocol.TaskSetModel, code, message string) protocol.Envelope {
+	return protocol.NewEnvelope(protocol.TypeServerError, "server", protocol.ServerError{
+		Code:      code,
+		Message:   message,
+		RequestID: change.RequestID,
+		TaskID:    change.TaskID,
+	})
+}
+
+func serverErrorForTaskSetConfigOption(change protocol.TaskSetConfigOption, code, message string) protocol.Envelope {
 	return protocol.NewEnvelope(protocol.TypeServerError, "server", protocol.ServerError{
 		Code:      code,
 		Message:   message,
@@ -1702,6 +1825,46 @@ func taskEventSequenceExists(events []protocol.TaskEvent, sequence int64) bool {
 	return false
 }
 
+func mergeTaskRecordEvents(base []protocol.TaskEvent, extra []protocol.TaskEvent) []protocol.TaskEvent {
+	if len(base) == 0 {
+		return append([]protocol.TaskEvent(nil), extra...)
+	}
+	merged := append([]protocol.TaskEvent(nil), base...)
+	seen := make(map[string]struct{}, len(merged))
+	for _, event := range merged {
+		seen[taskEventSignature(event)] = struct{}{}
+	}
+	for _, event := range extra {
+		signature := taskEventSignature(event)
+		if _, ok := seen[signature]; ok {
+			continue
+		}
+		merged = append(merged, event)
+		seen[signature] = struct{}{}
+	}
+	return merged
+}
+
+func hasTaskEventSignature(events []protocol.TaskEvent, event protocol.TaskEvent) bool {
+	signature := taskEventSignature(event)
+	for _, existing := range events {
+		if taskEventSignature(existing) == signature {
+			return true
+		}
+	}
+	return false
+}
+
+func taskEventSignature(event protocol.TaskEvent) string {
+	if len(event.Data) > 0 {
+		return event.EventType + ":" + string(event.Data)
+	}
+	if len(event.Raw) > 0 {
+		return event.EventType + ":" + string(event.Raw)
+	}
+	return fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID)
+}
+
 func statusFromEvent(eventType, fallback string) string {
 	switch eventType {
 	case "task.started":
@@ -1716,7 +1879,7 @@ func statusFromEvent(eventType, fallback string) string {
 		return "killed"
 	default:
 		if fallback == "" {
-			return "running"
+			return "created"
 		}
 		return fallback
 	}
@@ -1860,9 +2023,10 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		if msgType == websocket.BinaryMessage || msgType == websocket.TextMessage {
 			var controlMsg struct {
-				Type string `json:"type"`
-				Cols uint16 `json:"cols"`
-				Rows uint16 `json:"rows"`
+				Type         string `json:"type"`
+				Cols         uint16 `json:"cols"`
+				Rows         uint16 `json:"rows"`
+				CloseSession bool   `json:"close_session"`
 			}
 			if err := json.Unmarshal(payload, &controlMsg); err == nil {
 				switch controlMsg.Type {
@@ -1874,6 +2038,14 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 						Rows:       controlMsg.Rows,
 					}
 					dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamResize, "server", resizePayload)
+					continue
+				case "exit":
+					exitPayload := protocol.TerminalStreamExit{
+						ProjectID:    projID,
+						TerminalID:   terminalID,
+						CloseSession: controlMsg.CloseSession,
+					}
+					dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", exitPayload)
 					continue
 				}
 			}

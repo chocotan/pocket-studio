@@ -170,6 +170,12 @@ export default function App() {
   }
 
   function handleSelectNotification(notification: TerminalNotification) {
+    setTerminalNotifications((current) => {
+      const now = Date.now();
+      return current.map((item) => (
+        item.id === notification.id && !item.read ? { ...item, read: true, readAt: now } : item
+      ));
+    });
     setNotificationJumpTarget({
       projectId: notification.projectId,
       panelId: notification.panelId,
@@ -335,6 +341,8 @@ function moveProjectInOrder(order: string[], projects: Project[], projectId: str
 function displayDeviceName(value: string) {
   const raw = value.trim();
   if (!raw) return "";
+  const withoutAddress = raw.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  if (withoutAddress) return withoutAddress;
   const withoutProtocol = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
   const host = withoutProtocol.split(/[/:?#]/, 1)[0] || withoutProtocol;
   return host.split(".")[0] || host || raw;

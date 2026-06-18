@@ -20,7 +20,10 @@ export interface StudioTab {
   filePath?: string;
   fileKind?: "text" | "image" | "unknown";
   agentSessionId?: string;
+  agentSessionName?: string;
   agentKind?: string;
+  agentRuntime?: "acpx" | "direct_acp";
+  agentModelId?: string;
 }
 
 export interface TerminalPanel {
@@ -85,16 +88,24 @@ export function createFileViewerTab(path: string, kind: "text" | "image" | "unkn
   };
 }
 
-export function createAgentChatTab(agentKind: string, agentSessionId?: string, title?: string): StudioTab {
+export function createAgentChatTab(
+  agentKind: string,
+  agentSessionId?: string,
+  title?: string,
+  agentRuntime: StudioTab["agentRuntime"] = "acpx"
+): StudioTab {
+  const runtimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : "Agent";
   return {
     id: makeId("chat"),
     kind: "agent_chat",
-    title: title || `Agent对话 (${agentKind})`,
+    title: title || `${runtimeLabel}对话 (${agentKind})`,
     termType: "bash",
     activeCommand: "",
     titleSource: "initial",
     agentKind,
     agentSessionId,
+    agentRuntime,
+    agentModelId: undefined,
   };
 }
 
@@ -297,7 +308,10 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): StudioTab | nul
     filePath,
     fileKind: tab.fileKind === "text" || tab.fileKind === "image" ? tab.fileKind : "unknown",
     agentSessionId: typeof tab.agentSessionId === "string" ? tab.agentSessionId : undefined,
+    agentSessionName: typeof tab.agentSessionName === "string" ? tab.agentSessionName : undefined,
     agentKind: typeof tab.agentKind === "string" ? tab.agentKind : undefined,
+    agentRuntime: tab.agentRuntime === "direct_acp" ? "direct_acp" : "acpx",
+    agentModelId: typeof tab.agentModelId === "string" ? tab.agentModelId : undefined,
   };
 }
 

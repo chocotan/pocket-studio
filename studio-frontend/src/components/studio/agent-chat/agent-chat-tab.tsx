@@ -1,105 +1,54 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import {
   Send,
   Cpu,
-  CheckCircle2,
-  XCircle,
   AlertCircle,
-  ChevronDown,
   StopCircle,
   ArrowRight,
-  Terminal,
-  FileText,
-  FileEdit,
-  FilePlus,
-  Wrench,
-  Search,
-  Circle,
-  CircleDot,
-  ListChecks
+  X
 } from "lucide-react";
 import { OpenCode, Codex, ClaudeCode, Antigravity, KiloCode } from "@lobehub/icons";
-import { getJSON, postJSON, eventStreamURL } from "@/lib/api";
-import { makeId } from "../terminal-types";
+import { websocketURL } from "@/lib/api";
+import { agentNameForRuntime, makeId } from "../terminal-types";
 import { type StudioTab } from "../studio-layout";
 import type { Project } from "../studio-dashboard";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
+import type { AgentConfigOption } from "@/lib/agent-protocol";
 import {
-  classifyAgentProtocolEvent,
-  buildAgentToolCallItems,
-  type AgentToolCallItem
-} from "@/lib/agent-protocol";
+  configOptionsFromTaskEvents,
+  getMetadata,
+  getUnixTimestamp,
+  isTerminalTaskEvent,
+  makeLocalUserPromptEvent,
+  mergeTaskEvents,
+  modelListFromTaskEvents,
+} from "./event-model";
+import {
+  applyTaskEventToMessageState,
+  buildMessageStateFromEvents,
+  createMessageState,
+} from "./message-reducer";
+import {
+  CollapsibleSection,
+  Markdown,
+  SubagentEntry,
+  TodoWidget,
+  ToolCallCard,
+  ToolCallGroup,
+  WorkingStatus,
+  extractSubagent,
+  extractTodos,
+} from "./chat-widgets";
+import type { AgentRunStatus, ChatMessage, TaskEvent } from "./types";
 
-function getUnixTimestamp(): number {
-  return Math.floor(Date.now() / 1000);
-}
-
-function checkSessionEnded(evt: TaskEvent): boolean {
-  if (!evt || !evt.raw) return false;
-  const rawStr = typeof evt.raw === "object" ? JSON.stringify(evt.raw) : String(evt.raw);
-  return rawStr.includes('"stopReason"');
-}
-
-function getMetadata(raw: any): Record<string, any> | undefined {
-  if (!raw) return undefined;
-  if (typeof raw === "object") return raw;
-  if (typeof raw === "string") {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-function Markdown({ content }: { content: string }) {
-  return (
-    <div className="markdown-body text-xs leading-relaxed break-words text-slate-800 dark:text-slate-200 [&_p]:mb-1.5 [&_ul]:list-disc [&_ul]:pl-4 [&_ul]:mb-1.5 [&_ol]:list-decimal [&_ol]:pl-4 [&_ol]:mb-1.5 [&_li]:leading-relaxed [&_blockquote]:border-l-2 [&_blockquote]:border-slate-300 [&_blockquote]:pl-2 [&_blockquote]:text-slate-500 [&_h1]:text-sm [&_h1]:font-bold [&_h1]:mb-1.5 [&_h2]:text-[13px] [&_h2]:font-bold [&_h2]:mb-1 [&_h3]:text-xs [&_h3]:font-semibold [&_h3]:mb-1 [&_a]:text-indigo-600 [&_a]:underline [&_table]:w-full [&_table]:text-[11px] [&_th]:border [&_th]:border-slate-300 [&_th]:px-1.5 [&_th]:py-0.5 [&_th]:font-semibold [&_td]:border [&_td]:border-slate-300 [&_td]:px-1.5 [&_td]:py-0.5 [&_hr]:border-slate-300 [&_hr]:my-2">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
-        components={{
-          pre: ({ children }) => (
-            <pre className="bg-slate-950 text-slate-100 p-2.5 rounded-lg overflow-x-auto font-mono text-[10.5px] border border-slate-800 my-1.5 select-text">
-              {children}
-            </pre>
-          ),
-          code: ({ className, children, ...props }: any) => {
-            const isBlock = /language-/.test(className || "");
-            if (isBlock) return <code className={className} {...props}>{children}</code>;
-            return <code className="bg-slate-100 dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 px-1 py-0.5 rounded font-mono text-[10.5px] select-text" {...props}>{children}</code>;
-          }
-        }}
-      >
-        {content}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-interface TaskEvent {
-  task_id: string;
-  event_id: string;
-  event_type: string;
-  source: string;
-  sequence: number;
-  timestamp: number;
-  data?: string;
-  raw?: string;
-}
-
-interface ChatMessage {
+type AgentEnvelope = {
   id: string;
-  seq: number;
-  kind: "user_prompt" | "assistant_message" | "thought" | "tool_call";
-  content: string;
-  createdAt: string;
-  durationMs?: number;
-  toolCall?: AgentToolCallItem;
-}
+  type: string;
+  version: number;
+  timestamp: number;
+  from: string;
+  to: { device_id: string };
+  payload: Record<string, unknown>;
+};
 
 interface AgentChatTabProps {
   project: Project;
@@ -112,22 +61,78 @@ interface AgentChatTabProps {
 export function AgentChatTab({
   project,
   tab,
-  active,
   workspacePath,
   onUpdateTabProperties
 }: AgentChatTabProps) {
   const [events, setEvents] = useState<TaskEvent[]>([]);
+  const [messageState, setMessageState] = useState(() => createMessageState());
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [running, setRunning] = useState(false);
+  const [runStatus, setRunStatus] = useState<AgentRunStatus>("idle");
   const [error, setError] = useState("");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [runStartedAtMs, setRunStartedAtMs] = useState(() => Date.now());
+  const [modelUpdating, setModelUpdating] = useState(false);
+  const [customModelInput, setCustomModelInput] = useState("");
+  const dismissedErrorRef = useRef("");
   const eventsEndRef = useRef<HTMLDivElement>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const socketTaskIdRef = useRef("");
+  const onUpdateTabPropertiesRef = useRef(onUpdateTabProperties);
+  const pendingEnvelopesRef = useRef<AgentEnvelope[]>([]);
+  const sessionCreateSentRef = useRef<Set<string>>(new Set());
+  const ensureSessionRef = useRef<Promise<string> | null>(null);
+  const queuedPromptsRef = useRef<string[]>([]);
+  const dispatchingQueuedRef = useRef(false);
+  const dispatchPromptRef = useRef<(promptText: string) => Promise<void>>(async () => {});
+  const lastEventSeqRef = useRef(0);
+  const awaitingNewTurnRef = useRef(false);
+  const pendingSessionCreatesRef = useRef<Set<string>>(new Set());
+  const pendingSessionResolveRef = useRef<((sessionId: string) => void) | null>(null);
+  const pendingSessionRejectRef = useRef<((error: Error) => void) | null>(null);
+  const [queuedPrompts, setQueuedPrompts] = useState<string[]>([]);
 
   const sessionId = tab.agentSessionId;
+  const sessionName = tab.agentSessionName || sessionId;
   const agentKind = tab.agentKind || "opencode";
+  const agentRuntime = tab.agentRuntime || "acpx";
+  const agentRuntimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : "Agent";
+  const supportsModelSelection = agentRuntime === "direct_acp" || agentRuntime === "acpx";
+
+  useEffect(() => {
+    onUpdateTabPropertiesRef.current = onUpdateTabProperties;
+  }, [onUpdateTabProperties]);
+
+  const showError = useCallback((message: string) => {
+    const text = message.trim();
+    if (!text || dismissedErrorRef.current === text) return;
+    setError(text);
+  }, []);
+
+  const clearErrorForNewAction = useCallback(() => {
+    dismissedErrorRef.current = "";
+    setError("");
+  }, []);
+
+  const dismissError = useCallback(() => {
+    dismissedErrorRef.current = error.trim();
+    setError("");
+  }, [error]);
+
+  const buildSessionCreateEnvelope = useCallback((activeSessionId: string, activeSessionName: string) => ({
+    id: makeId("msg"),
+    type: "session.create",
+    version: 1,
+    timestamp: getUnixTimestamp(),
+    from: "web",
+    to: { device_id: project.device_id },
+    payload: {
+      task_id: activeSessionId,
+      workspace_path: workspacePath,
+      agent: agentNameForRuntime(agentKind, agentRuntime),
+      agent_runtime: agentRuntime,
+      session_name: activeSessionName
+    }
+  }), [agentKind, agentRuntime, project.device_id, workspacePath]);
 
   const agentLogo = useMemo(() => {
     switch (agentKind) {
@@ -146,95 +151,123 @@ export function AgentChatTab({
     }
   }, [agentKind]);
 
-  // Load history when sessionId is set or component mounts
   useEffect(() => {
     if (!sessionId) {
       setEvents([]);
-      setRunning(false);
+      setMessageState(createMessageState());
+      setRunStatus("idle");
+      lastEventSeqRef.current = 0;
+      socketTaskIdRef.current = "";
+      pendingEnvelopesRef.current = [];
+      if (socketRef.current) {
+        socketRef.current.close();
+        socketRef.current = null;
+      }
       return;
     }
 
-    let cancelled = false;
-    setLoading(true);
+    let closed = false;
+    const socket = new WebSocket(websocketURL("/ws/acpx", new URLSearchParams({ task_id: sessionId })));
+    socketRef.current = socket;
+    socketTaskIdRef.current = sessionId;
     setError("");
 
-    getJSON<{ events: { payload: TaskEvent }[] }>(`/api/acpx/events?task_id=${sessionId}&limit=0`)
-      .then((res) => {
-        if (cancelled) return;
-        const historyEvents = (res.events || []).map((env) => env.payload as TaskEvent);
-        setEvents(historyEvents);
-
-        // Check if session is currently active
-        // If the last event is not complete or task is running, set running to true
-        const hasSessionEnded = historyEvents.some(checkSessionEnded);
-        setRunning(!hasSessionEnded);
-      })
-      .catch((err) => {
-        if (!cancelled) setError("加载对话历史失败: " + err.message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId]);
-
-  // Handle EventSource connection for ongoing stream
-  useEffect(() => {
-    if (!sessionId || !running || !active) {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
+    socket.onopen = () => {
+      if (closed) return;
+      if (supportsModelSelection && pendingSessionCreatesRef.current.has(sessionId)) {
+        pendingSessionCreatesRef.current.delete(sessionId);
+        sessionCreateSentRef.current.add(sessionId);
+        socket.send(JSON.stringify(buildSessionCreateEnvelope(sessionId, sessionName || sessionId)));
       }
-      return;
-    }
+      const pending = pendingEnvelopesRef.current;
+      pendingEnvelopesRef.current = [];
+      for (const envelope of pending) {
+        socket.send(JSON.stringify(envelope));
+      }
+    };
 
-    const lastSeq = events.length > 0 ? Math.max(...events.map((e) => e.sequence)) : 0;
-    const url = eventStreamURL("/api/acpx/events", new URLSearchParams({
-      task_id: sessionId,
-      stream: "true",
-      after: String(lastSeq)
-    }));
-
-    const es = new EventSource(url);
-    eventSourceRef.current = es;
-
-    es.addEventListener("task.event", (message: MessageEvent) => {
+    socket.onmessage = (message) => {
       try {
-        const envelope = JSON.parse(message.data);
-        const taskEvent = envelope.payload as TaskEvent;
-
-        setEvents((prev) => {
-          if (prev.some((e) => e.event_id === taskEvent.event_id)) {
-            return prev;
+        const envelope = JSON.parse(String(message.data));
+        if (envelope?.type === "task.event") {
+          const taskEvent = envelope.payload as TaskEvent;
+          if (!taskEvent || taskEvent.task_id !== sessionId) return;
+          if (taskEvent.event_type === "acpx.session") {
+            const meta = getMetadata(taskEvent.data) || {};
+            const nextName = String(meta.name || meta.agentSessionId || sessionName || "").trim();
+            if (pendingSessionResolveRef.current) {
+              const resolveSession = pendingSessionResolveRef.current;
+              pendingSessionResolveRef.current = null;
+              pendingSessionRejectRef.current = null;
+              onUpdateTabPropertiesRef.current(tab.id, {
+                agentSessionName: nextName || sessionName,
+              });
+              resolveSession(sessionId);
+              return;
+            }
+            if (nextName && nextName !== sessionName) {
+              onUpdateTabPropertiesRef.current(tab.id, {
+                agentSessionName: nextName || sessionName,
+              });
+              return;
+            }
           }
-          const next = [...prev, taskEvent];
-
-          // Check if agent completed its execution
-          if (checkSessionEnded(taskEvent)) {
-            setRunning(false);
+          if (taskEvent.sequence > lastEventSeqRef.current) {
+            lastEventSeqRef.current = taskEvent.sequence;
           }
-          return next;
-        });
+          setEvents((prev) => {
+            const base = taskEvent.event_type === "user.prompt"
+              ? prev.filter((event) => !event.event_id.startsWith("local-user.prompt-"))
+              : prev;
+            if (base.some((event) => event.event_id === taskEvent.event_id)) {
+              return base;
+            }
+            return mergeTaskEvents(base, [taskEvent]);
+          });
+          setMessageState((prev) => applyTaskEventToMessageState(prev, taskEvent));
+          if (isTerminalTaskEvent(taskEvent)) {
+            setRunStatus("idle");
+            awaitingNewTurnRef.current = false;
+            if (taskEvent.event_type === "task.failed") {
+              const meta = getMetadata(taskEvent.data) || {};
+              showError(String(meta.message || meta.error || "任务执行失败"));
+            }
+          } else if (taskEvent.event_type === "task.started") {
+            setRunStatus("running");
+            awaitingNewTurnRef.current = false;
+          }
+        } else if (envelope?.type === "server.error") {
+          const payload = envelope.payload || {};
+          const message = String(payload.message || payload.code || "Agent 通信失败");
+          pendingSessionRejectRef.current?.(new Error(message));
+          pendingSessionResolveRef.current = null;
+          pendingSessionRejectRef.current = null;
+          showError(message);
+          setRunStatus("idle");
+          setModelUpdating(false);
+        }
       } catch (err) {
-        console.error("SSE parse error:", err);
+        console.error("ACPX websocket parse error:", err);
       }
-    });
+    };
 
-    es.onerror = () => {
-      // Auto-reconnect will be handled by EventSource naturally
-      console.warn("EventSource encountered an error, reconnecting...");
+    socket.onerror = () => {
+      if (!closed) showError("Agent WebSocket 连接失败");
+    };
+    socket.onclose = () => {
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
     };
 
     return () => {
-      es.close();
-      if (eventSourceRef.current === es) {
-        eventSourceRef.current = null;
+      closed = true;
+      if (socketRef.current === socket) {
+        socketRef.current = null;
       }
+      socket.close();
     };
-  }, [sessionId, running, active, events.length]);
+  }, [buildSessionCreateEnvelope, sessionId, sessionName, showError, supportsModelSelection, tab.id]);
 
   // Auto scroll to bottom
   useEffect(() => {
@@ -242,181 +275,223 @@ export function AgentChatTab({
   }, [events.length]);
 
   useEffect(() => {
-    if (!running) return;
+    if (runStatus === "idle") return;
     setNowMs(Date.now());
     const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [running]);
+  }, [runStatus]);
 
-  const messages = useMemo<ChatMessage[]>(() => {
-    if (events.length === 0) return [];
+  useEffect(() => {
+    setMessageState(buildMessageStateFromEvents(events, sessionId || ""));
+  }, [sessionId]);
 
-    const sorted = [...events].sort((a, b) => Number(a.sequence) - Number(b.sequence));
-    const list: ChatMessage[] = [];
-
-    const agentEvents = sorted.map((evt) => {
-      const dataPayload = getMetadata(evt.data);
-      const rawMetadata = getMetadata(evt.raw);
-      return { evt, dataPayload, rawMetadata };
-    });
-
-    const toolCallEvents = agentEvents
-      .filter(({ evt }) =>
-        evt.event_type === "tool.call" ||
-        evt.event_type === "tool.output" ||
-        evt.event_type === "permission.request"
-      )
-      .map(({ evt, rawMetadata }) => ({
-        id: evt.event_id,
-        seq: Number(evt.sequence),
-        kind: "tool_call" as const,
-        content: "",
-        createdAt: new Date(evt.timestamp * 1000).toISOString(),
-        metadata: rawMetadata
-      }));
-
-    const toolCallItems = buildAgentToolCallItems(toolCallEvents);
-    const toolCallById = new Map(toolCallItems.map((tc) => [tc.id, tc]));
-    const emittedToolIds = new Set<string>();
-    let lastActivityStartedMs = sorted[0]?.timestamp ? sorted[0].timestamp * 1000 : Date.now();
-
-    for (const { evt, dataPayload, rawMetadata } of agentEvents) {
-      const createdAt = new Date(evt.timestamp * 1000).toISOString();
-      const seq = Number(evt.sequence);
-
-      switch (evt.event_type) {
-        case "task.started": {
-          lastActivityStartedMs = evt.timestamp * 1000;
-          break;
-        }
-        case "user.prompt": {
-          let prompt = "";
-          if (dataPayload) {
-            prompt = String(dataPayload.prompt || "");
-          } else if (typeof evt.data === "string") {
-            try {
-              prompt = JSON.parse(evt.data).prompt || evt.data;
-            } catch {
-              prompt = evt.data;
-            }
-          }
-          if (prompt) {
-            list.push({ id: evt.event_id, seq, kind: "user_prompt", content: prompt, createdAt });
-            lastActivityStartedMs = evt.timestamp * 1000;
-          }
-          break;
-        }
-        case "assistant.message": {
-          const text = String(dataPayload?.text || "");
-          if (text) {
-            list.push({ id: evt.event_id, seq, kind: "assistant_message", content: text, createdAt });
-          }
-          break;
-        }
-        case "assistant.thinking": {
-          const text = String(dataPayload?.text || "");
-          if (text) {
-            list.push({
-              id: evt.event_id,
-              seq,
-              kind: "thought",
-              content: text,
-              createdAt,
-              durationMs: evt.timestamp * 1000 - lastActivityStartedMs
-            });
-            lastActivityStartedMs = evt.timestamp * 1000;
-          }
-          break;
-        }
-        case "tool.call":
-        case "tool.output":
-        case "permission.request": {
-          // Multiple tool.* events can refer to the same tool call (call -> output).
-          // buildAgentToolCallItems merges them by toolCallId; render once at the
-          // first occurrence to preserve chronological position.
-          const classified = rawMetadata ? classifyAgentProtocolEvent(rawMetadata) : null;
-          let toolId = evt.event_id;
-          if (classified && classified.metadata) {
-            const update = (classified.metadata as Record<string, unknown>);
-            const params = update.params as Record<string, unknown> | undefined;
-            const innerUpdate = (params?.update ?? params?.toolCall) as Record<string, unknown> | undefined;
-            const idCandidate = innerUpdate?.toolCallId ?? innerUpdate?.tool_call_id ?? innerUpdate?.id;
-            if (typeof idCandidate === "string" && idCandidate) toolId = idCandidate;
-          }
-          const tc = toolCallById.get(toolId) ?? toolCallById.get(evt.event_id);
-          if (tc && !emittedToolIds.has(tc.id)) {
-            emittedToolIds.add(tc.id);
-            list.push({
-              id: `tc-${tc.id}`,
-              seq,
-              kind: "tool_call",
-              content: tc.title,
-              createdAt,
-              toolCall: tc
-            });
-          }
-          break;
-        }
-        default:
-          break;
+  useEffect(() => {
+    if (runStatus === "idle") return;
+    let lastStarted = 0;
+    let lastTerminal = 0;
+    const runStartedSec = Math.floor(runStartedAtMs / 1000);
+    for (const event of events) {
+      const ts = event.timestamp || 0;
+      if (ts > 0 && ts < runStartedSec) continue;
+      if (event.event_type === "task.started") {
+        lastStarted = Math.max(lastStarted, ts);
+      } else if (isTerminalTaskEvent(event)) {
+        lastTerminal = Math.max(lastTerminal, ts);
       }
     }
+    if (lastTerminal >= lastStarted && lastTerminal > 0) {
+      setRunStatus("idle");
+      awaitingNewTurnRef.current = false;
+    }
+  }, [events, runStartedAtMs, runStatus]);
 
-    return list;
+  const messages = messageState.messages;
+
+  const modelList = useMemo(() => {
+    return modelListFromTaskEvents(events);
   }, [events]);
+  const configOptions = useMemo(() => {
+    return configOptionsFromTaskEvents(events);
+  }, [events]);
+  const modelConfigOption = configOptions.find((option) =>
+    option.category === "model" || option.id === "model"
+  );
 
-  const currentRunStartedMs = useMemo(() => {
-    for (let i = events.length - 1; i >= 0; i--) {
-      const evt = events[i];
-      if (evt.event_type === "user.prompt" || evt.event_type === "task.started") {
-        return evt.timestamp * 1000;
+  const getStoredModelId = useCallback(() => {
+    if (typeof window !== "undefined" && window.localStorage) {
+      return window.localStorage.getItem(`pocket-studio-last-model::${agentRuntime}::${agentKind}`) || "";
+    }
+    return "";
+  }, [agentRuntime, agentKind]);
+
+  const selectedModelId = tab.agentModelId || getStoredModelId() || modelConfigOption?.currentValue || modelList.currentModelId || "";
+  const selectedModel = modelList.models.find((model) => model.id === selectedModelId) || modelList.models[0];
+  const selectedModelIdRef = useRef(selectedModelId);
+  const showAgentModelControl = supportsModelSelection;
+  const showDirectACPConfigOptions = agentRuntime === "direct_acp" && configOptions.length > 0;
+  const isRunning = runStatus !== "idle";
+  const showWorking = isRunning;
+
+  useEffect(() => {
+    selectedModelIdRef.current = selectedModelId;
+  }, [selectedModelId]);
+
+  useEffect(() => {
+    if (!tab.agentModelId) {
+      const stored = getStoredModelId();
+      if (stored) {
+        onUpdateTabPropertiesRef.current(tab.id, { agentModelId: stored });
       }
     }
-    return runStartedAtMs;
-  }, [events, runStartedAtMs]);
+  }, [tab.id, tab.agentModelId, getStoredModelId]);
 
-  async function startConversation(promptText: string) {
-    if (!promptText.trim() || loading || running) return;
+  const sendAgentEnvelope = useCallback((sessionTaskId: string, envelope: AgentEnvelope) => {
+    const socket = socketRef.current;
+    const logInfo = {
+      taskId: sessionTaskId,
+      envelopeType: envelope.type,
+      socketExists: !!socket,
+      socketTaskId: socketTaskIdRef.current,
+      readyState: socket ? socket.readyState : "N/A"
+    };
+    if (typeof window !== "undefined") {
+      if (!(window as any).__debug_log) (window as any).__debug_log = [];
+      (window as any).__debug_log.push(logInfo);
+    }
+    console.log("[DEBUG sendAgentEnvelope]", logInfo);
+    if (
+      socket &&
+      socketTaskIdRef.current === sessionTaskId &&
+      socket.readyState === WebSocket.OPEN
+    ) {
+      if (typeof window !== "undefined") {
+        (window as any).__debug_log.push("Sending directly");
+      }
+      socket.send(JSON.stringify(envelope));
+      return;
+    }
+    if (typeof window !== "undefined") {
+      (window as any).__debug_log.push("Pushing to pending. Pending size: " + pendingEnvelopesRef.current.length);
+    }
+    pendingEnvelopesRef.current.push(envelope);
+  }, []);
 
-    setError("");
-    setLoading(true);
+  const ensureSession = useCallback(async () => {
+    if (sessionId) return sessionId;
+    if (ensureSessionRef.current) return ensureSessionRef.current;
 
-    let activeSessionId = sessionId;
+    const activeSessionName = makeId("acpx");
+    const promise = new Promise<string>((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        if (pendingSessionRejectRef.current === reject) {
+          pendingSessionResolveRef.current = null;
+          pendingSessionRejectRef.current = null;
+          reject(new Error("创建 ACPX 会话超时"));
+        }
+      }, 15_000);
+      pendingSessionResolveRef.current = resolve;
+      pendingSessionRejectRef.current = (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      };
+      pendingSessionResolveRef.current = (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      };
+      onUpdateTabPropertiesRef.current(tab.id, {
+        agentSessionId: activeSessionName,
+        agentSessionName: activeSessionName,
+        title: `${agentRuntimeLabel}对话 (${agentKind})`
+      });
+      pendingSessionCreatesRef.current.add(activeSessionName);
+    });
+    ensureSessionRef.current = promise;
+    try {
+      return await promise;
+    } finally {
+      if (ensureSessionRef.current === promise) {
+        ensureSessionRef.current = null;
+        pendingSessionResolveRef.current = null;
+        pendingSessionRejectRef.current = null;
+      }
+    }
+  }, [
+    agentKind,
+    agentRuntimeLabel,
+    sessionId,
+    tab.id
+  ]);
+
+  useEffect(() => {
+    if (sessionId || !supportsModelSelection) return;
+    let cancelled = false;
+    clearErrorForNewAction();
+    ensureSession()
+      .catch((err) => {
+        if (!cancelled) showError("加载模型列表失败: " + (err instanceof Error ? err.message : String(err)));
+      })
+      .finally(() => {
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clearErrorForNewAction, ensureSession, sessionId, showError, supportsModelSelection]);
+
+  useEffect(() => {
+    if (!showAgentModelControl) return;
+    setCustomModelInput((prev) => prev || selectedModelId);
+  }, [selectedModelId, showAgentModelControl]);
+
+  const enqueuePrompt = useCallback((promptText: string) => {
+    const prompt = promptText.trim();
+    if (!prompt) return;
+    setQueuedPrompts((prev) => {
+      const next = [...prev, prompt];
+      queuedPromptsRef.current = next;
+      return next;
+    });
+    setInput("");
+  }, []);
+
+  const popQueuedPrompt = useCallback(() => {
+    const [prompt = "", ...next] = queuedPromptsRef.current;
+    queuedPromptsRef.current = next;
+    setQueuedPrompts(next);
+    return prompt;
+  }, []);
+
+  async function dispatchPrompt(promptText: string) {
+    clearErrorForNewAction();
+    setRunStatus("sending");
+    setRunStartedAtMs(Date.now());
+    // Mark that we are awaiting the new turn's task.started event.
+    // While this flag is true, late-arriving terminal events from the
+    // previous turn will be ignored.
+    awaitingNewTurnRef.current = true;
 
     try {
-      if (!activeSessionId) {
-        // Create new session ID
-        activeSessionId = makeId("acpx");
-        
-        // Dispatch session.create
-        const createEnv = {
-          id: makeId("msg"),
-          type: "session.create",
-          version: 1,
-          timestamp: getUnixTimestamp(),
-          from: "web",
-          to: { device_id: project.device_id },
-          payload: {
-            task_id: activeSessionId,
-            workspace_path: workspacePath,
-            agent: agentKind === "kilo" ? "kilocode" : agentKind,
-            session_name: activeSessionId
-          }
-        };
+      const activeSessionId = await ensureSession();
+      const localUserEvent = makeLocalUserPromptEvent(activeSessionId, promptText);
+      setEvents((prev) => mergeTaskEvents(prev, [localUserEvent]));
+      setMessageState((prev) => applyTaskEventToMessageState(prev, localUserEvent));
 
-        const createRes = await postJSON<{ success: boolean }>("/api/acpx/command", createEnv);
-        if (!createRes.success) {
-          throw new Error("创建 Agent 会话失败");
-        }
-
-        // Update layout state
-        onUpdateTabProperties(tab.id, {
-          agentSessionId: activeSessionId,
-          title: `Agent对话 (${agentKind})`
-        });
+      if (selectedModelIdRef.current && typeof window !== "undefined" && window.localStorage) {
+        window.localStorage.setItem(`pocket-studio-last-model::${agentRuntime}::${agentKind}`, selectedModelIdRef.current);
       }
 
       // Dispatch prompt task.dispatch
+      const dispatchPayload: Record<string, unknown> = {
+        task_id: activeSessionId,
+        workspace_path: workspacePath,
+        agent: agentNameForRuntime(agentKind, agentRuntime),
+        agent_runtime: agentRuntime,
+        prompt: promptText,
+        resume_session_id: activeSessionId,
+        model_id: messages.length === 0 ? selectedModelIdRef.current : ""
+      };
+      if (sessionName) {
+        dispatchPayload.session_name = sessionName;
+      }
       const dispatchEnv = {
         id: makeId("msg"),
         type: "task.dispatch",
@@ -424,35 +499,49 @@ export function AgentChatTab({
         timestamp: getUnixTimestamp(),
         from: "web",
         to: { device_id: project.device_id },
-        payload: {
-          task_id: activeSessionId,
-          workspace_path: workspacePath,
-          agent: agentKind === "kilo" ? "kilocode" : agentKind,
-          prompt: promptText,
-          resume_session_id: activeSessionId,
-          session_name: activeSessionId
-        }
+        payload: dispatchPayload
       };
 
-      const dispatchRes = await postJSON<{ success: boolean }>("/api/acpx/command", dispatchEnv);
-      if (!dispatchRes.success) {
-        throw new Error("启动 Agent 运行失败");
-      }
+      sendAgentEnvelope(activeSessionId, dispatchEnv);
 
-      setRunStartedAtMs(Date.now());
       setInput("");
-      setRunning(true);
+      setRunStatus("running");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "执行出错");
-    } finally {
-      setLoading(false);
+      showError(err instanceof Error ? err.message : "执行出错");
+      setRunStatus("idle");
     }
   }
 
+  useEffect(() => {
+    dispatchPromptRef.current = dispatchPrompt;
+  });
+
+  async function startConversation(promptText: string) {
+    const prompt = promptText.trim();
+    if (!prompt) return;
+    if (isRunning) {
+      enqueuePrompt(prompt);
+      return;
+    }
+    await dispatchPrompt(prompt);
+  }
+
+  useEffect(() => {
+    if (isRunning || queuedPrompts.length === 0 || dispatchingQueuedRef.current) return;
+    const prompt = popQueuedPrompt();
+    if (!prompt) return;
+    dispatchingQueuedRef.current = true;
+    dispatchPromptRef.current(prompt).finally(() => {
+      dispatchingQueuedRef.current = false;
+    });
+  }, [isRunning, popQueuedPrompt, queuedPrompts.length]);
+
   async function cancelRun() {
-    if (!sessionId || !running) return;
+    if (!sessionId || !isRunning) return;
 
     try {
+      queuedPromptsRef.current = [];
+      setQueuedPrompts([]);
       const stopEnv = {
         id: makeId("msg"),
         type: "task.stop",
@@ -465,17 +554,92 @@ export function AgentChatTab({
           reason: "user_cancel"
         }
       };
-      await postJSON("/api/acpx/command", stopEnv);
-      setRunning(false);
+      sendAgentEnvelope(sessionId, stopEnv);
+      setRunStatus("idle");
     } catch (err) {
-      setError("停止 Agent 运行失败: " + (err instanceof Error ? err.message : String(err)));
+      showError("停止 Agent 运行失败: " + (err instanceof Error ? err.message : String(err)));
+      setRunStatus("idle");
+    }
+  }
+
+  async function setModel(modelId: string) {
+    modelId = modelId.trim();
+    if (!modelId || modelUpdating) return;
+    if (modelConfigOption) {
+      await setConfigOption(modelConfigOption, modelId);
+      return;
+    }
+    if (typeof window !== "undefined" && window.localStorage) {
+      window.localStorage.setItem(`pocket-studio-last-model::${agentRuntime}::${agentKind}`, modelId);
+    }
+    if (modelId === selectedModelId) {
+      onUpdateTabPropertiesRef.current(tab.id, { agentModelId: modelId });
+      return;
+    }
+    setModelUpdating(true);
+    clearErrorForNewAction();
+    try {
+      const activeSessionId = await ensureSession();
+      const env = {
+        id: makeId("msg"),
+        type: "task.set_model",
+        version: 1,
+        timestamp: getUnixTimestamp(),
+        from: "web",
+        to: { device_id: project.device_id },
+        payload: {
+          task_id: activeSessionId,
+          model_id: modelId
+        }
+      };
+      sendAgentEnvelope(activeSessionId, env);
+      onUpdateTabPropertiesRef.current(tab.id, { agentModelId: modelId });
+    } catch (err) {
+      showError("切换模型失败: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setModelUpdating(false);
+    }
+  }
+
+  async function setConfigOption(option: AgentConfigOption, value: string) {
+    value = value.trim();
+    if (!option.id || !value || modelUpdating) return;
+    const isModel = option.category === "model" || option.id === "model";
+    setModelUpdating(true);
+    clearErrorForNewAction();
+    try {
+      const activeSessionId = await ensureSession();
+      const env = {
+        id: makeId("msg"),
+        type: "task.set_config_option",
+        version: 1,
+        timestamp: getUnixTimestamp(),
+        from: "web",
+        to: { device_id: project.device_id },
+        payload: {
+          task_id: activeSessionId,
+          config_id: option.id,
+          value
+        }
+      };
+      sendAgentEnvelope(activeSessionId, env);
+      if (isModel) {
+        onUpdateTabPropertiesRef.current(tab.id, { agentModelId: value });
+        if (typeof window !== "undefined" && window.localStorage) {
+          window.localStorage.setItem(`pocket-studio-last-model::${agentRuntime}::${agentKind}`, value);
+        }
+      }
+    } catch (err) {
+      showError("切换配置失败: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setModelUpdating(false);
     }
   }
 
   const suggestions = [
-    { label: "分析项目结构", text: "帮我分析一下这个项目的文件结构和设计模块" },
-    { label: "代码设计解释", text: "解释一下这个项目里有关状态管理和 layout 切分的设计" },
-    { label: "寻找潜在漏洞", text: "检查项目里的 API 请求和异常处理，看看有没有什么潜在漏洞" }
+    { label: "今天上海天气怎么样", text: "今天上海天气怎么样" },
+    { label: "来点马斯克新闻", text: "来点马斯克新闻" },
+    { label: "磁盘剩余空间多少", text: "磁盘剩余空间多少" }
   ];
 
   return (
@@ -484,23 +648,32 @@ export function AgentChatTab({
       {error && (
         <div className="mx-3 mt-2 rounded-lg border border-red-200/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-600 dark:text-red-400 flex items-start gap-1.5">
           <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-          <span>{error}</span>
+          <span className="min-w-0 flex-1">{error}</span>
+          <button
+            type="button"
+            onClick={dismissError}
+            className="-mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-red-600/70 hover:bg-red-500/10 hover:text-red-700 dark:text-red-400/75 dark:hover:text-red-300"
+            aria-label="关闭异常信息"
+            title="关闭"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
 
       {/* Main chat flow */}
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4 select-text">
-        {!sessionId && events.length === 0 ? (
+      <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2 select-text">
+        {!showWorking && messages.length === 0 ? (
           /* Landing Screen */
           <div className="h-full flex flex-col items-center justify-center p-6 text-center max-w-lg mx-auto select-none">
-            <div className="h-12 w-12 rounded-2xl bg-indigo-50 border border-indigo-150/50 flex items-center justify-center mb-4 dark:bg-indigo-950/20 dark:border-indigo-900/35 animate-fade-in shadow-sm">
-              <span className="text-indigo-650 dark:text-indigo-400">{agentLogo}</span>
+            <div className="h-12 w-12 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center mb-4 animate-fade-in shadow-sm">
+              <span className="text-primary">{agentLogo}</span>
             </div>
-            <h2 className="text-sm font-bold text-slate-800 dark:text-slate-100">
-              与 {agentKind} 开始新的智能对话
+            <h2 className="text-sm font-bold text-foreground">
+              与 {agentRuntimeLabel} {agentKind} 开始新的智能对话
             </h2>
-            <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed max-w-[280px] dark:text-slate-500">
-              基于 ACPX 协议环境，随时在当前工作区为您实现深度代码阅读、分析与命令执行。
+            <p className="text-[11px] text-muted-foreground mt-1.5 leading-relaxed max-w-[280px]">
+              基于 ACPX 协议环境，随时在当前工作区为您实现深度 code 阅读、分析与命令执行。
             </p>
 
             <div className="mt-6 w-full space-y-2 select-none">
@@ -511,17 +684,17 @@ export function AgentChatTab({
                     setInput(item.text);
                     startConversation(item.text);
                   }}
-                  className="w-full p-2.5 rounded-xl border border-border/80 bg-card hover:bg-slate-50/50 dark:hover:bg-slate-900/40 text-left text-[11px] text-slate-600 dark:text-slate-350 transition-all flex items-center justify-between group cursor-pointer shadow-sm"
+                  className="w-full p-2.5 rounded-xl border border-border bg-card hover:bg-muted/40 text-left text-[11px] text-muted-foreground transition-all flex items-center justify-between group cursor-pointer shadow-sm"
                 >
-                  <span className="truncate pr-4 font-medium">{item.label}</span>
-                  <ArrowRight className="h-3.5 w-3.5 text-slate-400 opacity-0 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all" />
+                  <span className="truncate pr-4 font-medium text-foreground/80">{item.label}</span>
+                  <ArrowRight className="h-3.5 w-3.5 text-muted-foreground/60 opacity-0 group-hover:opacity-100 group-hover:translate-x-0.5 transition-all" />
                 </button>
               ))}
             </div>
           </div>
         ) : (
           /* Timeline */
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             {(() => {
               const rendered: React.ReactNode[] = [];
               let i = 0;
@@ -559,21 +732,21 @@ export function AgentChatTab({
                   }
                 } else if (msg.kind === "user_prompt") {
                   rendered.push(
-                    <div key={msg.id} className="flex justify-end select-text">
-                      <div className="max-w-[85%] rounded-2xl bg-indigo-600 text-white px-3.5 py-2 text-[12px] font-medium leading-relaxed shadow-sm whitespace-pre-wrap">
+                    <div key={msg.id} className="flex justify-start select-text">
+                      <div className="max-w-[85%] rounded-xl bg-primary text-primary-foreground px-3 py-1.5 text-[12px] font-medium leading-relaxed shadow-sm whitespace-pre-wrap">
                         {msg.content}
                       </div>
                     </div>
                   );
                 } else if (msg.kind === "thought") {
                   rendered.push(
-                    <CollapsibleSection key={msg.id} title={`思考 ${formatElapsedMs(msg.durationMs ?? 0)}`}>
+                    <CollapsibleSection key={msg.id} durationMs={msg.durationMs}>
                       {msg.content}
                     </CollapsibleSection>
                   );
                 } else if (msg.kind === "assistant_message") {
                   rendered.push(
-                    <div key={msg.id} className="max-w-[90%] rounded-2xl border border-border/50 bg-slate-50/50 dark:bg-slate-900/30 px-3.5 py-2.5 shadow-sm select-text">
+                    <div key={msg.id} className="max-w-[90%] rounded-xl border border-border/60 bg-muted/20 px-3 py-2 shadow-sm select-text">
                       <Markdown content={msg.content} />
                     </div>
                   );
@@ -582,20 +755,10 @@ export function AgentChatTab({
               }
               return rendered;
             })()}
-            {loading && (
-              <div className="px-2 py-1 text-[11px] text-muted-foreground animate-pulse">
-                准备运行中...
-              </div>
+            {showWorking && (
+              <WorkingStatus elapsedMs={nowMs - runStartedAtMs} />
             )}
-            {running && !loading && (
-              <div className="flex items-center gap-2 px-3 py-2 text-[11px] text-emerald-600 dark:text-emerald-400 select-none">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                </span>
-                <span className="font-medium">思考中... {formatElapsedMs(nowMs - currentRunStartedMs)}</span>
-              </div>
-            )}
+
             <div ref={eventsEndRef} />
           </div>
         )}
@@ -603,13 +766,31 @@ export function AgentChatTab({
 
       {/* Input box */}
       <div className="p-3 border-t border-border/60 bg-muted/5 shrink-0 z-10 select-none">
+        {queuedPrompts.length > 0 && (
+          <div className="mb-2 rounded-xl border border-dashed border-primary/25 bg-primary/5 px-3.5 py-2 text-[11px] text-primary flex items-center justify-between">
+            <div className="min-w-0 flex-1 truncate">
+              <span className="font-semibold text-primary/90">队列中 {queuedPrompts.length} 条</span>
+              <span className="mx-2 text-primary/30">|</span>
+              <span className="text-primary/80">下一条: {queuedPrompts[0]}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                queuedPromptsRef.current = [];
+                setQueuedPrompts([]);
+              }}
+              className="text-[10px] text-primary/80 hover:text-primary hover:underline font-semibold ml-2 cursor-pointer shrink-0"
+            >
+              清空队列
+            </button>
+          </div>
+        )}
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            if (running) return;
             startConversation(input);
           }}
-          className="relative border border-border bg-card rounded-xl shadow-sm focus-within:ring-1 focus-within:ring-indigo-500 focus-within:border-indigo-500 transition-all p-2 flex flex-col gap-1.5"
+          className="relative border border-border bg-card rounded-xl shadow-sm focus-within:ring-1 focus-within:ring-primary focus-within:border-primary transition-all p-2 flex flex-col gap-1.5"
         >
           <textarea
             value={input}
@@ -617,525 +798,100 @@ export function AgentChatTab({
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                if (running) {
-                  cancelRun();
-                } else {
-                  startConversation(input);
-                }
+                startConversation(input);
               }
             }}
-            placeholder={running ? "运行中，回车可中断..." : `给 ${agentKind} 发送消息... (Ctrl+Enter 发送)`}
-            className="w-full bg-transparent border-0 ring-0 focus:ring-0 resize-none text-[12px] placeholder-slate-400 outline-none leading-relaxed min-h-[44px] max-h-[160px] select-text px-1"
+            placeholder={isRunning ? "运行中，发送后会加入前端队列..." : `给 ${agentRuntimeLabel} ${agentKind} 发送消息...`}
+            className="w-full bg-transparent border-0 ring-0 focus:ring-0 resize-none text-[12px] text-foreground placeholder-muted-foreground/50 outline-none leading-relaxed min-h-[44px] max-h-[160px] select-text px-1"
           />
           <div className="flex justify-between items-center px-1">
-            <span className="text-[10px] text-slate-400 font-medium select-none flex items-center gap-1.5">
+            <span className="text-[10px] text-muted-foreground/75 font-medium select-none flex items-center gap-1.5">
               {agentLogo}
-              <span>{agentKind}</span>
+              <span>{agentRuntimeLabel} / {agentKind}</span>
             </span>
-            {running ? (
-              <button
-                type="button"
-                onClick={cancelRun}
-                title="中断运行"
-                className="flex h-7 w-7 items-center justify-center rounded-lg bg-rose-600 text-white hover:bg-rose-700 transition-colors cursor-pointer select-none"
-              >
-                <StopCircle className="h-3.5 w-3.5" />
-              </button>
-            ) : (
-              <button
-                type="submit"
-                disabled={!input.trim() || loading}
-                title="发送"
-                className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-650 text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-indigo-700 transition-colors cursor-pointer select-none"
-              >
-                <Send className="h-3.5 w-3.5" />
-              </button>
-            )}
+            <div className="flex items-center gap-1.5">
+              {showDirectACPConfigOptions && configOptions.map((option) => (
+                <select
+                  key={option.id}
+                  value={option.currentValue || option.options[0]?.id || ""}
+                  disabled={isRunning || modelUpdating}
+                  title={option.description || option.name}
+                  onChange={(event) => setConfigOption(option, event.target.value)}
+                  className="h-7 max-w-40 rounded-lg border border-border bg-muted/30 px-2 text-[10.5px] font-medium text-muted-foreground outline-none hover:bg-muted/50 disabled:opacity-45"
+                >
+                  {option.options.map((choice) => (
+                    <option key={choice.id} value={choice.id} title={choice.description}>
+                      {choice.name || choice.id}
+                    </option>
+                  ))}
+                </select>
+              ))}
+              {!showDirectACPConfigOptions && showAgentModelControl && modelList.models.length > 0 && (
+                <select
+                  value={selectedModel?.id || ""}
+                  disabled={isRunning || modelUpdating}
+                  title="选择模型"
+                  onChange={(event) => setModel(event.target.value)}
+                  className="h-7 max-w-48 rounded-lg border border-border bg-muted/30 px-2 text-[10.5px] font-medium text-muted-foreground outline-none hover:bg-muted/50 disabled:opacity-45"
+                >
+                  {modelList.models.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.name || model.id}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {!showDirectACPConfigOptions && showAgentModelControl && modelList.models.length === 0 && (
+                <div className="flex items-center gap-1">
+                  <input
+                    value={customModelInput}
+                    onChange={(event) => setCustomModelInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setModel(customModelInput);
+                      }
+                    }}
+                    disabled={isRunning || modelUpdating}
+                    placeholder="模型"
+                    title={`${agentRuntimeLabel} 模型 ID`}
+                    className="h-7 w-28 rounded-lg border border-border bg-muted/30 px-2 text-[10.5px] font-medium text-muted-foreground outline-none hover:bg-muted/50 disabled:opacity-45"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setModel(customModelInput)}
+                    disabled={!customModelInput.trim() || isRunning || modelUpdating}
+                    title="应用模型"
+                    className="h-7 rounded-lg border border-border bg-muted/35 px-2 text-[10px] font-semibold text-muted-foreground hover:bg-muted/55 disabled:opacity-45 disabled:cursor-not-allowed"
+                  >
+                    模型
+                  </button>
+                </div>
+              )}
+              {isRunning && !input.trim() ? (
+                <button
+                  type="button"
+                  onClick={cancelRun}
+                  title="中断运行"
+                  className="flex h-7 w-7 items-center justify-center rounded-lg border border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/15 transition-all cursor-pointer select-none"
+                >
+                  <StopCircle className="h-3.5 w-3.5" />
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={!input.trim()}
+                  title={isRunning ? "加入队列" : "发送"}
+                  className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-all cursor-pointer select-none"
+                >
+                  <Send className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           </div>
         </form>
       </div>
-    </div>
-  );
-}
-
-function formatElapsedMs(ms: number): string {
-  const safeMs = Math.max(0, ms);
-  const totalSeconds = Math.floor(safeMs / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes > 0) {
-    return `${minutes}分 ${seconds}秒`;
-  }
-  return `${seconds}秒`;
-}
-
-function getRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function getStringField(record: Record<string, unknown> | null, keys: string[]) {
-  if (!record) return "";
-  for (const key of keys) {
-    const value = record[key];
-    if (typeof value === "string" && value.trim()) {
-      return value.trim();
-    }
-  }
-  return "";
-}
-
-function stringifyValue(value: unknown): string {
-  if (typeof value === "string") return value.trim();
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (Array.isArray(value)) return value.map(stringifyValue).filter(Boolean).join(" ");
-  const record = getRecord(value);
-  if (!record) return "";
-  return getStringField(record, ["command", "cmd", "path", "file_path", "filePath", "query", "pattern", "url", "name", "title"]);
-}
-
-function getArrayField(record: Record<string, unknown> | null, keys: string[]) {
-  if (!record) return null;
-  for (const key of keys) {
-    const value = record[key];
-    if (Array.isArray(value) && value.length > 0) {
-      return value;
-    }
-  }
-  return null;
-}
-
-function compactMiddle(value: string, max = 96) {
-  if (value.length <= max) return value;
-  const keep = Math.floor((max - 1) / 2);
-  return `${value.slice(0, keep)}…${value.slice(-keep)}`;
-}
-
-function diffOutputRecord(output: unknown) {
-  const record = getRecord(output);
-  return record?.type === "diff" ? record : null;
-}
-
-function countLines(value: unknown) {
-  return typeof value === "string" && value
-    ? value.split(/\r?\n/).length
-    : 0;
-}
-
-function extractToolTarget(item: AgentToolCallItem) {
-  const input = getRecord(item.input);
-  const outputDiff = diffOutputRecord(item.output);
-  const outputPath = getStringField(outputDiff, ["path"]);
-  const inputPath = getStringField(input, ["path", "file_path", "filePath", "filename"]);
-  const paths = getArrayField(input, ["paths", "locations", "files"]);
-  const args = getArrayField(input, ["args", "arguments"]);
-  const command =
-    typeof item.input === "string"
-      ? item.input.trim()
-      : getStringField(input, ["command", "cmd"]);
-  const commandWithArgs = [command, args?.map(stringifyValue).filter(Boolean).join(" ")]
-    .filter(Boolean)
-    .join(" ");
-  const query = getStringField(input, ["query", "pattern", "search"]);
-  const url = getStringField(input, ["url", "uri", "href"]);
-  const target = inputPath || outputPath || (paths ? String(paths[0]) : "") || query || url || "";
-  return { command: commandWithArgs || command, input, inputPath, outputDiff, outputPath, paths, query, url, target };
-}
-
-function describeToolCall(item: AgentToolCallItem) {
-  const { command, input, outputDiff, query, url, target } = extractToolTarget(item);
-  const normalizedTitle = item.title.toLowerCase();
-  const kind = (item.kind || normalizedTitle).toLowerCase();
-  const outputLineCount = countLines(item.output);
-  const inputLineCount = countLines(getStringField(input, ["content", "text", "newText"]));
-
-  if (kind.includes("search") || kind.includes("grep") || kind.includes("glob") || query) {
-    return {
-      icon: Search,
-      accent: "violet",
-      action: kind.includes("glob") ? "匹配文件" : "搜索",
-      target: query || target || "查询匹配项",
-      detail: "",
-    };
-  }
-  if (kind.includes("fetch") || kind.includes("web") || url) {
-    return {
-      icon: Search,
-      accent: "violet",
-      action: "获取网页",
-      target: url || target || "网页内容",
-      detail: "",
-    };
-  }
-  if (kind.includes("execute") || kind.includes("bash") || command) {
-    return {
-      icon: Terminal,
-      accent: "emerald",
-      action: "执行命令",
-      target: command || "命令执行",
-      detail: "",
-    };
-  }
-  if (kind.includes("read")) {
-    return {
-      icon: FileText,
-      accent: "sky",
-      action: "读取文件",
-      target,
-      detail: "",
-    };
-  }
-  if (kind.includes("write") || kind.includes("create")) {
-    return {
-      icon: FilePlus,
-      accent: "emerald",
-      action: "创建文件",
-      target,
-      detail: "",
-    };
-  }
-  if (kind.includes("edit") || outputDiff) {
-    const diffKind = String(outputDiff?.kind || "");
-    const action = diffKind === "create" || diffKind === "add" ? "创建文件" : "修改文件";
-    const oldLines = countLines(outputDiff?.oldText);
-    const newLines = countLines(outputDiff?.newText);
-    return {
-      icon: action === "创建文件" ? FilePlus : FileEdit,
-      accent: action === "创建文件" ? "emerald" : "amber",
-      action,
-      target,
-      detail: "",
-    };
-  }
-  return {
-    icon: Wrench,
-    accent: "slate",
-    action: item.kind || "工具调用",
-    target: target || item.title || "查看详情",
-    detail: "",
-  };
-}
-
-function ToolCallGroup({ items, nowMs }: { items: ChatMessage[]; nowMs: number }) {
-  const [open, setOpen] = useState(false);
-  const firstItem = items[0]?.toolCall;
-  const firstDesc = useMemo(
-    () => firstItem ? describeToolCall(firstItem) : null,
-    [firstItem]
-  );
-  if (!firstItem || !firstDesc) return null;
-  const Icon = firstDesc.icon;
-  const accent = toolAccentClasses[firstDesc.accent as keyof typeof toolAccentClasses];
-  const pendingCount = items.filter(
-    (m) => m.toolCall && m.toolCall.status !== "completed" && m.toolCall.status !== "success" && m.toolCall.status !== "failed" && m.toolCall.status !== "error"
-  ).length;
-
-  return (
-    <div className="max-w-[90%]">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 w-full px-1.5 py-0.5 text-left text-[10.5px] text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition-colors cursor-pointer select-none rounded"
-      >
-        <Icon className={`h-3 w-3 shrink-0 ${accent.icon}`} />
-        <span className="shrink-0 font-medium">{firstDesc.action}</span>
-        <span className="text-slate-400 dark:text-slate-500">
-          {items.length} 项操作
-        </span>
-        {pendingCount > 0 && (
-          <span className="relative flex h-2 w-2 shrink-0">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500" />
-          </span>
-        )}
-        <ChevronDown className={`h-3 w-3 shrink-0 text-slate-300 transition-transform ml-auto ${open ? "" : "-rotate-90"}`} />
-      </button>
-      {open && (
-        <div className="ml-4 mt-0.5 space-y-1.5 border-l border-slate-200/60 dark:border-slate-800/60 pl-2.5">
-          {items.map((m) =>
-            m.toolCall ? <ToolCallCard key={m.id} item={m.toolCall} nowMs={nowMs} /> : null
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const toolAccentClasses = {
-  emerald: {
-    card: "border-emerald-100 dark:border-emerald-950/50 bg-emerald-50/10 dark:bg-emerald-950/5",
-    icon: "text-emerald-600 dark:text-emerald-400",
-    badge: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/20",
-  },
-  sky: {
-    card: "border-sky-100 dark:border-sky-950/50 bg-sky-50/10 dark:bg-sky-950/5",
-    icon: "text-sky-600 dark:text-sky-400",
-    badge: "bg-sky-500/10 text-sky-700 dark:text-sky-300 border-sky-500/20",
-  },
-  amber: {
-    card: "border-amber-100 dark:border-amber-950/50 bg-amber-50/10 dark:bg-amber-950/5",
-    icon: "text-amber-600 dark:text-amber-400",
-    badge: "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/20",
-  },
-  violet: {
-    card: "border-violet-100 dark:border-violet-950/50 bg-violet-50/10 dark:bg-violet-950/5",
-    icon: "text-violet-600 dark:text-violet-400",
-    badge: "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/20",
-  },
-  slate: {
-    card: "border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-900/30",
-    icon: "text-slate-500 dark:text-slate-400",
-    badge: "bg-slate-500/10 text-slate-600 dark:text-slate-300 border-slate-500/20",
-  },
-} as const;
-
-function extractTodos(item: AgentToolCallItem): Array<{ content: string; status?: string }> | null {
-  const input = getRecord(item.input);
-  if (!input) return null;
-  const todos = input.todos ?? input.todo_list ?? input.items;
-  if (!Array.isArray(todos) || todos.length === 0) return null;
-  return todos
-    .map((t: unknown) => {
-      if (typeof t === "string") return { content: t, status: "pending" };
-      const rec = getRecord(t);
-      if (!rec) return null;
-      const content = String(rec.content ?? rec.description ?? rec.text ?? "");
-      if (!content) return null;
-      return { content, status: String(rec.status ?? rec.state ?? "pending") };
-    })
-    .filter((t): t is { content: string; status?: string } => t !== null);
-}
-
-function TodoWidget({ todos }: { todos: Array<{ content: string; status?: string }> }) {
-  const [open, setOpen] = useState(true);
-  const completed = todos.filter((t) => t.status === "completed" || t.status === "success").length;
-  return (
-    <div className="max-w-[90%] my-1">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 w-full px-1.5 py-0.5 text-left text-[10.5px] text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition-colors cursor-pointer select-none rounded"
-      >
-        <ListChecks className="h-3 w-3 shrink-0 text-indigo-500" />
-        <span className="shrink-0 font-medium">任务清单</span>
-        <span className="text-slate-400 dark:text-slate-500">{completed}/{todos.length}</span>
-        <ChevronDown className={`h-3 w-3 shrink-0 text-slate-300 transition-transform ml-auto ${open ? "" : "-rotate-90"}`} />
-      </button>
-      {open && (
-        <ul className="ml-5 mt-0.5 space-y-0.5">
-          {todos.map((todo, idx) => {
-            const isDone = todo.status === "completed" || todo.status === "success";
-            const isInProgress = todo.status === "in_progress" || todo.status === "in-progress";
-            return (
-              <li key={idx} className="flex items-start gap-1.5 text-[10.5px] text-slate-600 dark:text-slate-400">
-                <span className="pt-0.5 shrink-0">
-                  {isDone ? (
-                    <CheckCircle2 className="h-3 w-3 text-emerald-500" />
-                  ) : isInProgress ? (
-                    <CircleDot className="h-3 w-3 text-indigo-500" />
-                  ) : (
-                    <Circle className="h-3 w-3 text-slate-300 dark:text-slate-600" />
-                  )}
-                </span>
-                <span className={isDone ? "line-through text-slate-400 dark:text-slate-600" : ""}>
-                  {todo.content}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-function extractSubagent(item: AgentToolCallItem) {
-  const input = getRecord(item.input);
-  if (!input) return null;
-  const description = String(input.description ?? input.prompt ?? input.task ?? "");
-  const subagentType = String(input.subagent_type ?? input.agent_type ?? input.type ?? "");
-  if (!description) return null;
-  return { description, subagentType, output: item.output, status: item.status, createdAt: item.createdAt };
-}
-
-function SubagentEntry({ item, nowMs }: { item: { description: string; subagentType: string; output: unknown; status?: string; createdAt: string }; nowMs: number }) {
-  const [open, setOpen] = useState(false);
-  const isDone = item.status === "completed" || item.status === "success";
-  const isFailed = item.status === "failed" || item.status === "error";
-
-  const resultText = useMemo(() => {
-    if (!item.output) return "";
-    if (typeof item.output === "string") return item.output;
-    const rec = getRecord(item.output);
-    if (rec && typeof rec.text === "string") return rec.text;
-    if (rec && typeof rec.content === "string") return rec.content;
-    try { return JSON.stringify(item.output, null, 2); } catch { return String(item.output); }
-  }, [item.output]);
-
-  const elapsed = useMemo(() => {
-    const start = new Date(item.createdAt).getTime();
-    if (!Number.isFinite(start)) return "";
-    const end = isDone || isFailed ? start + 1000 : nowMs;
-    return formatElapsedMs(end - start);
-  }, [item.createdAt, isDone, isFailed, nowMs]);
-
-  return (
-    <div className="max-w-[90%] my-1">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 w-full px-1.5 py-0.5 text-left text-[10.5px] text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition-colors cursor-pointer select-none rounded"
-      >
-        <Cpu className={`h-3 w-3 shrink-0 ${isFailed ? "text-rose-500" : isDone ? "text-emerald-500" : "text-indigo-500"}`} />
-        <span className="shrink-0 font-medium">{item.subagentType || "子代理"}</span>
-        <span className="min-w-0 truncate text-slate-400 dark:text-slate-500">{item.description}</span>
-        {elapsed && <span className="shrink-0 text-slate-400/70">{elapsed}</span>}
-        {resultText && <ChevronDown className={`h-3 w-3 shrink-0 text-slate-300 transition-transform ml-auto ${open ? "" : "-rotate-90"}`} />}
-      </button>
-      {open && resultText && (
-        <div className="ml-5 mt-0.5 border-l border-slate-200/60 dark:border-slate-800/60 pl-2.5">
-          <div className="max-h-48 overflow-y-auto rounded-md bg-slate-50/50 dark:bg-slate-900/30 p-2 text-[10.5px] text-slate-600 dark:text-slate-400 whitespace-pre-wrap select-text">
-            {resultText}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Collapsible Thoughts block
-function CollapsibleSection({ title, children }: { title: string; children: string }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="border border-slate-200 dark:border-slate-800 rounded-lg bg-slate-50/50 dark:bg-slate-900/30 overflow-hidden my-2 max-w-[90%]">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex items-center justify-between w-full px-3 py-1.5 text-left text-[11px] font-bold text-slate-500 dark:text-slate-400 hover:bg-slate-100/50 dark:hover:bg-slate-800/30 transition-colors cursor-pointer select-none"
-      >
-        <span className="flex items-center gap-1.5">
-          <ChevronDown className={`h-3 w-3 transition-transform ${open ? "" : "-rotate-90"}`} />
-          {title}
-        </span>
-      </button>
-      {open && (
-        <div className="px-3 pb-2.5 pt-1 border-t border-slate-250/20 dark:border-slate-800/50 font-mono text-[10px] leading-relaxed text-slate-500 dark:text-slate-400 max-h-60 overflow-y-auto whitespace-pre-wrap select-text">
-          {children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Interactive tool calls component
-function ToolCallCard({ item, nowMs }: { item: AgentToolCallItem; nowMs: number }) {
-  const [open, setOpen] = useState(false);
-
-  const statusLogo = useMemo(() => {
-    if (item.status === "completed" || item.status === "success") {
-      return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 shrink-0" />;
-    }
-    if (item.status === "failed" || item.status === "error") {
-      return <XCircle className="h-3.5 w-3.5 text-rose-500 shrink-0" />;
-    }
-    return (
-      <span className="relative flex h-3 w-3 shrink-0">
-        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-        <span className="relative inline-flex rounded-full h-3 w-3 bg-indigo-500"></span>
-      </span>
-    );
-  }, [item.status]);
-
-  const readableInput = useMemo(() => {
-    if (!item.input) return "";
-    if (typeof item.input === "string") return item.input;
-    try {
-      return JSON.stringify(item.input, null, 2);
-    } catch {
-      return String(item.input);
-    }
-  }, [item.input]);
-
-  const readableOutput = useMemo(() => {
-    if (!item.output) return "";
-    if (typeof item.output === "string") return item.output;
-    try {
-      return JSON.stringify(item.output, null, 2);
-    } catch {
-      return String(item.output);
-    }
-  }, [item.output]);
-
-  const description = useMemo(() => describeToolCall(item), [item]);
-  const accent = toolAccentClasses[description.accent as keyof typeof toolAccentClasses];
-  const Icon = description.icon;
-  const outputDiff = diffOutputRecord(item.output);
-  const elapsed = useMemo(() => {
-    const start = new Date(item.createdAt).getTime();
-    const end = item.completedAt ? new Date(item.completedAt).getTime() : nowMs;
-    if (!Number.isFinite(start) || !Number.isFinite(end)) return "";
-    return formatElapsedMs(end - start);
-  }, [item.createdAt, item.completedAt, nowMs]);
-
-  return (
-    <div className="max-w-[90%]">
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 w-full px-1.5 py-0.5 text-left text-[10.5px] text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300 transition-colors cursor-pointer select-none rounded"
-      >
-        <Icon className={`h-3 w-3 shrink-0 ${accent.icon}`} />
-        <span className="shrink-0 font-medium">{description.action}</span>
-        <span className="min-w-0 truncate font-mono text-slate-400 dark:text-slate-500">
-          {compactMiddle(description.target, 80)}
-        </span>
-        {elapsed && <span className="shrink-0 text-slate-400/70">{elapsed}</span>}
-        {statusLogo}
-        <ChevronDown className={`h-3 w-3 shrink-0 text-slate-300 transition-transform ${open ? "" : "-rotate-90"}`} />
-      </button>
-      {open && (
-        <div className="ml-4 mt-0.5 pb-1 space-y-1.5 border-l border-slate-200/60 dark:border-slate-800/60 pl-2.5">
-          {description.action === "执行命令" && description.target && (
-            <div className="rounded-md border border-emerald-500/20 bg-slate-950 p-2.5 font-mono text-[10.5px] text-emerald-300 select-text overflow-x-auto">
-              $ {description.target}
-            </div>
-          )}
-          {outputDiff && (
-            <div className="space-y-1">
-              <div className="text-[9.5px] font-bold text-slate-400 dark:text-slate-500 uppercase select-none">文件变更</div>
-              <div className="grid gap-2 md:grid-cols-2">
-                {typeof outputDiff.oldText === "string" && (
-                  <pre className="max-h-52 overflow-auto rounded-md border border-rose-500/20 bg-rose-950/10 p-2 font-mono text-[10px] text-rose-700 dark:text-rose-300 whitespace-pre-wrap select-text">
-                    {outputDiff.oldText || "∅"}
-                  </pre>
-                )}
-                {typeof outputDiff.newText === "string" && (
-                  <pre className="max-h-52 overflow-auto rounded-md border border-emerald-500/20 bg-emerald-950/10 p-2 font-mono text-[10px] text-emerald-700 dark:text-emerald-300 whitespace-pre-wrap select-text">
-                    {outputDiff.newText || "∅"}
-                  </pre>
-                )}
-              </div>
-            </div>
-          )}
-          {readableInput && (
-            <div className="space-y-1">
-              <div className="text-[9.5px] font-bold text-slate-400 dark:text-slate-500 uppercase select-none">输入参数</div>
-              <pre className="bg-slate-100/60 dark:bg-slate-800/40 p-2 rounded-md font-mono text-[10px] text-slate-700 dark:text-slate-300 overflow-x-auto max-h-60 whitespace-pre-wrap select-text border border-slate-200/60 dark:border-slate-700/40">
-                {readableInput}
-              </pre>
-            </div>
-          )}
-          {readableOutput && !outputDiff && (
-            <div className="space-y-1">
-              <div className="text-[9.5px] font-bold text-slate-400 dark:text-slate-500 uppercase select-none">输出结果</div>
-              <pre className="bg-slate-100/60 dark:bg-slate-800/40 p-2 rounded-md font-mono text-[10px] text-slate-700 dark:text-slate-300 overflow-x-auto max-h-60 whitespace-pre-wrap select-text border border-slate-200/60 dark:border-slate-700/40">
-                {readableOutput}
-              </pre>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }

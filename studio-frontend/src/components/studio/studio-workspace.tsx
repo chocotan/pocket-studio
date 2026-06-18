@@ -87,11 +87,11 @@ export function StudioWorkspace({
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const urlTheme = params.get("theme");
-      if (urlTheme === "light" || urlTheme === "claude" || urlTheme === "dark" || urlTheme === "synthwave" || urlTheme === "onedark") {
+      if (urlTheme === "light" || urlTheme === "claude" || urlTheme === "sandalwood" || urlTheme === "dark" || urlTheme === "synthwave" || urlTheme === "onedark" || urlTheme === "charcoal") {
         return urlTheme as StudioTheme;
       }
       const saved = localStorage.getItem("pocket-studio-theme");
-      if (saved === "light" || saved === "claude" || saved === "dark" || saved === "synthwave" || saved === "onedark") {
+      if (saved === "light" || saved === "claude" || saved === "sandalwood" || saved === "dark" || saved === "synthwave" || saved === "onedark" || saved === "charcoal") {
         return saved as StudioTheme;
       }
     }
@@ -108,6 +108,7 @@ export function StudioWorkspace({
   const {
     layoutTree,
     setLayoutTree,
+    focusedId,
     tabDragTarget,
     setTabDragTarget,
     isDraggingTab,
@@ -158,6 +159,7 @@ export function StudioWorkspace({
         <TerminalPanelView
           key={node.id}
           panel={node}
+          focused={focusedId === node.id}
           addMenuPanelId={addMenuPanelId}
           dragTarget={tabDragTarget}
           isDraggingTab={isDraggingTab}
@@ -242,7 +244,7 @@ export function StudioWorkspace({
         setAddMenuPanelId(null);
         setThemeMenuOpen(false);
       }}
-      className={`studio-square bg-background text-foreground select-none flex flex-col overflow-hidden theme-${theme} ${theme === "dark" || theme === "synthwave" || theme === "onedark" ? "dark" : ""}`}
+      className={`studio-square bg-background text-foreground select-none flex flex-col overflow-hidden theme-${theme} ${theme === "dark" || theme === "synthwave" || theme === "onedark" || theme === "charcoal" ? "dark" : ""}`}
       style={{
         width: "100dvw",
         height: "100dvh",
@@ -250,12 +252,12 @@ export function StudioWorkspace({
       }}
     >
       {!navHidden && (
-        <header className="shrink-0 h-11 bg-white/95 border-b border-slate-200/70 flex items-center gap-2 px-3 z-50 shadow-sm dark:bg-[#161d28]/95 dark:border-slate-800/80 transition-colors duration-150">
+        <header className="studio-header shrink-0 h-11 flex items-center gap-2 px-3 z-50 shadow-sm transition-colors duration-150">
           <div className="flex shrink-0 items-center gap-2">
             <div className="h-6 w-6 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-500/25 flex-shrink-0">
               <span className="text-white font-black text-[10px] leading-none">P</span>
             </div>
-            <span className="hidden font-bold text-slate-800 text-xs tracking-tight dark:text-white sm:inline">Pocket Studio</span>
+            <span className="hidden font-bold text-foreground text-xs tracking-tight sm:inline">Pocket Studio</span>
             <span className="hidden px-1.5 py-0.5 text-[9px] uppercase font-bold tracking-widest bg-indigo-50 text-indigo-600 rounded border border-indigo-100 dark:bg-indigo-950/40 dark:text-indigo-400 dark:border-indigo-900/60 md:inline">
               PRO
             </span>
@@ -280,12 +282,12 @@ export function StudioWorkspace({
             />
             <ZoomSelect value={pageZoom} onChange={onPageZoomChange} compact />
             {/* Preset Layout Buttons */}
-            <div className="flex items-center bg-slate-150/40 p-0.5 rounded-lg border border-slate-200/55 dark:bg-slate-800/40 dark:border-slate-700/60">
+            <div className="flex items-center bg-muted/40 p-0.5 rounded-lg border border-border/60">
               {/* Preset 1: Full workspace */}
               <button
                 type="button"
                 onClick={() => applyPresetLayout(1)}
-                className="p-1.5 rounded-md hover:bg-white text-slate-500 hover:text-indigo-600 dark:hover:bg-slate-800 dark:hover:text-indigo-400 transition-all cursor-pointer"
+                className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-all cursor-pointer"
                 title="应用布局：全功能工作区 (文件管理器+编辑器区+终端)"
               >
                 <LayoutGrid className="h-3.5 w-3.5" />
@@ -294,7 +296,7 @@ export function StudioWorkspace({
               <button
                 type="button"
                 onClick={() => applyPresetLayout(2)}
-                className="p-1.5 rounded-md hover:bg-white text-slate-500 hover:text-indigo-600 dark:hover:bg-slate-800 dark:hover:text-indigo-400 transition-all cursor-pointer"
+                className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-all cursor-pointer"
                 title="应用布局：单终端面板"
               >
                 <Maximize className="h-3.5 w-3.5" />
@@ -303,7 +305,7 @@ export function StudioWorkspace({
               <button
                 type="button"
                 onClick={() => applyPresetLayout(3)}
-                className="p-1.5 rounded-md hover:bg-white text-slate-500 hover:text-indigo-600 dark:hover:bg-slate-800 dark:hover:text-indigo-400 transition-all cursor-pointer"
+                className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-all cursor-pointer"
                 title="应用布局：左右双终端"
               >
                 <Columns className="h-3.5 w-3.5" />
@@ -312,14 +314,14 @@ export function StudioWorkspace({
               <button
                 type="button"
                 onClick={() => applyPresetLayout(4)}
-                className="p-1.5 rounded-md hover:bg-white text-slate-500 hover:text-indigo-600 dark:hover:bg-slate-800 dark:hover:text-indigo-400 transition-all cursor-pointer"
+                className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-all cursor-pointer"
                 title="应用布局：左侧文件+中间编辑+右侧终端"
               >
                 <Columns3Icon className="h-3.5 w-3.5" />
               </button>
             </div>
 
-            <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
+            <div className="h-4 w-px bg-border" />
 
             <button
               type="button"
@@ -327,7 +329,7 @@ export function StudioWorkspace({
                 event.stopPropagation();
                 setNavHidden(true);
               }}
-              className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 dark:hover:bg-slate-800 dark:text-slate-400 dark:hover:text-slate-100 transition-colors cursor-pointer"
+              className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors cursor-pointer"
               title="隐藏顶部栏"
             >
               <ChevronUp className="h-4 w-4" />
@@ -341,7 +343,7 @@ export function StudioWorkspace({
                   e.stopPropagation();
                   setThemeMenuOpen(!themeMenuOpen);
                 }}
-                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 dark:hover:bg-slate-800 dark:text-slate-400 dark:hover:text-slate-100 transition-colors cursor-pointer flex items-center gap-1"
+                className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors cursor-pointer flex items-center gap-1"
                 title="切换主题 / Switch Theme"
               >
                 <Palette className="h-4 w-4" />
@@ -350,16 +352,18 @@ export function StudioWorkspace({
               {themeMenuOpen && (
                 <>
                   <div className="fixed inset-0 z-40 cursor-default" onClick={() => setThemeMenuOpen(false)} />
-                  <div className="absolute right-0 mt-2 w-48 rounded-lg border border-slate-200 bg-white p-1.5 shadow-lg dark:border-slate-800/80 dark:bg-[#161d28] z-50 animate-scale-in">
-                    <div className="px-2.5 py-1.5 text-[9px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest border-b border-slate-100 dark:border-slate-800 mb-1">
+                  <div className="absolute right-0 mt-2 w-48 rounded-lg border border-border bg-card text-card-foreground p-1.5 shadow-lg z-50 animate-scale-in">
+                    <div className="px-2.5 py-1.5 text-[9px] font-bold text-muted-foreground uppercase tracking-widest border-b border-border mb-1">
                       选择主题 / Themes
                     </div>
                     {[
                       { id: "light" as const, name: "极光白 (Light)", preview: "bg-[#fafafa] border-slate-350" },
                       { id: "claude" as const, name: "Claude 暖白", preview: "bg-[#f7f1e8] border-[#b66a2c]" },
+                      { id: "sandalwood" as const, name: "古雅檀香 (Sandalwood)", preview: "bg-[#f9f6f0] border-[#c86446]" },
                       { id: "dark" as const, name: "暗夜黑 (Dark)", preview: "bg-[#121824] border-slate-700" },
                       { id: "synthwave" as const, name: "霓虹幻境 (Synthwave)", preview: "bg-[#1c0d2e] border-fuchsia-900" },
                       { id: "onedark" as const, name: "黑客帝国 (One Dark)", preview: "bg-[#1e222a] border-slate-800" },
+                      { id: "charcoal" as const, name: "柔和深灰 (Charcoal)", preview: "bg-[#383d47] border-[#6ca7c3]" },
                     ].map((t) => (
                       <button
                         key={t.id}
@@ -370,15 +374,15 @@ export function StudioWorkspace({
                         }}
                         className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-colors ${
                           theme === t.id
-                            ? "bg-indigo-50 text-indigo-650 dark:bg-slate-800/80 dark:text-indigo-400"
-                            : "text-slate-600 hover:bg-slate-50 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800/40 dark:hover:text-slate-100"
+                            ? "bg-accent text-accent-foreground"
+                            : "text-muted-foreground hover:bg-muted hover:text-foreground"
                         }`}
                       >
                         <div className="flex items-center gap-2">
                           <span className={`w-2.5 h-2.5 rounded-full border ${t.preview}`} />
                           <span>{t.name}</span>
                         </div>
-                        {theme === t.id && <Check className="h-3.5 w-3.5 text-indigo-650 dark:text-indigo-400" />}
+                        {theme === t.id && <Check className="h-3.5 w-3.5 text-accent-foreground" />}
                       </button>
                     ))}
                   </div>
@@ -390,7 +394,7 @@ export function StudioWorkspace({
             <button
               type="button"
               onClick={onBackToDashboard}
-              className="flex h-7 w-7 items-center justify-center rounded-md bg-white hover:bg-slate-50 text-slate-700 hover:text-slate-900 border border-slate-205 hover:border-slate-300 shadow-sm transition-all active:scale-95 duration-150 cursor-pointer dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-white"
+              className="flex h-7 w-7 items-center justify-center rounded-md bg-card hover:bg-muted text-foreground border border-border shadow-sm transition-all active:scale-95 duration-150 cursor-pointer hover:text-accent-foreground"
               title="返回"
               aria-label="返回"
             >

@@ -6,7 +6,7 @@ export type TerminalKind = "bash" | "claude" | "codex" | "opencode" | "kilo" | "
 export type SplitDirection = "left" | "right" | "top" | "bottom";
 export type TerminalAccent = "indigo" | "violet" | "emerald" | "amber" | "cyan" | "rose" | "lime";
 export type TerminalTitleSource = "initial" | "tmux";
-export type StudioTheme = "light" | "claude" | "dark" | "synthwave" | "onedark";
+export type StudioTheme = "light" | "claude" | "sandalwood" | "dark" | "synthwave" | "onedark" | "charcoal";
 
 export interface TerminalTitleState {
   title: string;
@@ -36,6 +36,11 @@ export const TERMINAL_TYPES: TerminalTypeDefinition[] = [
 
 export function terminalType(value: TerminalKind) {
   return TERMINAL_TYPES.find((item) => item.value === value) || TERMINAL_TYPES[0];
+}
+
+export function agentNameForRuntime(agentKind: string | undefined, agentRuntime: "acpx" | "direct_acp" | undefined) {
+  void agentRuntime;
+  return agentKind || "opencode";
 }
 
 export function terminalTypeFromCommand(command: string, fallback: TerminalKind): TerminalKind {

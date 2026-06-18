@@ -57,6 +57,31 @@ export function getXtermTheme(theme: StudioTheme) {
       brightCyan:          "#2de2e6",
       brightWhite:         "#ffffff",
     };
+  } else if (theme === "charcoal") {
+    return {
+      background:          "#383d47",
+      foreground:          "#c8cdd4",
+      cursor:              "#6ca7c3",
+      cursorAccent:        "#383d47",
+      selectionBackground: "rgba(108, 167, 195, 0.3)",
+      selectionForeground: "#c8cdd4",
+      black:               "#272a31",
+      red:                 "#d37a82",
+      green:               "#87b38d",
+      yellow:              "#cba77d",
+      blue:                "#7aaed3",
+      magenta:             "#be95be",
+      cyan:                "#7cbab9",
+      white:               "#c8cdd4",
+      brightBlack:         "#5c6370",
+      brightRed:           "#e0939a",
+      brightGreen:         "#9ecba4",
+      brightYellow:        "#e2be95",
+      brightBlue:          "#92c3e9",
+      brightMagenta:       "#d6abdb",
+      brightCyan:          "#94d1cf",
+      brightWhite:         "#e2e6eb",
+    };
   } else if (theme === "onedark") {
     return {
       background:          "#262b35",
@@ -81,6 +106,31 @@ export function getXtermTheme(theme: StudioTheme) {
       brightMagenta:       "#c678dd",
       brightCyan:          "#56b6c2",
       brightWhite:         "#ffffff",
+    };
+  } else if (theme === "sandalwood") {
+    return {
+      background:          "#f9f6f0",
+      foreground:          "#201a15",
+      cursor:              "#c86446",
+      cursorAccent:        "#f9f6f0",
+      selectionBackground: "rgba(200, 100, 70, 0.18)",
+      selectionForeground: "#201a15",
+      black:               "#201a15",
+      red:                 "#ae4d31",
+      green:               "#4d7a5b",
+      yellow:              "#b07d30",
+      blue:                "#3d6b8a",
+      magenta:             "#8b5475",
+      cyan:                "#3d8a80",
+      white:               "#e8e2d5",
+      brightBlack:         "#7a7065",
+      brightRed:           "#c86446",
+      brightGreen:         "#5fa078",
+      brightYellow:        "#cca355",
+      brightBlue:          "#5f94b3",
+      brightMagenta:       "#a67390",
+      brightCyan:          "#5fb3a8",
+      brightWhite:         "#fdfbf7",
     };
   } else if (theme === "claude") {
     return {
@@ -627,8 +677,11 @@ export function XtermInstance({
       ro.disconnect();
       if (osc52Disposable) osc52Disposable.dispose();
       if (connectFrame !== null) window.cancelAnimationFrame(connectFrame);
-      if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
-        wsRef.current.close();
+      const socket = wsRef.current;
+      if (socket) {
+        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+          socket.close();
+        }
       }
       wsRef.current = null;
       if (term) term.dispose();

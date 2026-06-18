@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -17,6 +18,7 @@ type Config struct {
 	Device     DeviceConfig         `json:"device"`
 	Server     ServerConfig         `json:"server"`
 	ACPX       ACPXConfig           `json:"acpx"`
+	DirectACP  DirectACPConfig      `json:"direct_acp"`
 	Claude     ClaudeConfig         `json:"claude"`
 	Workspaces []protocol.Workspace `json:"workspaces"`
 }
@@ -43,6 +45,17 @@ type ACPXConfig struct {
 	SessionName string   `json:"session_name"`
 	TTLSeconds  int      `json:"ttl_seconds"`
 	Args        []string `json:"args"`
+}
+
+type DirectACPConfig struct {
+	Enabled bool                            `json:"enabled"`
+	Agents  map[string]DirectACPAgentConfig `json:"agents"`
+}
+
+type DirectACPAgentConfig struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
 }
 
 func NormalizeConfig(cfg Config) (Config, error) {
@@ -74,6 +87,7 @@ func NormalizeConfig(cfg Config) (Config, error) {
 	if cfg.ACPX.TTLSeconds < 0 {
 		return cfg, fmt.Errorf("acpx.ttl_seconds must be >= 0")
 	}
+	cfg.DirectACP.Agents = normalizeDirectACPAgents(cfg.DirectACP.Agents)
 	if len(cfg.Workspaces) == 0 {
 		home, _ := os.UserHomeDir()
 		cfg.Workspaces = []protocol.Workspace{{
@@ -118,6 +132,10 @@ func DefaultConfig() Config {
 			TTLSeconds: 300,
 			Args:       []string{"--format", "json", "--approve-all"},
 		},
+		DirectACP: DirectACPConfig{
+			Enabled: true,
+			Agents:  normalizeDirectACPAgents(nil),
+		},
 		Workspaces: []protocol.Workspace{
 			{
 				ID:   "agent-root",
@@ -126,6 +144,39 @@ func DefaultConfig() Config {
 			},
 		},
 	}
+}
+
+func normalizeDirectACPAgents(agents map[string]DirectACPAgentConfig) map[string]DirectACPAgentConfig {
+	out := make(map[string]DirectACPAgentConfig)
+	for key, value := range agents {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		if normalized == "" {
+			continue
+		}
+		out[normalized] = value
+	}
+	if _, ok := out["codex"]; !ok {
+		if path, err := exec.LookPath("codex-acp"); err == nil {
+			out["codex"] = DirectACPAgentConfig{Command: path, Args: []string{}}
+		} else {
+			out["codex"] = DirectACPAgentConfig{Command: "npx", Args: []string{"@zed-industries/codex-acp@latest"}}
+		}
+	}
+	if _, ok := out["opencode"]; !ok {
+		if path, err := exec.LookPath("opencode"); err == nil {
+			out["opencode"] = DirectACPAgentConfig{Command: path, Args: []string{"acp"}}
+		} else {
+			out["opencode"] = DirectACPAgentConfig{Command: "npx", Args: []string{"opencode-ai@latest", "acp"}}
+		}
+	}
+	if _, ok := out["kilo"]; !ok {
+		if path, err := exec.LookPath("kilo"); err == nil {
+			out["kilo"] = DirectACPAgentConfig{Command: path, Args: []string{"acp"}}
+		} else {
+			out["kilo"] = DirectACPAgentConfig{Command: "kilo", Args: []string{"acp"}}
+		}
+	}
+	return out
 }
 
 func daemonDevicePath() string {
