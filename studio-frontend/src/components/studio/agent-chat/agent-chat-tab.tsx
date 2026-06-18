@@ -23,9 +23,7 @@ import {
   modelListFromTaskEvents,
 } from "./event-model";
 import {
-  applyTaskEventToMessageState,
   buildMessageStateFromEvents,
-  createMessageState,
 } from "./message-reducer";
 import {
   CollapsibleSection,
@@ -64,8 +62,17 @@ export function AgentChatTab({
   workspacePath,
   onUpdateTabProperties
 }: AgentChatTabProps) {
+  const sessionId = tab.agentSessionId;
+  const sessionName = tab.agentSessionName || sessionId;
+  const agentKind = tab.agentKind || "opencode";
+  const agentRuntime = tab.agentRuntime || "acpx";
+  const agentRuntimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : "Agent";
+  const supportsModelSelection = agentRuntime === "direct_acp" || agentRuntime === "acpx";
+
   const [events, setEvents] = useState<TaskEvent[]>([]);
-  const [messageState, setMessageState] = useState(() => createMessageState());
+  const messageState = useMemo(() => {
+    return buildMessageStateFromEvents(events, sessionId || "");
+  }, [events, sessionId]);
   const [input, setInput] = useState("");
   const [runStatus, setRunStatus] = useState<AgentRunStatus>("idle");
   const [error, setError] = useState("");
@@ -91,12 +98,7 @@ export function AgentChatTab({
   const pendingSessionRejectRef = useRef<((error: Error) => void) | null>(null);
   const [queuedPrompts, setQueuedPrompts] = useState<string[]>([]);
 
-  const sessionId = tab.agentSessionId;
-  const sessionName = tab.agentSessionName || sessionId;
-  const agentKind = tab.agentKind || "opencode";
-  const agentRuntime = tab.agentRuntime || "acpx";
-  const agentRuntimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : "Agent";
-  const supportsModelSelection = agentRuntime === "direct_acp" || agentRuntime === "acpx";
+
 
   useEffect(() => {
     onUpdateTabPropertiesRef.current = onUpdateTabProperties;
@@ -154,7 +156,6 @@ export function AgentChatTab({
   useEffect(() => {
     if (!sessionId) {
       setEvents([]);
-      setMessageState(createMessageState());
       setRunStatus("idle");
       lastEventSeqRef.current = 0;
       socketTaskIdRef.current = "";
@@ -224,7 +225,6 @@ export function AgentChatTab({
             }
             return mergeTaskEvents(base, [taskEvent]);
           });
-          setMessageState((prev) => applyTaskEventToMessageState(prev, taskEvent));
           if (isTerminalTaskEvent(taskEvent)) {
             setRunStatus("idle");
             awaitingNewTurnRef.current = false;
@@ -281,9 +281,6 @@ export function AgentChatTab({
     return () => window.clearInterval(timer);
   }, [runStatus]);
 
-  useEffect(() => {
-    setMessageState(buildMessageStateFromEvents(events, sessionId || ""));
-  }, [sessionId]);
 
   useEffect(() => {
     if (runStatus === "idle") return;
@@ -473,7 +470,6 @@ export function AgentChatTab({
       const activeSessionId = await ensureSession();
       const localUserEvent = makeLocalUserPromptEvent(activeSessionId, promptText);
       setEvents((prev) => mergeTaskEvents(prev, [localUserEvent]));
-      setMessageState((prev) => applyTaskEventToMessageState(prev, localUserEvent));
 
       if (selectedModelIdRef.current && typeof window !== "undefined" && window.localStorage) {
         window.localStorage.setItem(`pocket-studio-last-model::${agentRuntime}::${agentKind}`, selectedModelIdRef.current);
@@ -636,6 +632,20 @@ export function AgentChatTab({
     }
   }
 
+  const getToolCallType = useCallback((msg: ChatMessage) => {
+    if (msg.kind !== "tool_call" || !msg.toolCall) return "none";
+    const toolName = (msg.toolCall.title || msg.toolCall.kind || "").toLowerCase();
+    if (toolName.includes("todo")) {
+      const todos = extractTodos(msg.toolCall);
+      if (todos) return "todo";
+    }
+    if (toolName.includes("task") || toolName.includes("subagent") || toolName.includes("agent")) {
+      const subagent = extractSubagent(msg.toolCall);
+      if (subagent) return "subagent";
+    }
+    return "regular_tool_call";
+  }, []);
+
   const suggestions = [
     { label: "今天上海天气怎么样", text: "今天上海天气怎么样" },
     { label: "来点马斯克新闻", text: "来点马斯克新闻" },
@@ -700,37 +710,7 @@ export function AgentChatTab({
               let i = 0;
               while (i < messages.length) {
                 const msg = messages[i];
-                if (msg.kind === "tool_call" && msg.toolCall) {
-                  const toolName = (msg.toolCall.title || msg.toolCall.kind || "").toLowerCase();
-                  if (toolName.includes("todo")) {
-                    const todos = extractTodos(msg.toolCall);
-                    if (todos) {
-                      rendered.push(<TodoWidget key={msg.id} todos={todos} />);
-                      i++;
-                      continue;
-                    }
-                  }
-                  if (toolName.includes("task") || toolName.includes("subagent") || toolName.includes("agent")) {
-                    const subagent = extractSubagent(msg.toolCall);
-                    if (subagent) {
-                      rendered.push(<SubagentEntry key={msg.id} item={subagent} nowMs={nowMs} />);
-                      i++;
-                      continue;
-                    }
-                  }
-                  const group: ChatMessage[] = [msg];
-                  while (i + 1 < messages.length && messages[i + 1].kind === "tool_call") {
-                    i++;
-                    group.push(messages[i]);
-                  }
-                  if (group.length <= 1) {
-                    rendered.push(<ToolCallCard key={msg.id} item={msg.toolCall} nowMs={nowMs} />);
-                  } else {
-                    rendered.push(
-                      <ToolCallGroup key={`g-${msg.id}`} items={group} nowMs={nowMs} />
-                    );
-                  }
-                } else if (msg.kind === "user_prompt") {
+                if (msg.kind === "user_prompt") {
                   rendered.push(
                     <div key={msg.id} className="flex justify-start select-text">
                       <div className="max-w-[85%] rounded-xl bg-primary text-primary-foreground px-3 py-1.5 text-[12px] font-medium leading-relaxed shadow-sm whitespace-pre-wrap">
@@ -738,20 +718,59 @@ export function AgentChatTab({
                       </div>
                     </div>
                   );
+                  i++;
                 } else if (msg.kind === "thought") {
                   rendered.push(
                     <CollapsibleSection key={msg.id} durationMs={msg.durationMs}>
                       {msg.content}
                     </CollapsibleSection>
                   );
+                  i++;
                 } else if (msg.kind === "assistant_message") {
                   rendered.push(
                     <div key={msg.id} className="max-w-[90%] rounded-xl border border-border/60 bg-muted/20 px-3 py-2 shadow-sm select-text">
                       <Markdown content={msg.content} />
                     </div>
                   );
+                  i++;
+                } else if (msg.kind === "tool_call" && msg.toolCall) {
+                  const toolCallType = getToolCallType(msg);
+                  if (toolCallType === "todo") {
+                    const todos = extractTodos(msg.toolCall);
+                    if (todos) {
+                      rendered.push(<TodoWidget key={msg.id} todos={todos} />);
+                    }
+                    i++;
+                  } else if (toolCallType === "subagent") {
+                    const subagent = extractSubagent(msg.toolCall);
+                    if (subagent) {
+                      rendered.push(<SubagentEntry key={msg.id} item={subagent} nowMs={nowMs} />);
+                    }
+                    i++;
+                  } else {
+                    // Regular tool calls
+                    const group: ChatMessage[] = [msg];
+                    while (
+                      i + 1 < messages.length &&
+                      getToolCallType(messages[i + 1]) === "regular_tool_call"
+                    ) {
+                      i++;
+                      group.push(messages[i]);
+                    }
+                    if (group.length === 1) {
+                      rendered.push(
+                        <ToolCallCard key={msg.id} item={msg.toolCall} nowMs={nowMs} />
+                      );
+                    } else {
+                      rendered.push(
+                        <ToolCallGroup key={`g-${msg.id}`} items={group} nowMs={nowMs} />
+                      );
+                    }
+                    i++;
+                  }
+                } else {
+                  i++;
                 }
-                i++;
               }
               return rendered;
             })()}
