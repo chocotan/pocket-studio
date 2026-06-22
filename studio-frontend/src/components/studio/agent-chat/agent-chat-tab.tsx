@@ -48,6 +48,29 @@ type AgentEnvelope = {
   payload: Record<string, unknown>;
 };
 
+function pushAgentChatDebug(entry: Record<string, unknown>) {
+  if (typeof window === "undefined") return;
+  const target = window as typeof window & {
+    __agent_chat_debug?: unknown[];
+    __debug_log?: unknown[];
+  };
+  const item = {
+    at: new Date().toISOString(),
+    ...entry,
+  };
+  target.__agent_chat_debug = Array.isArray(target.__agent_chat_debug)
+    ? target.__agent_chat_debug
+    : [];
+  target.__agent_chat_debug.push(item);
+  target.__debug_log = Array.isArray(target.__debug_log) ? target.__debug_log : [];
+  target.__debug_log.push(item);
+}
+
+function envelopeTaskId(envelope: AgentEnvelope) {
+  const taskId = envelope.payload.task_id;
+  return typeof taskId === "string" ? taskId : "";
+}
+
 interface AgentChatTabProps {
   project: Project;
   tab: StudioTab;
@@ -136,6 +159,182 @@ export function AgentChatTab({
     }
   }), [agentKind, agentRuntime, project.device_id, workspacePath]);
 
+  const flushPendingEnvelopes = useCallback((socket: WebSocket, activeSessionId: string) => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    const pending = pendingEnvelopesRef.current;
+    if (pending.length === 0) return;
+
+    const remaining: AgentEnvelope[] = [];
+    const ready: AgentEnvelope[] = [];
+    for (const envelope of pending) {
+      const taskId = envelopeTaskId(envelope);
+      if (!taskId || taskId === activeSessionId) {
+        ready.push(envelope);
+      } else {
+        remaining.push(envelope);
+      }
+    }
+    pendingEnvelopesRef.current = remaining;
+
+    pushAgentChatDebug({
+      phase: "ws.flush",
+      taskId: activeSessionId,
+      sent: ready.length,
+      remaining: remaining.length,
+    });
+    for (const envelope of ready) {
+      socket.send(JSON.stringify(envelope));
+    }
+  }, []);
+
+  const openAgentSocket = useCallback((activeSessionId: string, activeSessionName: string) => {
+    const socket = new WebSocket(websocketURL("/ws/acpx", new URLSearchParams({ task_id: activeSessionId })));
+    socketRef.current = socket;
+    socketTaskIdRef.current = activeSessionId;
+    setError("");
+    let closed = false;
+
+    pushAgentChatDebug({
+      phase: "ws.opening",
+      taskId: activeSessionId,
+      sessionName: activeSessionName,
+    });
+
+    socket.onopen = () => {
+      if (closed) return;
+      pushAgentChatDebug({
+        phase: "ws.open",
+        taskId: activeSessionId,
+        pending: pendingEnvelopesRef.current.length,
+      });
+      if (supportsModelSelection && !sessionCreateSentRef.current.has(activeSessionId)) {
+        const createEnvelope = buildSessionCreateEnvelope(activeSessionId, activeSessionName || activeSessionId);
+        pendingSessionCreatesRef.current.delete(activeSessionId);
+        sessionCreateSentRef.current.add(activeSessionId);
+        socket.send(JSON.stringify(createEnvelope));
+        pushAgentChatDebug({
+          phase: "ws.send",
+          taskId: activeSessionId,
+          envelopeType: createEnvelope.type,
+          reason: "session.create",
+        });
+      }
+      flushPendingEnvelopes(socket, activeSessionId);
+    };
+
+    socket.onmessage = (message) => {
+      try {
+        const envelope = JSON.parse(String(message.data));
+        if (envelope?.type === "task.event") {
+          const taskEvent = envelope.payload as TaskEvent;
+          if (!taskEvent || taskEvent.task_id !== activeSessionId) return;
+          pushAgentChatDebug({
+            phase: "ws.message",
+            taskId: activeSessionId,
+            eventType: taskEvent.event_type,
+            sequence: taskEvent.sequence,
+          });
+          if (taskEvent.event_type === "acpx.session") {
+            const meta = getMetadata(taskEvent.data) || {};
+            const nextName = String(meta.name || meta.agentSessionId || activeSessionName || "").trim();
+            if (pendingSessionResolveRef.current) {
+              const resolveSession = pendingSessionResolveRef.current;
+              pendingSessionResolveRef.current = null;
+              pendingSessionRejectRef.current = null;
+              onUpdateTabPropertiesRef.current(tab.id, {
+                agentSessionName: nextName || activeSessionName,
+              });
+              resolveSession(activeSessionId);
+              return;
+            }
+            if (nextName && nextName !== activeSessionName) {
+              onUpdateTabPropertiesRef.current(tab.id, {
+                agentSessionName: nextName || activeSessionName,
+              });
+              return;
+            }
+          }
+          if (taskEvent.sequence > lastEventSeqRef.current) {
+            lastEventSeqRef.current = taskEvent.sequence;
+          }
+          setEvents((prev) => {
+            const base = taskEvent.event_type === "user.prompt"
+              ? prev.filter((event) => !event.event_id.startsWith("local-user.prompt-"))
+              : prev;
+            if (base.some((event) => event.event_id === taskEvent.event_id)) {
+              return base;
+            }
+            return mergeTaskEvents(base, [taskEvent]);
+          });
+          if (isTerminalTaskEvent(taskEvent, agentRuntime)) {
+            if (taskEvent.event_type === "task.failed") {
+              const meta = getMetadata(taskEvent.data) || {};
+              showError(String(meta.message || meta.error || "任务执行失败"));
+            }
+          }
+        } else if (envelope?.type === "server.error") {
+          const payload = envelope.payload || {};
+          const message = String(payload.message || payload.code || "Agent 通信失败");
+          pushAgentChatDebug({
+            phase: "ws.server_error",
+            taskId: activeSessionId,
+            message,
+          });
+          pendingSessionRejectRef.current?.(new Error(message));
+          pendingSessionResolveRef.current = null;
+          pendingSessionRejectRef.current = null;
+          showError(message);
+          setRunStatus("idle");
+          setModelUpdating(false);
+        }
+      } catch (err) {
+        console.error("ACPX websocket parse error:", err);
+        pushAgentChatDebug({
+          phase: "ws.parse_error",
+          taskId: activeSessionId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    };
+
+    socket.onerror = () => {
+      pushAgentChatDebug({
+        phase: "ws.error",
+        taskId: activeSessionId,
+      });
+      if (!closed) showError("Agent WebSocket 连接失败");
+    };
+    socket.onclose = (event) => {
+      pushAgentChatDebug({
+        phase: "ws.close",
+        taskId: activeSessionId,
+        code: event.code,
+        reason: event.reason,
+      });
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+    };
+
+    return {
+      socket,
+      close: () => {
+        closed = true;
+        if (socketRef.current === socket) {
+          socketRef.current = null;
+        }
+        socket.close();
+      },
+    };
+  }, [
+    agentRuntime,
+    buildSessionCreateEnvelope,
+    flushPendingEnvelopes,
+    showError,
+    supportsModelSelection,
+    tab.id,
+  ]);
+
   const agentLogo = useMemo(() => {
     switch (agentKind) {
       case "opencode":
@@ -167,102 +366,12 @@ export function AgentChatTab({
       return;
     }
 
-    let closed = false;
-    const socket = new WebSocket(websocketURL("/ws/acpx", new URLSearchParams({ task_id: sessionId })));
-    socketRef.current = socket;
-    socketTaskIdRef.current = sessionId;
-    setError("");
-
-    socket.onopen = () => {
-      if (closed) return;
-      if (supportsModelSelection && pendingSessionCreatesRef.current.has(sessionId)) {
-        pendingSessionCreatesRef.current.delete(sessionId);
-        sessionCreateSentRef.current.add(sessionId);
-        socket.send(JSON.stringify(buildSessionCreateEnvelope(sessionId, sessionName || sessionId)));
-      }
-      const pending = pendingEnvelopesRef.current;
-      pendingEnvelopesRef.current = [];
-      for (const envelope of pending) {
-        socket.send(JSON.stringify(envelope));
-      }
-    };
-
-    socket.onmessage = (message) => {
-      try {
-        const envelope = JSON.parse(String(message.data));
-        if (envelope?.type === "task.event") {
-          const taskEvent = envelope.payload as TaskEvent;
-          if (!taskEvent || taskEvent.task_id !== sessionId) return;
-          if (taskEvent.event_type === "acpx.session") {
-            const meta = getMetadata(taskEvent.data) || {};
-            const nextName = String(meta.name || meta.agentSessionId || sessionName || "").trim();
-            if (pendingSessionResolveRef.current) {
-              const resolveSession = pendingSessionResolveRef.current;
-              pendingSessionResolveRef.current = null;
-              pendingSessionRejectRef.current = null;
-              onUpdateTabPropertiesRef.current(tab.id, {
-                agentSessionName: nextName || sessionName,
-              });
-              resolveSession(sessionId);
-              return;
-            }
-            if (nextName && nextName !== sessionName) {
-              onUpdateTabPropertiesRef.current(tab.id, {
-                agentSessionName: nextName || sessionName,
-              });
-              return;
-            }
-          }
-          if (taskEvent.sequence > lastEventSeqRef.current) {
-            lastEventSeqRef.current = taskEvent.sequence;
-          }
-          setEvents((prev) => {
-            const base = taskEvent.event_type === "user.prompt"
-              ? prev.filter((event) => !event.event_id.startsWith("local-user.prompt-"))
-              : prev;
-            if (base.some((event) => event.event_id === taskEvent.event_id)) {
-              return base;
-            }
-            return mergeTaskEvents(base, [taskEvent]);
-          });
-          if (isTerminalTaskEvent(taskEvent, agentRuntime)) {
-            if (taskEvent.event_type === "task.failed") {
-              const meta = getMetadata(taskEvent.data) || {};
-              showError(String(meta.message || meta.error || "任务执行失败"));
-            }
-          }
-        } else if (envelope?.type === "server.error") {
-          const payload = envelope.payload || {};
-          const message = String(payload.message || payload.code || "Agent 通信失败");
-          pendingSessionRejectRef.current?.(new Error(message));
-          pendingSessionResolveRef.current = null;
-          pendingSessionRejectRef.current = null;
-          showError(message);
-          setRunStatus("idle");
-          setModelUpdating(false);
-        }
-      } catch (err) {
-        console.error("ACPX websocket parse error:", err);
-      }
-    };
-
-    socket.onerror = () => {
-      if (!closed) showError("Agent WebSocket 连接失败");
-    };
-    socket.onclose = () => {
-      if (socketRef.current === socket) {
-        socketRef.current = null;
-      }
-    };
+    const socketHandle = openAgentSocket(sessionId, sessionName || sessionId);
 
     return () => {
-      closed = true;
-      if (socketRef.current === socket) {
-        socketRef.current = null;
-      }
-      socket.close();
+      socketHandle.close();
     };
-  }, [buildSessionCreateEnvelope, sessionId, sessionName, showError, supportsModelSelection, tab.id]);
+  }, [openAgentSocket, sessionId, sessionName]);
 
   // Auto scroll to bottom
   useEffect(() => {
@@ -298,7 +407,7 @@ export function AgentChatTab({
     let latestTerminalSeq = -1;
 
     for (const event of sorted) {
-      if (event.event_type === "user.prompt" || event.event_type === "task.started") {
+      if (event.event_type === "task.started") {
         latestStartSeq = Math.max(latestStartSeq, Number(event.sequence || 0));
       } else if (isTerminalTaskEvent(event, agentRuntime)) {
         latestTerminalSeq = Math.max(latestTerminalSeq, Number(event.sequence || 0));
@@ -345,6 +454,19 @@ export function AgentChatTab({
   const showDirectACPConfigOptions = agentRuntime === "direct_acp" && configOptions.length > 0;
   const isRunning = runStatus !== "idle";
   const showWorking = isRunning;
+  const hasActiveBackendTurn = useMemo(() => {
+    let latestStartSeq = -1;
+    let latestTerminalSeq = -1;
+    for (const event of events) {
+      const seq = Number(event.sequence || 0);
+      if (event.event_type === "task.started") {
+        latestStartSeq = Math.max(latestStartSeq, seq);
+      } else if (isTerminalTaskEvent(event, agentRuntime)) {
+        latestTerminalSeq = Math.max(latestTerminalSeq, seq);
+      }
+    }
+    return latestStartSeq > latestTerminalSeq;
+  }, [agentRuntime, events]);
 
   useEffect(() => {
     selectedModelIdRef.current = selectedModelId;
@@ -361,34 +483,49 @@ export function AgentChatTab({
 
   const sendAgentEnvelope = useCallback((sessionTaskId: string, envelope: AgentEnvelope) => {
     const socket = socketRef.current;
-    const logInfo = {
+    pushAgentChatDebug({
+      phase: "send.request",
       taskId: sessionTaskId,
       envelopeType: envelope.type,
       socketExists: !!socket,
       socketTaskId: socketTaskIdRef.current,
-      readyState: socket ? socket.readyState : "N/A"
-    };
-    if (typeof window !== "undefined") {
-      if (!(window as any).__debug_log) (window as any).__debug_log = [];
-      (window as any).__debug_log.push(logInfo);
-    }
-    console.log("[DEBUG sendAgentEnvelope]", logInfo);
+      readyState: socket ? socket.readyState : "N/A",
+    });
     if (
       socket &&
       socketTaskIdRef.current === sessionTaskId &&
       socket.readyState === WebSocket.OPEN
     ) {
-      if (typeof window !== "undefined") {
-        (window as any).__debug_log.push("Sending directly");
-      }
+      pushAgentChatDebug({
+        phase: "ws.send",
+        taskId: sessionTaskId,
+        envelopeType: envelope.type,
+        reason: "socket.open",
+      });
       socket.send(JSON.stringify(envelope));
       return;
     }
-    if (typeof window !== "undefined") {
-      (window as any).__debug_log.push("Pushing to pending. Pending size: " + pendingEnvelopesRef.current.length);
-    }
     pendingEnvelopesRef.current.push(envelope);
-  }, []);
+    pushAgentChatDebug({
+      phase: "send.queued",
+      taskId: sessionTaskId,
+      envelopeType: envelope.type,
+      pending: pendingEnvelopesRef.current.length,
+      socketTaskId: socketTaskIdRef.current,
+      readyState: socket ? socket.readyState : "N/A",
+    });
+    if (
+      !socket ||
+      socketTaskIdRef.current !== sessionTaskId ||
+      socket.readyState === WebSocket.CLOSING ||
+      socket.readyState === WebSocket.CLOSED
+    ) {
+      if (socket && socket.readyState !== WebSocket.CLOSING) {
+        socket.close();
+      }
+      openAgentSocket(sessionTaskId, sessionName || sessionTaskId);
+    }
+  }, [openAgentSocket, sessionName]);
 
   const ensureSession = useCallback(async () => {
     if (sessionId) return sessionId;
@@ -485,6 +622,14 @@ export function AgentChatTab({
 
     try {
       const activeSessionId = await ensureSession();
+      const activeSessionName = sessionName || activeSessionId;
+      pushAgentChatDebug({
+        phase: "dispatch.start",
+        taskId: activeSessionId,
+        promptLength: promptText.length,
+        runStatus,
+        hasActiveBackendTurn,
+      });
       const maxSeq = events.reduce((max, ev) => Math.max(max, Number(ev.sequence || 0)), 0);
       const localUserEvent = makeLocalUserPromptEvent(activeSessionId, promptText, maxSeq + 1);
       setEvents((prev) => mergeTaskEvents(prev, [localUserEvent]));
@@ -503,9 +648,7 @@ export function AgentChatTab({
         resume_session_id: activeSessionId,
         model_id: messages.length === 0 ? selectedModelIdRef.current : ""
       };
-      if (sessionName) {
-        dispatchPayload.session_name = sessionName;
-      }
+      dispatchPayload.session_name = activeSessionName;
       const dispatchEnv = {
         id: makeId("msg"),
         type: "task.dispatch",
@@ -533,7 +676,15 @@ export function AgentChatTab({
   async function startConversation(promptText: string) {
     const prompt = promptText.trim();
     if (!prompt) return;
-    if (isRunning) {
+    pushAgentChatDebug({
+      phase: "submit",
+      promptLength: prompt.length,
+      runStatus,
+      isRunning,
+      hasActiveBackendTurn,
+      sessionId,
+    });
+    if (isRunning && hasActiveBackendTurn) {
       enqueuePrompt(prompt);
       return;
     }

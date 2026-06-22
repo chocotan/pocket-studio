@@ -908,9 +908,16 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, command, args...)
+	runCtx := ctx
+	runCancel := func() {}
+	if d.cfg.ACPX.Enabled {
+		runCtx, runCancel = d.acpxCommandContext(ctx, task.Options.TimeoutSeconds)
+	}
+	defer runCancel()
+
+	cmd := exec.CommandContext(runCtx, command, args...)
 	cmd.Dir = workspace.Path
-	setProcessGroup(cmd)
+	configureCommandTermination(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -993,7 +1000,8 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	waitErr := cmd.Wait()
 	wg.Wait()
 	close(rt.done)
-	cancel()
+	runCancel()
+	defer cancel()
 
 	d.mu.Lock()
 	delete(d.tasks, task.TaskID)
@@ -1002,6 +1010,13 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	if waitErr != nil {
 		if rt.isStopping() {
 			emitter.emit("task.killed", map[string]any{"reason": "user_requested"}, nil)
+			return
+		}
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			if d.tryClaudeFallback(ctx, task, workspace.Path, emitter) {
+				return
+			}
+			emitter.emit("task.failed", map[string]any{"error": d.acpxTimeoutError("prompt", d.acpxCommandTimeout(task.Options.TimeoutSeconds))}, nil)
 			return
 		}
 		if emitter.completedNormally() {
@@ -1227,6 +1242,116 @@ func (d *Daemon) ensureACPXTtl(args []string) []string {
 	return append(args, "--ttl", fmt.Sprint(d.cfg.ACPX.TTLSeconds))
 }
 
+func (d *Daemon) acpxCommandTimeout(taskTimeoutSeconds int) time.Duration {
+	if taskTimeoutSeconds > 0 {
+		return time.Duration(taskTimeoutSeconds) * time.Second
+	}
+	if d.cfg.ACPX.CommandTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(d.cfg.ACPX.CommandTimeoutSeconds) * time.Second
+}
+
+func (d *Daemon) acpxCommandContext(parent context.Context, taskTimeoutSeconds int) (context.Context, context.CancelFunc) {
+	timeout := d.acpxCommandTimeout(taskTimeoutSeconds)
+	if timeout <= 0 {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func (d *Daemon) acpxTimeoutError(operation string, timeout time.Duration) string {
+	if timeout <= 0 {
+		return "acpx " + operation + " timed out"
+	}
+	return fmt.Sprintf("acpx %s timed out after %s", operation, timeout)
+}
+
+func configureCommandTermination(cmd *exec.Cmd) {
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error {
+		terminateProcess(cmd)
+		return nil
+	}
+	cmd.WaitDelay = 5 * time.Second
+}
+
+func (d *Daemon) tryClaudeFallback(parent context.Context, task protocol.TaskDispatch, workspacePath string, emitter *taskEmitter) bool {
+	if !d.shouldFallbackToClaude(task) {
+		return false
+	}
+	emitter.emit("task.fallback", map[string]string{
+		"from":   "acpx",
+		"to":     "claude",
+		"reason": d.acpxTimeoutError("prompt", d.acpxCommandTimeout(task.Options.TimeoutSeconds)),
+	}, nil)
+
+	fallbackTask := task
+	fallbackTask.ResumeSessionID = ""
+	args := d.buildClaudeArgs(fallbackTask)
+	timeout := d.acpxCommandTimeout(task.Options.TimeoutSeconds)
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, d.cfg.Claude.Command, args...)
+	cmd.Dir = workspacePath
+	configureCommandTermination(cmd)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		emitter.emit("task.failed", map[string]any{"error": "claude fallback stdout pipe: " + err.Error()}, nil)
+		return true
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		emitter.emit("task.failed", map[string]any{"error": "claude fallback stderr pipe: " + err.Error()}, nil)
+		return true
+	}
+	if err := cmd.Start(); err != nil {
+		emitter.emit("task.failed", map[string]any{"error": "claude fallback start: " + err.Error()}, nil)
+		return true
+	}
+	emitter.emit("task.started", map[string]any{
+		"workspace": workspacePath,
+		"command":   d.cfg.Claude.Command,
+		"args":      args,
+		"agent":     "claude_code",
+		"fallback":  true,
+	}, nil)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		d.scanOutput(stdout, "stdout", emitter)
+	}()
+	go func() {
+		defer wg.Done()
+		d.scanTextOutput(stderr, "stderr", emitter)
+	}()
+	waitErr := cmd.Wait()
+	wg.Wait()
+	if waitErr != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			emitter.emit("task.failed", map[string]any{"error": fmt.Sprintf("claude fallback timed out after %s", timeout)}, nil)
+			return true
+		}
+		emitter.emit("task.failed", map[string]any{"error": waitErr.Error()}, nil)
+		return true
+	}
+	emitter.emit("task.completed", map[string]any{"exit_code": 0, "fallback": "claude"}, nil)
+	return true
+}
+
+func (d *Daemon) shouldFallbackToClaude(task protocol.TaskDispatch) bool {
+	if !d.cfg.ACPX.Enabled {
+		return false
+	}
+	return taskAgentName(task, d.cfg.ACPX.Agent) == "claude" && strings.TrimSpace(d.cfg.Claude.Command) != ""
+}
+
 func ensureACPXJSONFormat(args []string) []string {
 	for i, arg := range args {
 		if arg == "--format" && i+1 < len(args) {
@@ -1400,15 +1525,22 @@ func (d *Daemon) syncACPXSession(ctx context.Context, task protocol.TaskDispatch
 		d.stopDirectACPTask(id)
 	}
 
+	commandCtx, cancel := d.acpxCommandContext(ctx, task.Options.TimeoutSeconds)
+	defer cancel()
+
 	args := d.buildACPXSessionArgs(task, workspacePath, command)
-	cmd := exec.CommandContext(ctx, d.cfg.ACPX.Command, args...)
+	cmd := exec.CommandContext(commandCtx, d.cfg.ACPX.Command, args...)
 	cmd.Dir = workspacePath
+	configureCommandTermination(cmd)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
+		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
+			return "", "", fmt.Errorf("%s", d.acpxTimeoutError("session "+command, d.acpxCommandTimeout(task.Options.TimeoutSeconds)))
+		}
 		text := strings.TrimSpace(stderr.String())
 		if text == "" {
 			text = strings.TrimSpace(stdout.String())

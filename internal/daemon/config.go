@@ -39,12 +39,13 @@ type ClaudeConfig struct {
 }
 
 type ACPXConfig struct {
-	Enabled     bool     `json:"enabled"`
-	Command     string   `json:"command"`
-	Agent       string   `json:"agent"`
-	SessionName string   `json:"session_name"`
-	TTLSeconds  int      `json:"ttl_seconds"`
-	Args        []string `json:"args"`
+	Enabled               bool     `json:"enabled"`
+	Command               string   `json:"command"`
+	Agent                 string   `json:"agent"`
+	SessionName           string   `json:"session_name"`
+	TTLSeconds            int      `json:"ttl_seconds"`
+	CommandTimeoutSeconds int      `json:"command_timeout_seconds"`
+	Args                  []string `json:"args"`
 }
 
 type DirectACPConfig struct {
@@ -87,6 +88,9 @@ func NormalizeConfig(cfg Config) (Config, error) {
 	if cfg.ACPX.TTLSeconds < 0 {
 		return cfg, fmt.Errorf("acpx.ttl_seconds must be >= 0")
 	}
+	if cfg.ACPX.CommandTimeoutSeconds < 0 {
+		return cfg, fmt.Errorf("acpx.command_timeout_seconds must be >= 0")
+	}
 	cfg.DirectACP.Agents = normalizeDirectACPAgents(cfg.DirectACP.Agents)
 	if len(cfg.Workspaces) == 0 {
 		home, _ := os.UserHomeDir()
@@ -126,11 +130,12 @@ func DefaultConfig() Config {
 			Args:    []string{"--output-format", "stream-json", "--verbose"},
 		},
 		ACPX: ACPXConfig{
-			Enabled:    true,
-			Command:    "acpx",
-			Agent:      "claude",
-			TTLSeconds: 300,
-			Args:       []string{"--format", "json", "--approve-all"},
+			Enabled:               true,
+			Command:               "acpx",
+			Agent:                 "claude",
+			TTLSeconds:            300,
+			CommandTimeoutSeconds: 45,
+			Args:                  []string{"--format", "json", "--approve-all"},
 		},
 		DirectACP: DirectACPConfig{
 			Enabled: true,

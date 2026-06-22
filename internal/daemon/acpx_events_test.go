@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"remote-agent/internal/protocol"
 )
@@ -148,6 +150,40 @@ func TestACPXPromptArgsUsePromptSubcommandBeforeSessionOption(t *testing.T) {
 	want := []string{"--format", "json", "--approve-all", "--ttl", "300", "--cwd", "/tmp/work", "claude", "prompt", "--session", "agentbridge", "ping"}
 	if got := strings.Join(args, "\x00"); got != strings.Join(want, "\x00") {
 		t.Fatalf("buildACPXPromptArgs() = %#v, want %#v", args, want)
+	}
+}
+
+func TestACPXSessionEnsureTimesOut(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell sleep test is unix-specific")
+	}
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fake-acpx")
+	script := "#!/bin/sh\nsleep 5\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake acpx: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.ACPX.Command = scriptPath
+	cfg.ACPX.Args = nil
+	cfg.ACPX.TTLSeconds = 0
+	cfg.ACPX.CommandTimeoutSeconds = 1
+	d := New(cfg)
+
+	started := time.Now()
+	_, _, err := d.ensureACPXSession(context.Background(), protocol.TaskDispatch{
+		Agent:       "claude",
+		SessionName: "agentbridge",
+	}, dir, "task-timeout")
+	if err == nil {
+		t.Fatal("ensureACPXSession() error = nil, want timeout")
+	}
+	if !strings.Contains(err.Error(), "acpx session ensure timed out after 1s") {
+		t.Fatalf("ensureACPXSession() error = %q, want timeout text", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("ensureACPXSession() elapsed = %s, want daemon-side timeout", elapsed)
 	}
 }
 

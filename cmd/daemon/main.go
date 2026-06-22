@@ -59,6 +59,7 @@ func configFromFlags() (daemon.Config, error) {
 	flag.StringVar(&cfg.ACPX.Agent, "daemon.acpx.agent", cfg.ACPX.Agent, "default acpx agent")
 	flag.StringVar(&cfg.ACPX.SessionName, "daemon.acpx.session-name", cfg.ACPX.SessionName, "default acpx session name")
 	flag.IntVar(&cfg.ACPX.TTLSeconds, "daemon.acpx.ttl-seconds", cfg.ACPX.TTLSeconds, "acpx session ttl in seconds")
+	flag.IntVar(&cfg.ACPX.CommandTimeoutSeconds, "daemon.acpx.command-timeout-seconds", cfg.ACPX.CommandTimeoutSeconds, "maximum seconds to wait for an acpx session or prompt command; 0 disables the daemon-side timeout")
 	flag.StringVar(&acpxArgs, "daemon.acpx.args", strings.Join(cfg.ACPX.Args, ","), "comma-separated acpx global args")
 	flag.StringVar(&cfg.Claude.Command, "daemon.claude.command", cfg.Claude.Command, "claude command")
 	flag.StringVar(&claudeArgs, "daemon.claude.args", strings.Join(cfg.Claude.Args, ","), "comma-separated claude args")
