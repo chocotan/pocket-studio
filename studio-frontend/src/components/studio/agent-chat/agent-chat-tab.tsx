@@ -65,7 +65,7 @@ export function AgentChatTab({
   const sessionId = tab.agentSessionId;
   const sessionName = tab.agentSessionName || sessionId;
   const agentKind = tab.agentKind || "opencode";
-  const agentRuntime = tab.agentRuntime || "acpx";
+  const agentRuntime = tab.agentRuntime || (agentKind === "codex" || agentKind === "kilo" ? "direct_acp" : "acpx");
   const agentRuntimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : "Agent";
   const supportsModelSelection = agentRuntime === "direct_acp" || agentRuntime === "acpx";
 
@@ -225,16 +225,11 @@ export function AgentChatTab({
             }
             return mergeTaskEvents(base, [taskEvent]);
           });
-          if (isTerminalTaskEvent(taskEvent)) {
-            setRunStatus("idle");
-            awaitingNewTurnRef.current = false;
+          if (isTerminalTaskEvent(taskEvent, agentRuntime)) {
             if (taskEvent.event_type === "task.failed") {
               const meta = getMetadata(taskEvent.data) || {};
               showError(String(meta.message || meta.error || "任务执行失败"));
             }
-          } else if (taskEvent.event_type === "task.started") {
-            setRunStatus("running");
-            awaitingNewTurnRef.current = false;
           }
         } else if (envelope?.type === "server.error") {
           const payload = envelope.payload || {};
@@ -283,24 +278,46 @@ export function AgentChatTab({
 
 
   useEffect(() => {
-    if (runStatus === "idle") return;
-    let lastStarted = 0;
-    let lastTerminal = 0;
-    const runStartedSec = Math.floor(runStartedAtMs / 1000);
-    for (const event of events) {
-      const ts = event.timestamp || 0;
-      if (ts > 0 && ts < runStartedSec) continue;
-      if (event.event_type === "task.started") {
-        lastStarted = Math.max(lastStarted, ts);
-      } else if (isTerminalTaskEvent(event)) {
-        lastTerminal = Math.max(lastTerminal, ts);
+    if (events.length === 0) {
+      setRunStatus("idle");
+      return;
+    }
+
+    const sorted = [...events].sort((left, right) => {
+      const leftSeq = Number(left.sequence || 0);
+      const rightSeq = Number(right.sequence || 0);
+      const leftLocal = left.event_id.startsWith("local-");
+      const rightLocal = right.event_id.startsWith("local-");
+      if (!leftLocal && !rightLocal && leftSeq > 0 && rightSeq > 0 && leftSeq !== rightSeq) {
+        return leftSeq - rightSeq;
+      }
+      return Number(left.timestamp || 0) - Number(right.timestamp || 0);
+    });
+
+    let latestStartSeq = -1;
+    let latestTerminalSeq = -1;
+
+    for (const event of sorted) {
+      if (event.event_type === "user.prompt" || event.event_type === "task.started") {
+        latestStartSeq = Math.max(latestStartSeq, Number(event.sequence || 0));
+      } else if (isTerminalTaskEvent(event, agentRuntime)) {
+        latestTerminalSeq = Math.max(latestTerminalSeq, Number(event.sequence || 0));
       }
     }
-    if (lastTerminal >= lastStarted && lastTerminal > 0) {
+
+    if (latestStartSeq > latestTerminalSeq) {
+      setRunStatus((prev) => (prev === "sending" ? "sending" : "running"));
+    } else {
       setRunStatus("idle");
       awaitingNewTurnRef.current = false;
     }
-  }, [events, runStartedAtMs, runStatus]);
+  }, [events, agentRuntime]);
+
+  useEffect(() => {
+    if (runStatus === "running") {
+      setRunStartedAtMs(Date.now());
+    }
+  }, [runStatus]);
 
   const messages = messageState.messages;
 
@@ -468,7 +485,8 @@ export function AgentChatTab({
 
     try {
       const activeSessionId = await ensureSession();
-      const localUserEvent = makeLocalUserPromptEvent(activeSessionId, promptText);
+      const maxSeq = events.reduce((max, ev) => Math.max(max, Number(ev.sequence || 0)), 0);
+      const localUserEvent = makeLocalUserPromptEvent(activeSessionId, promptText, maxSeq + 1);
       setEvents((prev) => mergeTaskEvents(prev, [localUserEvent]));
 
       if (selectedModelIdRef.current && typeof window !== "undefined" && window.localStorage) {

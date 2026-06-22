@@ -9,14 +9,25 @@ export function getUnixTimestamp(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-export function isTerminalTaskEvent(evt: TaskEvent): boolean {
+export function isTerminalTaskEvent(evt: TaskEvent, agentRuntime?: string): boolean {
+  if (agentRuntime === "direct_acp") {
+    return (
+      evt.event_type === "task.completed" ||
+      evt.event_type === "task.failed" ||
+      evt.event_type === "task.killed" ||
+      evt.event_type === "task.stopped" ||
+      evt.event_type === "turn.completed" ||
+      evt.event_type === "turn.failed"
+    );
+  }
   return (
     evt.event_type === "task.completed" ||
     evt.event_type === "task.failed" ||
     evt.event_type === "task.killed" ||
     evt.event_type === "task.stopped" ||
     evt.event_type === "turn.completed" ||
-    evt.event_type === "turn.failed"
+    evt.event_type === "turn.failed" ||
+    evt.event_type === "metric.updated"
   );
 }
 
@@ -106,7 +117,6 @@ export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
               if (existing.event_id.startsWith("local-user.prompt-")) {
                 merged[index] = {
                   ...event,
-                  sequence: existing.sequence,
                   timestamp: existing.timestamp,
                 };
                 existingIds.add(event.event_id);
@@ -127,14 +137,14 @@ export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
   return merged;
 }
 
-export function makeLocalUserPromptEvent(taskID: string, prompt: string): TaskEvent {
+export function makeLocalUserPromptEvent(taskID: string, prompt: string, sequence?: number): TaskEvent {
   const now = getUnixTimestamp();
   return {
     task_id: taskID,
     event_id: `local-user.prompt-${now}-${Math.random().toString(16).slice(2)}`,
     event_type: "user.prompt",
     source: "web",
-    sequence: now,
+    sequence: sequence !== undefined ? sequence : now,
     timestamp: now,
     data: JSON.stringify({ prompt }),
     raw: JSON.stringify({ local: true, eventType: "user.prompt", prompt }),

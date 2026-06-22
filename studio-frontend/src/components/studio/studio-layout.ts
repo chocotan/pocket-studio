@@ -310,7 +310,7 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): StudioTab | nul
     agentSessionId: typeof tab.agentSessionId === "string" ? tab.agentSessionId : undefined,
     agentSessionName: typeof tab.agentSessionName === "string" ? tab.agentSessionName : undefined,
     agentKind: typeof tab.agentKind === "string" ? tab.agentKind : undefined,
-    agentRuntime: tab.agentRuntime === "direct_acp" ? "direct_acp" : "acpx",
+    agentRuntime: tab.agentRuntime === "direct_acp" || (tab.agentRuntime !== "acpx" && (tab.agentKind === "codex" || tab.agentKind === "kilo")) ? "direct_acp" : "acpx",
     agentModelId: typeof tab.agentModelId === "string" ? tab.agentModelId : undefined,
   };
 }
