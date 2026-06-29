@@ -238,6 +238,32 @@ export function getToolEventId(
   return typeof nested === "string" && nested.trim() ? nested.trim() : fallback;
 }
 
+// Claude stream-json carries tool calls as an assistant/user message whose
+// tool_use / tool_result block is nested in message.content[]. Older daemons
+// forwarded this raw shape with no flat `data`, so the fields the renderer
+// needs (name/input/output/id) sit too deep to find. This digs them out so
+// both old (raw-only) and new (structured-data) events render correctly.
+function claudeToolBlockFromRaw(raw: EventRecord | undefined): EventRecord | undefined {
+  if (!raw) return undefined;
+  const message = raw.message as EventRecord | undefined;
+  const content = message?.content;
+  if (!Array.isArray(content)) return undefined;
+  for (const item of content) {
+    const part = item as EventRecord;
+    if (part?.type === "tool_use") {
+      return { id: part.id, name: part.name, input: part.input };
+    }
+    if (part?.type === "tool_result") {
+      return {
+        id: part.tool_use_id ?? part.id,
+        output: part.content,
+        is_error: part.is_error === true,
+      };
+    }
+  }
+  return undefined;
+}
+
 export function normalizeToolEventMetadata(
   eventType: string,
   dataPayload: EventRecord | undefined,
@@ -245,29 +271,32 @@ export function normalizeToolEventMetadata(
   fallbackId: string
 ) {
   if (eventType === "tool.call") {
-    const toolId = getToolEventId(dataPayload, rawMetadata, fallbackId);
+    const block = claudeToolBlockFromRaw(rawMetadata);
+    const toolId = getToolEventId(dataPayload ?? block, rawMetadata, fallbackId);
     return {
       ...(rawMetadata || {}),
       ...(dataPayload || {}),
       id: toolId,
       toolCallId: toolId,
       tool_call_id: toolId,
-      title: dataPayload?.name ?? rawMetadata?.name ?? rawMetadata?.title,
-      name: dataPayload?.name ?? rawMetadata?.name,
-      input: dataPayload?.input ?? rawMetadata?.input,
+      title: dataPayload?.name ?? rawMetadata?.name ?? block?.name ?? rawMetadata?.title,
+      name: dataPayload?.name ?? rawMetadata?.name ?? block?.name,
+      input: dataPayload?.input ?? rawMetadata?.input ?? block?.input,
       status: dataPayload?.status ?? rawMetadata?.status,
     };
   }
   if (eventType === "tool.output") {
-    const toolId = getToolEventId(dataPayload, rawMetadata, fallbackId);
-    const isError = dataPayload?.is_error === true || dataPayload?.isError === true;
+    const block = claudeToolBlockFromRaw(rawMetadata);
+    const toolId = getToolEventId(dataPayload ?? block, rawMetadata, fallbackId);
+    const isError = dataPayload?.is_error === true || dataPayload?.isError === true || block?.is_error === true;
     const output =
       dataPayload?.text ??
       dataPayload?.output ??
       dataPayload?.result ??
       rawMetadata?.tool_use_result ??
       rawMetadata?.output ??
-      rawMetadata?.result;
+      rawMetadata?.result ??
+      block?.output;
     return {
       ...(rawMetadata || {}),
       ...(dataPayload || {}),

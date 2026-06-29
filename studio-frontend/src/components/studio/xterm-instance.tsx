@@ -252,9 +252,18 @@ interface XtermInstanceProps {
   isActive: boolean;
   layoutVersion?: number;
   theme?: StudioTheme;
+  // Page-zoom factor (1 = 100%). The terminal must NOT be zoomed by an ancestor
+  // CSS transform: xterm maps mouse coordinates via getBoundingClientRect (which
+  // a transform scales) but measures cell size on a canvas (which a transform
+  // does NOT scale), so any CSS scale on the terminal desyncs drag-selection.
+  // Instead we cancel the ancestor scale (net identity transform) and zoom via
+  // font size, which keeps xterm's coordinate math self-consistent.
+  scale?: number;
   onTitleChange?: (title: string, command?: string, fullTitle?: string) => void;
   onActiveFocus?: () => void;
 }
+
+const BASE_FONT_SIZE = 12;
 
 
 export function XtermInstance({
@@ -264,6 +273,7 @@ export function XtermInstance({
   isActive,
   layoutVersion = 0,
   theme = "light",
+  scale = 1,
   onTitleChange,
   onActiveFocus,
 }: XtermInstanceProps) {
@@ -280,6 +290,7 @@ export function XtermInstance({
   const terminalReadyRef = useRef(false);
   const isActiveRef = useRef(isActive);
   const onActiveFocusRef = useRef(onActiveFocus);
+  const scaleRef = useRef(scale);
   const incomingBuf = useRef<Array<string | Uint8Array>>([]);
   // Buffer keystrokes that arrive before WS is OPEN
   const inputBuf    = useRef<string[]>([]);
@@ -295,6 +306,19 @@ export function XtermInstance({
   useEffect(() => {
     isActiveRef.current = isActive;
   }, [isActive]);
+
+  // Zoom the terminal by font size (not by an ancestor CSS scale, which would
+  // break xterm's mouse/selection coordinate math — see XtermInstanceProps.scale).
+  useEffect(() => {
+    scaleRef.current = scale;
+    const term = xtermRef.current;
+    if (!term) return;
+    const nextFontSize = BASE_FONT_SIZE * scale;
+    if (term.options.fontSize !== nextFontSize) {
+      term.options.fontSize = nextFontSize;
+      fitAndResize(true);
+    }
+  }, [scale]);
 
   function sendResizeNow(force = false) {
     const ws = wsRef.current;
@@ -429,7 +453,7 @@ export function XtermInstance({
       term = new XTerminal({
         cursorBlink:   true,
         cursorStyle:   "bar",
-        fontSize:      12,
+        fontSize:      BASE_FONT_SIZE * scaleRef.current,
         fontFamily:    "JetBrains Mono, Menlo, Monaco, Consolas, monospace",
         lineHeight:    1.2,
         scrollback:    0,
@@ -756,6 +780,20 @@ export function XtermInstance({
     <div
       ref={containerRef}
       className="absolute inset-0 box-border overflow-hidden px-0.5 py-0.5"
+      style={
+        scale !== 1
+          ? {
+              // Cancel the ancestor page-zoom transform so the terminal has a
+              // net-identity transform (correct mouse mapping); the visual zoom
+              // comes from the scaled font size instead. The inflated size keeps
+              // the terminal filling its panel after the counter-scale.
+              width: `${scale * 100}%`,
+              height: `${scale * 100}%`,
+              transform: `scale(${1 / scale})`,
+              transformOrigin: "top left",
+            }
+          : undefined
+      }
     />
   );
 }

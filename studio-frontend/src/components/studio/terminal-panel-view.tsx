@@ -55,6 +55,7 @@ interface TerminalPanelViewProps {
   alertTerminalIds?: Set<string>;
   layoutVersion: number;
   theme?: StudioTheme;
+  scale?: number;
 }
 
 function TerminalPanelViewComponent({
@@ -87,6 +88,7 @@ function TerminalPanelViewComponent({
   alertTerminalIds = new Set<string>(),
   layoutVersion,
   theme = "light",
+  scale = 1,
 }: TerminalPanelViewProps) {
   const tabbarRef = useRef<HTMLDivElement | null>(null);
   const tabScrollerRef = useRef<HTMLDivElement | null>(null);
@@ -141,10 +143,16 @@ function TerminalPanelViewComponent({
     const tabbarRect = tabbar.getBoundingClientRect();
     const buttonRect = button.getBoundingClientRect();
     const menuWidth = 160;
-    const left = Math.max(4, Math.min(buttonRect.left - tabbarRect.left, tabbarRect.width - menuWidth - 4));
+    // getBoundingClientRect returns screen px (scaled by the page-zoom CSS
+    // transform on an ancestor), but this menu is absolutely positioned inside
+    // that scaled subtree, where top/left are interpreted in unscaled layout px.
+    // Divide the rect-derived distances by the zoom factor so it lands right.
+    const s = scale || 1;
+    const tabbarWidth = tabbarRect.width / s;
+    const left = Math.max(4, Math.min((buttonRect.left - tabbarRect.left) / s, tabbarWidth - menuWidth - 4));
     setAddMenuPosition({
       left,
-      top: buttonRect.bottom - tabbarRect.top + 2,
+      top: (buttonRect.bottom - tabbarRect.top) / s + 2,
     });
   }
 
@@ -269,7 +277,7 @@ function TerminalPanelViewComponent({
       window.removeEventListener("resize", updateAddMenuPosition);
       scroller?.removeEventListener("scroll", updateAddMenuPosition);
     };
-  }, [addMenuPanelId, panel.id, panel.tabs.length, layoutVersion]);
+  }, [addMenuPanelId, panel.id, panel.tabs.length, layoutVersion, scale]);
 
   useEffect(() => {
     const activeTab = tabButtonRefs.current[panel.activeTabId];
@@ -601,6 +609,7 @@ function TerminalPanelViewComponent({
                     isActive={isFocused && active}
                     layoutVersion={layoutVersion}
                     theme={theme}
+                    scale={scale}
                     onTitleChange={(title, command, fullTitle) => onTitleChange(tab.id, title, command, fullTitle)}
                     onActiveFocus={() => onTerminalFocus(panel.id, tab.id)}
                   />
