@@ -417,8 +417,16 @@ export function AgentChatTab({
     if (latestStartSeq > latestTerminalSeq) {
       setRunStatus((prev) => (prev === "sending" ? "sending" : "running"));
     } else {
-      setRunStatus("idle");
-      awaitingNewTurnRef.current = false;
+      // No "started-but-not-terminated" turn in the event stream. But if the
+      // user just optimistically sent a message (sending), the backend's
+      // task.started for this turn hasn't arrived yet — keep showing "Working"
+      // instead of flickering back to idle. Any non-sending state means we are
+      // genuinely between turns → idle.
+      setRunStatus((prev) => {
+        if (prev === "sending") return "sending";
+        awaitingNewTurnRef.current = false;
+        return "idle";
+      });
     }
   }, [events, agentRuntime]);
 

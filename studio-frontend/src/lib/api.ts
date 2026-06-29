@@ -4,7 +4,7 @@ export interface ClientConfig {
   access_token?: string;
 }
 
-export const DEFAULT_SERVER_URL = "http://127.0.0.1:18080";
+export const DEFAULT_SERVER_URL = "http://127.0.0.1:18081";
 const LOCAL_CONFIG_KEY = "pocket_studio_client_config";
 const DEFAULT_LOCAL_DEV_ACCESS_TOKEN = "ps_local_dev";
 

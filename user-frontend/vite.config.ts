@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const BACKEND = "http://localhost:18080";
+const BACKEND = "http://localhost:18081";
 
 export default defineConfig({
   base: "/user/",

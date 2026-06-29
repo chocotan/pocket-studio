@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
-const BACKEND = 'http://localhost:18080'
+const BACKEND = 'http://localhost:18081'
 
 // https://vite.dev/config/
 export default defineConfig({

@@ -1003,6 +1003,12 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 			delete(h.daemons, daemonKey(dc.userID, dc.deviceID))
 		}
 		h.mu.Unlock()
+		// Daemon connection lost: it is no longer monitoring any run, so treat
+		// every task still marked active on this device as interrupted. Without
+		// this, the task stays "running" forever and a reloaded page is stuck on
+		// "Working". nil running set + no grace window = mark all active.
+		reconciled := h.reconcileRunningTasks(dc.userID, dc.deviceID, nil, 0)
+		h.broadcastReconciled(dc.userID, reconciled)
 		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
 		close(dc.send)
 		_ = dc.conn.Close()
@@ -1067,6 +1073,21 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
 	case protocol.TypeDaemonHeartbeat, protocol.TypeDaemonSnapshot:
 		dc.lastSeen = time.Now()
+		// The daemon's heartbeat carries the authoritative set of task ids it is
+		// actually still running (process-level liveness, opcode-style). Use it
+		// to clear any task the server still thinks is running but the daemon no
+		// longer is — e.g. it died mid-run without a terminal event. A grace
+		// window avoids racing a just-dispatched task whose first heartbeat has
+		// not landed yet.
+		var reconciled []protocol.Envelope
+		if hb, err := protocol.DecodePayload[protocol.DaemonHeartbeat](env); err == nil && dc.deviceID != "" {
+			running := hb.RunningTaskIDs
+			if running == nil {
+				running = []string{} // explicit empty: nothing running
+			}
+			reconciled = h.reconcileRunningTasks(dc.userID, dc.deviceID, running, 20*time.Second)
+		}
+		h.broadcastReconciled(dc.userID, reconciled)
 		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
 	case protocol.TypeTaskSnapshot:
 		snapshot, err := protocol.DecodePayload[protocol.TaskSnapshot](env)
@@ -1333,6 +1354,101 @@ func taskEventEnvelope(event protocol.TaskEvent) protocol.Envelope {
 	env := protocol.NewEnvelope(protocol.TypeTaskEvent, "server", event)
 	env.To.TaskID = event.TaskID
 	return env
+}
+
+// reconcileRunningTasks treats the daemon's process-level liveness as the
+// source of truth for whether a task is still executing. Any task that the
+// server still believes is active (running/stopping/queued) on this device but
+// that the daemon no longer reports as running is considered interrupted (the
+// daemon restarted, the connection dropped, or the agent process died without
+// emitting a terminal event). For each such task we synthesize a `task.failed`
+// terminal event so that both live web clients and a freshly reloaded page see
+// the task as finished instead of being stuck on "Working" forever.
+//
+// runningIDs is the authoritative set of task ids the daemon reports as still
+// running; pass nil to treat every active task on the device as interrupted
+// (used on daemon disconnect / reconnect). graceWindow protects the race where
+// a task was just dispatched but the daemon's first heartbeat after it has not
+// yet arrived: tasks updated within the window are left alone.
+//
+// Caller must NOT hold h.mu. Returns the envelopes to broadcast.
+func (h *Hub) reconcileRunningTasks(userID, deviceID string, runningIDs []string, graceWindow time.Duration) []protocol.Envelope {
+	if deviceID == "" {
+		return nil
+	}
+	var live map[string]struct{}
+	if runningIDs != nil {
+		live = make(map[string]struct{}, len(runningIDs))
+		for _, id := range runningIDs {
+			live[id] = struct{}{}
+		}
+	}
+	now := time.Now().Unix()
+	cutoff := now - int64(graceWindow.Seconds())
+
+	h.mu.Lock()
+	var synthesized []protocol.TaskEvent
+	for taskKey, record := range h.taskRecords {
+		if !strings.HasPrefix(taskKey, userID+"\x00") {
+			continue
+		}
+		if h.taskDevices[taskKey] != deviceID {
+			continue
+		}
+		if !isActiveTaskStatus(record.Status) {
+			continue
+		}
+		if live != nil {
+			if _, ok := live[record.TaskID]; ok {
+				continue // daemon still running it
+			}
+		}
+		if graceWindow > 0 && record.UpdatedAt > cutoff {
+			continue // too fresh; daemon may not have reported it yet
+		}
+
+		evt := protocol.TaskEvent{
+			TaskID:    record.TaskID,
+			EventID:   protocol.NewID("evt"),
+			EventType: "task.failed",
+			Source:    "server",
+			Timestamp: now,
+			Data:      json.RawMessage(`{"error":"task interrupted: daemon no longer running this task","reason":"interrupted"}`),
+		}
+		evt.Sequence = nextTaskEventSequence(record.Events, 0)
+		record.Status = statusFromEvent(evt.EventType, record.Status)
+		record.UpdatedAt = now
+		record.Events = append(record.Events, evt)
+		h.taskRecords[taskKey] = record
+		h.taskEvents[taskKey] = append(h.taskEvents[taskKey], taskEventEnvelope(evt))
+		synthesized = append(synthesized, evt)
+	}
+	h.mu.Unlock()
+
+	if len(synthesized) == 0 {
+		return nil
+	}
+	envs := make([]protocol.Envelope, 0, len(synthesized))
+	for _, evt := range synthesized {
+		envs = append(envs, taskEventEnvelope(evt))
+	}
+	return envs
+}
+
+// broadcastReconciled emits the synthesized interruption events to both the
+// per-user state stream and the per-task subscribers, then refreshes state.
+func (h *Hub) broadcastReconciled(userID string, envs []protocol.Envelope) {
+	if len(envs) == 0 {
+		return
+	}
+	for _, env := range envs {
+		env.From = "server"
+		h.broadcastToUser(userID, env)
+		if env.To.TaskID != "" {
+			h.broadcastToTask(userID, env.To.TaskID, env)
+		}
+	}
+	h.broadcastToUser(userID, protocol.NewEnvelope("server.state", "server", h.stateView(userID)))
 }
 
 func isActiveTaskStatus(status string) bool {

@@ -9,25 +9,21 @@ export function getUnixTimestamp(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-export function isTerminalTaskEvent(evt: TaskEvent, agentRuntime?: string): boolean {
-  if (agentRuntime === "direct_acp") {
-    return (
-      evt.event_type === "task.completed" ||
-      evt.event_type === "task.failed" ||
-      evt.event_type === "task.killed" ||
-      evt.event_type === "task.stopped" ||
-      evt.event_type === "turn.completed" ||
-      evt.event_type === "turn.failed"
-    );
-  }
+export function isTerminalTaskEvent(evt: TaskEvent, _agentRuntime?: string): boolean {
+  // NOTE: `metric.updated` is a mid-stream usage/progress event for the ACP
+  // runtimes (acpx / direct_acp), not a completion signal. It must NOT be
+  // treated as terminal: in the runStatus effect the check is
+  // `latestStartSeq > latestTerminalSeq`, so the first metric.updated after
+  // task.started would otherwise overtake the start sequence and flip the
+  // "Working" indicator to idle while the agent is still generating.
+  // A turn always ends with one of the real terminal events below.
   return (
     evt.event_type === "task.completed" ||
     evt.event_type === "task.failed" ||
     evt.event_type === "task.killed" ||
     evt.event_type === "task.stopped" ||
     evt.event_type === "turn.completed" ||
-    evt.event_type === "turn.failed" ||
-    evt.event_type === "metric.updated"
+    evt.event_type === "turn.failed"
   );
 }
 
