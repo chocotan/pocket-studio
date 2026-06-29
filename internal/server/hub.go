@@ -1395,7 +1395,11 @@ func (h *Hub) reconcileRunningTasks(userID, deviceID string, runningIDs []string
 		if h.taskDevices[taskKey] != deviceID {
 			continue
 		}
-		if !isActiveTaskStatus(record.Status) {
+		// Only genuinely-executing tasks can be "interrupted". Statuses like
+		// "created"/"queued"/"pending" belong to restored session records the
+		// daemon re-advertises on reconnect — they were never running, so
+		// reconciling them would spuriously mark history as failed.
+		if !isRunningTaskStatus(record.Status) {
 			continue
 		}
 		if live != nil {
@@ -1454,6 +1458,19 @@ func (h *Hub) broadcastReconciled(userID string, envs []protocol.Envelope) {
 func isActiveTaskStatus(status string) bool {
 	switch strings.ToLower(status) {
 	case "queued", "pending", "running", "stopping", "created":
+		return true
+	default:
+		return false
+	}
+}
+
+// isRunningTaskStatus reports whether a task is actively executing (has emitted
+// task.started and not yet terminated). Unlike isActiveTaskStatus it excludes
+// "created"/"queued"/"pending", which are session/queue records that were never
+// actually running and must not be reconciled as interrupted.
+func isRunningTaskStatus(status string) bool {
+	switch strings.ToLower(status) {
+	case "running", "stopping":
 		return true
 	default:
 		return false

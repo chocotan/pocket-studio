@@ -123,3 +123,23 @@ func TestReconcileLeavesTerminalTasksUntouched(t *testing.T) {
 		t.Fatalf("status = %q, want completed", got)
 	}
 }
+
+// Restored acpx session records arrive as "created" — they were never running
+// and must NOT be reconciled as interrupted (this was a real false positive
+// that flooded the UI with errors on page load).
+func TestReconcileLeavesCreatedSessionsUntouched(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	old := time.Now().Unix() - 600
+	seedRunningTask(h, "sess-1", "dev-1", "created", old)
+	seedRunningTask(h, "sess-2", "dev-1", "queued", old)
+	seedRunningTask(h, "sess-3", "dev-1", "closed", old)
+
+	envs := h.reconcileRunningTasks(auth.OwnerAdmin, "dev-1", []string{}, 0)
+
+	if len(envs) != 0 {
+		t.Fatalf("expected no events for non-running records, got %d", len(envs))
+	}
+	if got := recordStatus(h, "sess-1"); got != "created" {
+		t.Fatalf("created session status = %q, want unchanged", got)
+	}
+}
