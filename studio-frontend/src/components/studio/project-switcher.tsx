@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Check, FolderGit2, Search, Server } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, FolderGit2, Search, Server, Star } from "lucide-react";
 import type { Device } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -9,10 +9,13 @@ import type { Project } from "./studio-dashboard";
 
 interface ProjectSwitcherProps {
   projects: Project[];
+  favoriteProjects: Project[];
+  favoriteIds: Set<string>;
   devices: Device[];
   currentProjectId?: string;
   onSelectProject: (projectId: string) => void;
-  onMoveProject: (projectId: string, direction: "up" | "down") => void;
+  onToggleFavorite: (projectId: string) => void;
+  onMoveFavorite: (projectId: string, direction: "up" | "down") => void;
   triggerClassName?: string;
   triggerLabel?: string;
 }
@@ -28,12 +31,15 @@ interface ProjectNavMenuProps {
 
 export function ProjectSwitcher({
   projects,
+  favoriteProjects,
+  favoriteIds,
   devices,
   currentProjectId = "",
   onSelectProject,
-  onMoveProject,
+  onToggleFavorite,
+  onMoveFavorite,
   triggerClassName,
-  triggerLabel = "切换项目",
+  triggerLabel = "我的收藏",
 }: ProjectSwitcherProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -41,19 +47,20 @@ export function ProjectSwitcher({
   const currentProject = projects.find((project) => project.id === currentProjectId);
   const currentDevice = currentProject ? deviceForProject(devices, currentProject) : undefined;
   const currentDeviceName = currentDevice ? deviceDisplayName(currentDevice, currentProject?.device_id) : "";
-  const visibleProjects = useMemo(() => {
+
+  const matchesQuery = (project: Project) => {
     const term = query.trim().toLowerCase();
-    if (!term) return projects;
-    return projects.filter((project) => {
-      const device = deviceForProject(devices, project);
-      return [
-        project.name,
-        project.workspace_path,
-        project.device_id,
-        device?.name || "",
-      ].some((value) => value.toLowerCase().includes(term));
-    });
-  }, [devices, projects, query]);
+    if (!term) return true;
+    const device = deviceForProject(devices, project);
+    return [project.name, project.workspace_path, project.device_id, device?.name || ""].some((value) =>
+      value.toLowerCase().includes(term)
+    );
+  };
+  const filteredFavorites = useMemo(() => favoriteProjects.filter(matchesQuery), [favoriteProjects, query, devices]);
+  const otherProjects = useMemo(
+    () => projects.filter((project) => !favoriteIds.has(project.id) && matchesQuery(project)),
+    [projects, favoriteIds, query, devices]
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -65,6 +72,91 @@ export function ProjectSwitcher({
     setOpen(false);
     setQuery("");
     onSelectProject(projectId);
+  }
+
+  function renderRow(project: Project, options: { favorite: boolean; index?: number }) {
+    const device = deviceForProject(devices, project);
+    const deviceName = deviceDisplayName(device, project.device_id);
+    const selected = project.id === currentProjectId;
+    const online = Boolean(device?.workspaces);
+    return (
+      <li key={project.id}>
+        <div
+          className={cn(
+            "grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 transition-colors",
+            selected ? "bg-indigo-50/70 dark:bg-indigo-950/30" : "bg-white hover:bg-slate-50 dark:bg-transparent dark:hover:bg-slate-800/40"
+          )}
+        >
+          <button
+            type="button"
+            onClick={() => selectProject(project.id)}
+            className="min-w-0 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-md", selected ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400")}>
+                <FolderGit2 className="h-3.5 w-3.5" />
+              </span>
+              <span className="min-w-0">
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-xs font-bold text-slate-800 dark:text-slate-100">{project.name}</span>
+                  {selected && <Check className="h-3.5 w-3.5 shrink-0 text-indigo-600" />}
+                </span>
+                <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-slate-500">
+                  <Server className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{deviceName}</span>
+                  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", online ? "bg-emerald-500" : "bg-slate-300")} />
+                </span>
+              </span>
+            </span>
+            <span className="mt-1 block truncate pl-9 font-mono text-[10px] text-slate-400" title={project.workspace_path}>
+              {project.workspace_path}
+            </span>
+          </button>
+
+          <div className="flex items-center gap-1">
+            {options.favorite && (
+              <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  disabled={options.index === 0}
+                  onClick={() => onMoveFavorite(project.id, "up")}
+                  title="上移"
+                  aria-label={`${project.name} 上移`}
+                  className="text-slate-500 hover:text-slate-800"
+                >
+                  <ArrowUp className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  disabled={options.index === favoriteProjects.length - 1}
+                  onClick={() => onMoveFavorite(project.id, "down")}
+                  title="下移"
+                  aria-label={`${project.name} 下移`}
+                  className="text-slate-500 hover:text-slate-800"
+                >
+                  <ArrowDown className="h-3.5 w-3.5" />
+                </Button>
+              </>
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              onClick={() => onToggleFavorite(project.id)}
+              title={options.favorite ? "取消收藏" : "加入收藏"}
+              aria-label={options.favorite ? `取消收藏 ${project.name}` : `收藏 ${project.name}`}
+              className={cn(options.favorite ? "text-amber-500 hover:text-amber-600" : "text-slate-400 hover:text-amber-500")}
+            >
+              <Star className={cn("h-3.5 w-3.5", options.favorite && "fill-current")} />
+            </Button>
+          </div>
+        </div>
+      </li>
+    );
   }
 
   return (
@@ -98,20 +190,20 @@ export function ProjectSwitcher({
           </>
         ) : (
           <>
-            <FolderGit2 className="h-3.5 w-3.5 text-indigo-500" />
-            <span className="font-semibold text-slate-600 dark:text-slate-300">项目切换</span>
+            <Star className="h-3.5 w-3.5 text-amber-500" />
+            <span className="font-semibold text-slate-600 dark:text-slate-300">我的收藏</span>
           </>
         )}
       </button>
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="w-[min(42rem,calc(100dvw-2rem))] max-w-none overflow-hidden p-0 border-slate-200/80 shadow-2xl rounded-2xl animate-scale-in">
-          <DialogHeader className="px-5 py-4 bg-slate-50 border-b border-slate-100">
-            <DialogTitle className="text-sm font-bold text-slate-800 flex items-center gap-2">
-              <span className="h-6.5 w-6.5 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center">
-                <FolderGit2 className="h-3.5 w-3.5 text-indigo-600" />
+          <DialogHeader className="px-5 py-4 bg-slate-50 border-b border-slate-100 dark:bg-slate-900 dark:border-slate-800">
+            <DialogTitle className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
+              <span className="h-6.5 w-6.5 rounded-lg bg-amber-50 border border-amber-100 flex items-center justify-center dark:bg-amber-950/40 dark:border-amber-900/60">
+                <Star className="h-3.5 w-3.5 text-amber-500 fill-current" />
               </span>
-              项目切换
+              我的收藏
             </DialogTitle>
           </DialogHeader>
 
@@ -127,84 +219,38 @@ export function ProjectSwitcher({
               />
             </div>
 
-            <div className="max-h-[min(26rem,60dvh)] overflow-y-auto rounded-xl border border-slate-200 bg-white">
-              {visibleProjects.length === 0 ? (
-                <div className="flex min-h-32 flex-col items-center justify-center gap-2 text-slate-400">
-                  <Search className="h-5 w-5" />
-                  <span className="text-xs font-semibold">没有匹配的项目</span>
+            <div className="max-h-[min(28rem,62dvh)] overflow-y-auto rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+              {/* 收藏 */}
+              <div className="flex items-center gap-1.5 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-amber-600">
+                <Star className="h-3 w-3 fill-current" />
+                收藏
+                <span className="text-slate-400">({favoriteProjects.length})</span>
+              </div>
+              {filteredFavorites.length === 0 ? (
+                <div className="px-3 pb-3 text-[11px] text-slate-400">
+                  {favoriteProjects.length === 0 ? "还没有收藏的项目，点击下方项目的 ☆ 加入收藏" : "没有匹配的收藏项目"}
                 </div>
               ) : (
-                <ul className="divide-y divide-slate-100">
-                  {visibleProjects.map((project) => {
-                    const fullIndex = projects.findIndex((item) => item.id === project.id);
-                    const device = deviceForProject(devices, project);
-                    const deviceName = deviceDisplayName(device, project.device_id);
-                    const selected = project.id === currentProjectId;
-                    const online = Boolean(device?.workspaces);
-                    return (
-                      <li key={project.id}>
-                        <div
-                          className={cn(
-                            "grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2.5 transition-colors",
-                            selected ? "bg-indigo-50/70" : "bg-white hover:bg-slate-50"
-                          )}
-                        >
-                          <button
-                            type="button"
-                            onClick={() => selectProject(project.id)}
-                            className="min-w-0 text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400"
-                          >
-                            <span className="flex min-w-0 items-center gap-2">
-                              <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-md", selected ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500")}>
-                                <FolderGit2 className="h-3.5 w-3.5" />
-                              </span>
-                              <span className="min-w-0">
-                                <span className="flex min-w-0 items-center gap-2">
-                                  <span className="truncate text-xs font-bold text-slate-800">{project.name}</span>
-                                  {selected && <Check className="h-3.5 w-3.5 shrink-0 text-indigo-600" />}
-                                </span>
-                                <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-slate-500">
-                                  <Server className="h-3 w-3 shrink-0" />
-                                  <span className="truncate">{deviceName}</span>
-                                  <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", online ? "bg-emerald-500" : "bg-slate-300")} />
-                                </span>
-                              </span>
-                            </span>
-                            <span className="mt-1 block truncate pl-9 font-mono text-[10px] text-slate-400" title={project.workspace_path}>
-                              {project.workspace_path}
-                            </span>
-                          </button>
+                <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {filteredFavorites.map((project) =>
+                    renderRow(project, { favorite: true, index: favoriteProjects.findIndex((item) => item.id === project.id) })
+                  )}
+                </ul>
+              )}
 
-                          <div className="flex items-center gap-1">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-xs"
-                              disabled={fullIndex <= 0}
-                              onClick={() => onMoveProject(project.id, "up")}
-                              title="上移"
-                              aria-label={`${project.name} 上移`}
-                              className="text-slate-500 hover:text-slate-800"
-                            >
-                              <ArrowUp className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-xs"
-                              disabled={fullIndex === -1 || fullIndex >= projects.length - 1}
-                              onClick={() => onMoveProject(project.id, "down")}
-                              title="下移"
-                              aria-label={`${project.name} 下移`}
-                              className="text-slate-500 hover:text-slate-800"
-                            >
-                              <ArrowDown className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </div>
-                      </li>
-                    );
-                  })}
+              {/* 全部项目 */}
+              <div className="flex items-center gap-1.5 border-t border-slate-100 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:border-slate-800">
+                <FolderGit2 className="h-3 w-3" />
+                全部项目
+                <span className="text-slate-400">({otherProjects.length})</span>
+              </div>
+              {otherProjects.length === 0 ? (
+                <div className="px-3 pb-3 text-[11px] text-slate-400">
+                  {query.trim() ? "没有匹配的项目" : "全部项目都已收藏"}
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {otherProjects.map((project) => renderRow(project, { favorite: false }))}
                 </ul>
               )}
             </div>
@@ -232,8 +278,8 @@ export function ProjectNavMenu({
       <div className="flex min-w-0 items-center gap-1 overflow-x-auto overscroll-x-contain">
         {projects.length === 0 ? (
           <div className="flex h-7 items-center gap-1.5 rounded-md border border-dashed border-slate-200 px-2 text-[11px] font-semibold text-slate-400 dark:border-slate-800 dark:text-slate-500">
-            <FolderGit2 className="h-3.5 w-3.5" />
-            暂无项目
+            <Star className="h-3.5 w-3.5" />
+            还没有收藏，点右上角「我的收藏」添加
           </div>
         ) : (
           projects.map((project, index) => {

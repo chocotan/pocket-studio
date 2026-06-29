@@ -51,8 +51,11 @@ export interface Project {
 interface StudioDashboardProps {
   devices: Device[];
   projects: Project[];
+  favoriteProjects: Project[];
+  favoriteIds: Set<string>;
+  onToggleFavorite: (projectId: string) => void;
+  onMoveFavorite: (projectId: string, direction: "up" | "down") => void;
   onSelectProject: (projectId: string) => void;
-  onMoveProject: (projectId: string, direction: "up" | "down") => void;
   onRefreshProjects: () => void;
   pageZoom: PageZoom;
   onPageZoomChange: (zoom: PageZoom) => void;
@@ -100,8 +103,11 @@ function joinPath(base: string, part: string): string {
 export function StudioDashboard({
   devices,
   projects,
+  favoriteProjects,
+  favoriteIds,
+  onToggleFavorite,
+  onMoveFavorite,
   onSelectProject,
-  onMoveProject,
   onRefreshProjects,
   pageZoom,
   onPageZoomChange,
@@ -356,9 +362,12 @@ export function StudioDashboard({
           />
           <ProjectSwitcher
             projects={projects}
+            favoriteProjects={favoriteProjects}
+            favoriteIds={favoriteIds}
             devices={devices}
             onSelectProject={onSelectProject}
-            onMoveProject={onMoveProject}
+            onToggleFavorite={onToggleFavorite}
+            onMoveFavorite={onMoveFavorite}
             triggerClassName="hidden sm:flex"
           />
           <ZoomSelect value={pageZoom} onChange={onPageZoomChange} />

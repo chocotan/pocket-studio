@@ -9,7 +9,7 @@ import { loadZoom, saveZoom, type PageZoom } from "./lib/zoom";
 import { isTerminalKind, terminalType, type TerminalKind } from "./components/studio/terminal-types";
 import { createStudioWebTransport, type StudioWebTransport, type StudioEnvelope } from "./components/studio/web-transport";
 
-const PROJECT_ORDER_KEY = "pocket-studio-project-order";
+const FAVORITES_KEY = "pocket-studio-favorites";
 const MAX_TERMINAL_NOTIFICATIONS = 100;
 
 export default function App() {
@@ -19,7 +19,7 @@ export default function App() {
   );
   const [devices, setDevices] = useState<Device[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [projectOrder, setProjectOrder] = useState<string[]>(() => loadProjectOrder());
+  const [favorites, setFavorites] = useState<string[]>(() => loadFavorites());
   const [selectedProjectId, setSelectedProjectId] = useState<string>(initialProjectId);
   const [pageZoom, setPageZoom] = useState<PageZoom>(() => loadZoom());
   const [terminalNotifications, setTerminalNotifications] = useState<TerminalNotification[]>([]);
@@ -31,7 +31,9 @@ export default function App() {
   const projectsRef = useRef<Project[]>([]);
   const orderedProjectsRef = useRef<Project[]>([]);
   const webTransportRef = useRef<StudioWebTransport | null>(null);
-  const orderedProjects = useMemo(() => orderProjects(projects, projectOrder), [projectOrder, projects]);
+  const orderedProjects = projects;
+  const favoriteProjects = useMemo(() => favoriteProjectsFrom(projects, favorites), [favorites, projects]);
+  const favoriteIdSet = useMemo(() => new Set(favorites), [favorites]);
   const envelopeHandlerRef = useRef<(envelope: StudioEnvelope) => void>(() => {});
   const unreadProjectIds = useMemo(() => new Set(terminalNotifications.filter((item) => !item.read).map((item) => item.projectId)), [terminalNotifications]);
   const unreadTerminalIds = useMemo(
@@ -44,8 +46,19 @@ export default function App() {
   }, [pageZoom]);
 
   useEffect(() => {
-    saveProjectOrder(mergeProjectOrder(projectOrder, projects));
-  }, [projectOrder, projects]);
+    // Drop favorites whose project no longer exists, and persist.
+    if (projects.length === 0) return;
+    const known = new Set(projects.map((project) => project.id));
+    setFavorites((current) => {
+      const pruned = current.filter((id) => known.has(id));
+      if (pruned.length === current.length) {
+        saveFavorites(current);
+        return current;
+      }
+      saveFavorites(pruned);
+      return pruned;
+    });
+  }, [projects]);
 
   useEffect(() => {
     devicesRef.current = devices;
@@ -208,8 +221,22 @@ export default function App() {
     setTerminalNotifications((current) => current.map((item) => item.read ? item : { ...item, read: true, readAt: now }));
   }
 
-  function handleMoveProject(projectId: string, direction: "up" | "down") {
-    setProjectOrder((current) => moveProjectInOrder(current, orderedProjects, projectId, direction));
+  function handleToggleFavorite(projectId: string) {
+    setFavorites((current) => {
+      const next = current.includes(projectId)
+        ? current.filter((id) => id !== projectId)
+        : [...current, projectId];
+      saveFavorites(next);
+      return next;
+    });
+  }
+
+  function handleMoveFavorite(projectId: string, direction: "up" | "down") {
+    setFavorites((current) => {
+      const next = moveInList(current, projectId, direction);
+      saveFavorites(next);
+      return next;
+    });
   }
 
   const activeProject = orderedProjects.find((p) => p.id === selectedProjectId);
@@ -219,8 +246,11 @@ export default function App() {
         <StudioDashboard
           devices={devices}
           projects={orderedProjects}
+          favoriteProjects={favoriteProjects}
+          favoriteIds={favoriteIdSet}
+          onToggleFavorite={handleToggleFavorite}
+          onMoveFavorite={handleMoveFavorite}
           onSelectProject={handleSelectProject}
-          onMoveProject={handleMoveProject}
           onRefreshProjects={refreshAll}
           pageZoom={pageZoom}
           onPageZoomChange={setPageZoom}
@@ -236,6 +266,10 @@ export default function App() {
             projectId={selectedProjectId}
             project={activeProject}
             projects={orderedProjects}
+            favoriteProjects={favoriteProjects}
+            favoriteIds={favoriteIdSet}
+            onToggleFavorite={handleToggleFavorite}
+            onMoveFavorite={handleMoveFavorite}
             devices={devices}
             pageZoom={pageZoom}
             onPageZoomChange={setPageZoom}
@@ -295,10 +329,10 @@ function replacePath(path: string) {
   window.history.replaceState({}, "", path);
 }
 
-function loadProjectOrder() {
+function loadFavorites() {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(PROJECT_ORDER_KEY);
+    const raw = window.localStorage.getItem(FAVORITES_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
   } catch {
@@ -306,36 +340,34 @@ function loadProjectOrder() {
   }
 }
 
-function saveProjectOrder(order: string[]) {
+function saveFavorites(favorites: string[]) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(PROJECT_ORDER_KEY, JSON.stringify(order));
+    window.localStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites));
   } catch {
     // Ignore storage failures in restricted browser contexts.
   }
 }
 
-function mergeProjectOrder(order: string[], projects: Project[]) {
-  const projectIds = projects.map((project) => project.id);
-  const knownIds = new Set(projectIds);
-  const orderedKnown = order.filter((id) => knownIds.has(id));
-  const orderedSet = new Set(orderedKnown);
-  return [...orderedKnown, ...projectIds.filter((id) => !orderedSet.has(id))];
+// Favorited projects in favorite order, skipping any that no longer exist.
+function favoriteProjectsFrom(projects: Project[], favorites: string[]) {
+  const byId = new Map(projects.map((project) => [project.id, project]));
+  const result: Project[] = [];
+  for (const id of favorites) {
+    const project = byId.get(id);
+    if (project) result.push(project);
+  }
+  return result;
 }
 
-function orderProjects(projects: Project[], order: string[]) {
-  const rank = new Map(mergeProjectOrder(order, projects).map((id, index) => [id, index]));
-  return [...projects].sort((a, b) => (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER));
-}
-
-function moveProjectInOrder(order: string[], projects: Project[], projectId: string, direction: "up" | "down") {
-  const nextOrder = mergeProjectOrder(order, projects);
-  const index = nextOrder.indexOf(projectId);
-  if (index === -1) return nextOrder;
+function moveInList(list: string[], id: string, direction: "up" | "down") {
+  const index = list.indexOf(id);
+  if (index === -1) return list;
   const swapWith = direction === "up" ? index - 1 : index + 1;
-  if (swapWith < 0 || swapWith >= nextOrder.length) return nextOrder;
-  [nextOrder[index], nextOrder[swapWith]] = [nextOrder[swapWith], nextOrder[index]];
-  return nextOrder;
+  if (swapWith < 0 || swapWith >= list.length) return list;
+  const next = [...list];
+  [next[index], next[swapWith]] = [next[swapWith], next[index]];
+  return next;
 }
 
 function displayDeviceName(value: string) {

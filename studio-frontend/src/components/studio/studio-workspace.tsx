@@ -5,7 +5,7 @@ import type { Device } from "@/lib/types";
 import { type StudioTheme } from "./terminal-types";
 import type { Project } from "./studio-dashboard";
 import { EmptyWorkspace } from "./empty-workspace";
-import { ProjectNavMenu } from "./project-switcher";
+import { ProjectNavMenu, ProjectSwitcher } from "./project-switcher";
 import {
   normalizeSizes,
   sizesFromLayoutMap,
@@ -25,6 +25,10 @@ interface StudioWorkspaceProps {
   projectId: string;
   project: Project;
   projects: Project[];
+  favoriteProjects: Project[];
+  favoriteIds: Set<string>;
+  onToggleFavorite: (projectId: string) => void;
+  onMoveFavorite: (projectId: string, direction: "up" | "down") => void;
   devices: Device[];
   pageZoom: PageZoom;
   onPageZoomChange: (zoom: PageZoom) => void;
@@ -67,6 +71,10 @@ export function StudioWorkspace({
   projectId,
   project,
   projects,
+  favoriteProjects,
+  favoriteIds,
+  onToggleFavorite,
+  onMoveFavorite,
   devices,
   pageZoom,
   onPageZoomChange,
@@ -190,6 +198,7 @@ export function StudioWorkspace({
           alertTerminalIds={alertTerminalIds}
           layoutVersion={layoutVersion}
           theme={theme}
+          scale={panelScale}
         />
       );
     }
@@ -264,7 +273,7 @@ export function StudioWorkspace({
           </div>
 
           <ProjectNavMenu
-            projects={projects}
+            projects={favoriteProjects}
             devices={devices}
             currentProjectId={projectId}
             alertProjectIds={new Set([...alertProjectIds].filter((id) => id !== projectId))}
@@ -273,6 +282,17 @@ export function StudioWorkspace({
           />
 
           <div className="flex shrink-0 items-center gap-1.5">
+            <ProjectSwitcher
+              projects={projects}
+              favoriteProjects={favoriteProjects}
+              favoriteIds={favoriteIds}
+              devices={devices}
+              currentProjectId={projectId}
+              onSelectProject={onSelectProject}
+              onToggleFavorite={onToggleFavorite}
+              onMoveFavorite={onMoveFavorite}
+              triggerClassName="hidden md:flex"
+            />
             <NotificationCenter
               notifications={notifications}
               open={notificationCenterOpen}
