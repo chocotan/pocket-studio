@@ -1752,7 +1752,14 @@ func (a *agentOutputAdapter) handle(raw json.RawMessage) {
 		return
 	}
 	a.flush()
-	a.emitter.emit(classifyClaudeEvent(raw), nil, raw)
+	eventType := classifyClaudeEvent(raw)
+	if eventType == "tool.call" || eventType == "tool.output" {
+		if data := claudeToolEventData(raw); data != nil {
+			a.emitter.emit(eventType, data, raw)
+			return
+		}
+	}
+	a.emitter.emit(eventType, nil, raw)
 }
 
 func (a *agentOutputAdapter) flush() {
@@ -2048,6 +2055,52 @@ func containsToolUse(obj map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// claudeToolEventData extracts a normalized tool payload from a claude
+// stream-json assistant/user message whose content array holds a tool_use or
+// tool_result block. The frontend's tool-call renderer expects flat
+// name/input/output/tool_use_id fields (the same shape emitRawToolUpdate
+// produces for the ACP path); the raw claude shape buries them inside
+// message.content[], so without this the tool card renders blank. Returns nil
+// when no tool block is found (caller falls back to emitting raw with nil data).
+func claudeToolEventData(raw json.RawMessage) map[string]any {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+	message, _ := obj["message"].(map[string]any)
+	content, _ := message["content"].([]any)
+	for _, item := range content {
+		part, _ := item.(map[string]any)
+		switch partType, _ := part["type"].(string); partType {
+		case "tool_use":
+			id := stringField(part, "id", "tool_use_id")
+			if id == "" {
+				id = protocol.NewID("tool")
+			}
+			return map[string]any{
+				"tool_use_id": id,
+				"name":        stringField(part, "name"),
+				"input":       part["input"],
+				"status":      "running",
+			}
+		case "tool_result":
+			id := stringField(part, "tool_use_id", "id")
+			data := map[string]any{
+				"tool_use_id": id,
+				"output":      part["content"],
+			}
+			if isErr, _ := part["is_error"].(bool); isErr {
+				data["is_error"] = true
+				data["status"] = "failed"
+			} else {
+				data["status"] = "completed"
+			}
+			return data
+		}
+	}
+	return nil
 }
 
 func (d *Daemon) stopTask(taskID string) {

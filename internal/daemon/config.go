@@ -134,7 +134,7 @@ func DefaultConfig() Config {
 			Command:               "acpx",
 			Agent:                 "claude",
 			TTLSeconds:            300,
-			CommandTimeoutSeconds: 45,
+			CommandTimeoutSeconds: 1800,
 			Args:                  []string{"--format", "json", "--approve-all"},
 		},
 		DirectACP: DirectACPConfig{
