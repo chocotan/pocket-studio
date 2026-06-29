@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestNormalizeConfigRequiresServerURLAndToken(t *testing.T) {
+func TestNormalizeConfigRequiresServerURL(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Device.ID = "dev_test"
 	cfg.Workspaces = nil
@@ -15,9 +15,12 @@ func TestNormalizeConfigRequiresServerURLAndToken(t *testing.T) {
 		t.Fatalf("NormalizeConfig() without server URL error = %v, want daemon.server.url error", err)
 	}
 
+	// A token is intentionally NOT required: local desktop mode runs an
+	// open-auth server and connects with an empty token. Auth is enforced
+	// server-side at the WebSocket handshake, not here.
 	cfg.Server.URL = "ws://localhost:18080/ws/daemon"
-	if _, err := NormalizeConfig(cfg); err == nil || !strings.Contains(err.Error(), "daemon.server.token") {
-		t.Fatalf("NormalizeConfig() without server token error = %v, want daemon.server.token error", err)
+	if _, err := NormalizeConfig(cfg); err != nil {
+		t.Fatalf("NormalizeConfig() with empty token error = %v, want nil", err)
 	}
 }
 

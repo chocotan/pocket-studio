@@ -72,9 +72,11 @@ func NormalizeConfig(cfg Config) (Config, error) {
 		return cfg, fmt.Errorf("daemon.server.url is required")
 	}
 	cfg.Server.URL = strings.TrimSpace(cfg.Server.URL)
-	if strings.TrimSpace(cfg.Server.Token) == "" {
-		return cfg, fmt.Errorf("daemon.server.token is required")
-	}
+	// The token is intentionally NOT required here. In local desktop mode the
+	// bundled server runs with an empty admin token (open auth) and accepts an
+	// empty daemon token; requiring one would make the daemon crash-loop on
+	// startup. When the server has auth enabled, an empty/incorrect token is
+	// rejected at the WebSocket handshake instead — the correct layer for it.
 	cfg.Server.Token = strings.TrimSpace(cfg.Server.Token)
 	if cfg.Claude.Command == "" {
 		cfg.Claude.Command = "claude"
