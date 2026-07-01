@@ -4434,7 +4434,7 @@ func tmuxTitleLooksShortenedPath(title string) bool {
 	if title == "~" || strings.HasPrefix(title, "~/") || strings.HasPrefix(title, "..") {
 		return true
 	}
-	if strings.HasPrefix(title, "/") || strings.Contains(title, "/") || strings.Contains(title, "\\") {
+	if strings.HasPrefix(title, "/") {
 		return true
 	}
 	lower := strings.ToLower(title)
