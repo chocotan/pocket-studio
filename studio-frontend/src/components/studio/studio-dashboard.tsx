@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Plus,
   FolderGit2,
@@ -33,7 +33,7 @@ import {
 import { ZoomSelect } from "./zoom-select";
 import type { PageZoom } from "@/lib/zoom";
 import { ShortcutSettingsContent } from "./studio-settings";
-import { ProjectSwitcher } from "./project-switcher";
+import { ProjectSwitcher, deviceDisplayName } from "./project-switcher";
 import { NotificationCenter } from "./notification-center";
 import type { TerminalNotification } from "./terminal-notifications";
 import { ProjectCard } from "./project-card";
@@ -150,6 +150,8 @@ export function StudioDashboard({
   const [newFolderName, setNewFolderName] = useState("");
   const [showNewFolderInput, setShowNewFolderInput] = useState(false);
   const [creatingFolder, setCreatingFolder] = useState(false);
+  const [dialogDeviceId, setDialogDeviceId] = useState("");
+  const [dirSearchQuery, setDirSearchQuery] = useState("");
 
   useEffect(() => {
     if (devices.length > 0 && !selectedDeviceId) {
@@ -172,6 +174,7 @@ export function StudioDashboard({
   // Initialize directory browsing path when dialog opens
   useEffect(() => {
     if (createOpen && activeDevice) {
+      setDialogDeviceId(activeDevice.id);
       const initialPath = activeDevice?.workspaces?.[0]?.path
         ? getParentPath(activeDevice.workspaces[0].path)
         : "~";
@@ -181,17 +184,61 @@ export function StudioDashboard({
       setDirError("");
       setNewFolderName("");
       setShowNewFolderInput(false);
+      setDirSearchQuery("");
     }
   }, [createOpen, activeDevice]);
 
+  // Sync browsing path when dialog target device changes
+  useEffect(() => {
+    if (createOpen && dialogDeviceId) {
+      const dev = devices.find((d) => d.id === dialogDeviceId);
+      if (dev) {
+        const initialPath = dev?.workspaces?.[0]?.path
+          ? getParentPath(dev.workspaces[0].path)
+          : "~";
+        setBrowsingPath(initialPath);
+        setNewProjPath(dev?.workspaces?.[0]?.path || initialPath);
+        setDirEntries([]);
+        setDirSearchQuery("");
+      }
+    }
+  }, [dialogDeviceId, createOpen, devices]);
+
+  // Sync inputs dynamically as user browses directories
+  useEffect(() => {
+    if (showBrowser && browsingPath) {
+      setNewProjPath(browsingPath);
+      const base = getBasename(browsingPath);
+      if (base) {
+        setNewProjName(base);
+      }
+    }
+  }, [browsingPath, showBrowser]);
+
+  const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handlePathInputChange = (val: string) => {
+    setNewProjPath(val);
+    const base = getBasename(val);
+    if (base) {
+      setNewProjName(base);
+    }
+    // Debounce syncing browsingPath so we do not spam daemon list requests while typing
+    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    syncTimeoutRef.current = setTimeout(() => {
+      if (val.startsWith("/") || val.startsWith("~")) {
+        setBrowsingPath(val);
+      }
+    }, 800);
+  };
+
   // Load directory items
-  async function loadDirectory(path: string) {
-    if (!selectedDeviceId) return;
+  async function loadDirectory(path: string, deviceId = selectedDeviceId) {
+    if (!deviceId) return;
     setDirLoading(true);
     setDirError("");
     try {
       const res = await postJSON<WorkspaceListResult>(
-        `/api/workspace/list?device_id=${encodeURIComponent(selectedDeviceId)}`,
+        `/api/workspace/list?device_id=${encodeURIComponent(deviceId)}`,
         {
           request_id: `req-${Math.random().toString(36).slice(2)}`,
           workspace_path: path,
@@ -218,13 +265,14 @@ export function StudioDashboard({
   // Reload when browsing path changes or browser toggled open
   useEffect(() => {
     if (showBrowser && browsingPath) {
-      loadDirectory(browsingPath);
+      loadDirectory(browsingPath, dialogDeviceId || selectedDeviceId);
     }
-  }, [showBrowser, browsingPath]);
+  }, [showBrowser, browsingPath, dialogDeviceId, selectedDeviceId]);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!newProjName.trim() || !selectedDeviceId || !newProjPath.trim()) {
+    const devId = dialogDeviceId || selectedDeviceId;
+    if (!newProjName.trim() || !devId || !newProjPath.trim()) {
       setError("所有字段均为必填项");
       return;
     }
@@ -233,7 +281,7 @@ export function StudioDashboard({
     try {
       await postJSON<Project>("/api/project/create", {
         name: newProjName.trim(),
-        device_id: selectedDeviceId,
+        device_id: devId,
         workspace_path: newProjPath.trim(),
       });
       setNewProjName("");
@@ -581,19 +629,25 @@ export function StudioDashboard({
               </div>
             )}
 
-            {/* Field: Name */}
-            <div className="space-y-1.5">
-              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                显示名称
-              </Label>
-              <Input
-                required
-                value={newProjName}
-                onChange={(e) => setNewProjName(e.target.value)}
-                placeholder="例如 my-pocket-studio"
-                className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 h-9"
-              />
-            </div>
+            {/* Field: Target Device */}
+            {devices.length > 1 && (
+              <div className="space-y-1.5">
+                <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                  开发机 (目标设备)
+                </Label>
+                <select
+                  value={dialogDeviceId}
+                  onChange={(e) => setDialogDeviceId(e.target.value)}
+                  className="w-full text-xs rounded-xl border border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 h-9 px-3 outline-none"
+                >
+                  {devices.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {deviceDisplayName(device, device.id)} {device.id === selectedDeviceId ? "(当前选中)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             {/* Field: Path */}
             <div className="space-y-1.5">
@@ -604,13 +658,7 @@ export function StudioDashboard({
                 <Input
                   required
                   value={newProjPath}
-                  onChange={(e) => {
-                    setNewProjPath(e.target.value);
-                    const base = getBasename(e.target.value);
-                    if (base && (!newProjName || newProjName === getBasename(newProjPath))) {
-                      setNewProjName(base);
-                    }
-                  }}
+                  onChange={(e) => handlePathInputChange(e.target.value)}
                   placeholder="/home/choco/Downloads/project-name"
                   className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 font-mono h-9 flex-1"
                 />
@@ -624,6 +672,20 @@ export function StudioDashboard({
                   {showBrowser ? "关闭浏览" : "浏览目录"}
                 </Button>
               </div>
+            </div>
+
+            {/* Field: Name */}
+            <div className="space-y-1.5">
+              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                显示名称
+              </Label>
+              <Input
+                required
+                value={newProjName}
+                onChange={(e) => setNewProjName(e.target.value)}
+                placeholder="例如 my-pocket-studio"
+                className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 h-9"
+              />
             </div>
 
             {/* ── Built-in Directory Picker ── */}
@@ -661,6 +723,52 @@ export function StudioDashboard({
                   </div>
                 </div>
 
+                {/* Quick Access Shortcuts */}
+                {(() => {
+                  const currentDevice = devices.find((d) => d.id === (dialogDeviceId || selectedDeviceId));
+                  const workspacePaths = currentDevice?.workspaces?.map(w => w.path) || [];
+                  const parentPaths = Array.from(new Set(workspacePaths.map(p => getParentPath(p)).filter(Boolean)));
+                  return (
+                    <div className="flex flex-wrap gap-1 border-b border-slate-200/50 pb-2 text-[10px]">
+                      <button
+                        type="button"
+                        onClick={() => setBrowsingPath("~")}
+                        className="px-1.5 py-0.5 rounded bg-slate-205/60 hover:bg-slate-200 text-slate-600 font-bold transition-colors cursor-pointer"
+                      >
+                        家目录 (~)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBrowsingPath("/")}
+                        className="px-1.5 py-0.5 rounded bg-slate-205/60 hover:bg-slate-200 text-slate-600 font-bold transition-colors cursor-pointer"
+                      >
+                        根目录 (/)
+                      </button>
+                      {parentPaths.slice(0, 3).map((p) => (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() => setBrowsingPath(p)}
+                          title={p}
+                          className="px-1.5 py-0.5 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-600 font-bold transition-colors max-w-[120px] truncate cursor-pointer"
+                        >
+                          {getBasename(p) || p}
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
+
+                {/* Filter input */}
+                <div className="relative">
+                  <Input
+                    placeholder="筛选当前目录下的文件夹..."
+                    value={dirSearchQuery}
+                    onChange={(e) => setDirSearchQuery(e.target.value)}
+                    className="h-8 text-xs rounded-lg border-slate-200 bg-white focus-visible:ring-indigo-500/20"
+                  />
+                </div>
+
                 {/* Inline New Folder Input */}
                 {showNewFolderInput && (
                   <div className="flex gap-1.5 bg-white p-2 rounded-lg border border-slate-200 shadow-inner">
@@ -693,12 +801,18 @@ export function StudioDashboard({
                     <div className="flex-1 text-center py-6 text-xs text-rose-500 bg-rose-50/50 rounded-lg p-3 border border-rose-100 font-medium">
                       {dirError}
                     </div>
-                  ) : dirEntries.length === 0 ? (
-                    <div className="flex-1 text-center py-8 text-xs text-slate-400">
-                      此目录下无其他文件夹
-                    </div>
-                  ) : (
-                    dirEntries.map((entry) => (
+                  ) : (() => {
+                    const filteredEntries = dirEntries.filter(entry =>
+                      entry.name.toLowerCase().includes(dirSearchQuery.toLowerCase())
+                    );
+                    if (filteredEntries.length === 0) {
+                      return (
+                        <div className="flex-1 text-center py-8 text-xs text-slate-400">
+                          {dirSearchQuery ? "未找到匹配的文件夹" : "此目录下无其他文件夹"}
+                        </div>
+                      );
+                    }
+                    return filteredEntries.map((entry) => (
                       <button
                         key={entry.path}
                         type="button"
@@ -711,8 +825,8 @@ export function StudioDashboard({
                         </span>
                         <ChevronRight className="h-3 w-3 text-slate-350 opacity-0 group-hover:opacity-100 transition-opacity" />
                       </button>
-                    ))
-                  )}
+                    ));
+                  })()}
                 </div>
 
                 {/* Confirm Selector Button */}
@@ -724,7 +838,7 @@ export function StudioDashboard({
                     className="h-8 px-3 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg flex items-center gap-1 cursor-pointer"
                   >
                     <Check className="h-3 w-3" />
-                    选择当前目录
+                    确定选择此目录
                   </Button>
                 </div>
               </div>
