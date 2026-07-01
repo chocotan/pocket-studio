@@ -2228,14 +2228,13 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	key := terminalKey(userID, projID, terminalID)
 	terminal := &terminalConn{conn: conn}
 	h.termMu.Lock()
-	replaced := h.terminalConns[key]
-	h.terminalConns[key] = map[*terminalConn]struct{}{
-		terminal: {},
+	subscribers := h.terminalConns[key]
+	if subscribers == nil {
+		subscribers = make(map[*terminalConn]struct{})
+		h.terminalConns[key] = subscribers
 	}
+	subscribers[terminal] = struct{}{}
 	h.termMu.Unlock()
-	for old := range replaced {
-		_ = old.conn.Close()
-	}
 	defer func() {
 		h.termMu.Lock()
 		if subscribers := h.terminalConns[key]; subscribers != nil {
