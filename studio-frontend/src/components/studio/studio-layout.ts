@@ -24,6 +24,7 @@ export interface StudioTab {
   agentKind?: string;
   agentRuntime?: "acpx" | "direct_acp";
   agentModelId?: string;
+  projectId?: string;
 }
 
 export interface TerminalPanel {
@@ -50,7 +51,7 @@ export interface StudioState {
   newTerminalType: TerminalKind;
 }
 
-export function createTerminalTab(kind: TerminalKind): TerminalTab {
+export function createTerminalTab(kind: TerminalKind, projectId?: string): TerminalTab {
   const type = terminalType(kind);
   return {
     id: makeId("term"),
@@ -59,12 +60,13 @@ export function createTerminalTab(kind: TerminalKind): TerminalTab {
     termType: type.value,
     activeCommand: type.command,
     titleSource: "initial",
+    projectId,
   };
 }
 
 export type TerminalTab = StudioTab;
 
-export function createFileExplorerTab(): StudioTab {
+export function createFileExplorerTab(projectId?: string): StudioTab {
   return {
     id: makeId("file"),
     kind: "file_explorer",
@@ -72,10 +74,11 @@ export function createFileExplorerTab(): StudioTab {
     termType: "bash",
     activeCommand: "",
     titleSource: "initial",
+    projectId,
   };
 }
 
-export function createFileViewerTab(path: string, kind: "text" | "image" | "unknown" = "unknown"): StudioTab {
+export function createFileViewerTab(path: string, kind: "text" | "image" | "unknown" = "unknown", projectId?: string): StudioTab {
   return {
     id: makeId("view"),
     kind: "file_viewer",
@@ -85,6 +88,7 @@ export function createFileViewerTab(path: string, kind: "text" | "image" | "unkn
     titleSource: "initial",
     filePath: path,
     fileKind: kind,
+    projectId,
   };
 }
 
@@ -92,7 +96,8 @@ export function createAgentChatTab(
   agentKind: string,
   agentSessionId?: string,
   title?: string,
-  agentRuntime: StudioTab["agentRuntime"] = "acpx"
+  agentRuntime: StudioTab["agentRuntime"] = "acpx",
+  projectId?: string
 ): StudioTab {
   const runtimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : "Agent";
   return {
@@ -106,11 +111,12 @@ export function createAgentChatTab(
     agentSessionId,
     agentRuntime,
     agentModelId: undefined,
+    projectId,
   };
 }
 
-export function createTerminalPanel(kind: TerminalKind, id = makeId("panel")): TerminalPanel {
-  const tab = createTerminalTab(kind);
+export function createTerminalPanel(kind: TerminalKind, id = makeId("panel"), projectId?: string): TerminalPanel {
+  const tab = createTerminalTab(kind, projectId);
   return {
     type: "panel",
     id,
@@ -312,6 +318,7 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): StudioTab | nul
     agentKind: typeof tab.agentKind === "string" ? tab.agentKind : undefined,
     agentRuntime: tab.agentRuntime === "direct_acp" || (tab.agentRuntime !== "acpx" && (tab.agentKind === "codex" || tab.agentKind === "kilo")) ? "direct_acp" : "acpx",
     agentModelId: typeof tab.agentModelId === "string" ? tab.agentModelId : undefined,
+    projectId: typeof tab.projectId === "string" ? tab.projectId : undefined,
   };
 }
 

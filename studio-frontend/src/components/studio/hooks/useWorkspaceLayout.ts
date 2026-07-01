@@ -79,6 +79,7 @@ export function useWorkspaceLayout({
   const [loadedProjectId, setLoadedProjectId] = useState("");
 
   const skipSaveRef = useRef(true);
+  const prevDeviceRef = useRef<string | null>(null);
 
   function deleteAgentSession(tab: StudioTab) {
     if (tab.kind !== "agent_chat" || !tab.agentSessionId) return;
@@ -163,6 +164,15 @@ export function useWorkspaceLayout({
 
   useEffect(() => {
     let cancelled = false;
+    const shareDeviceLayout = localStorage.getItem("pocket-studio-share-device-layout") !== "false";
+
+    if (shareDeviceLayout && prevDeviceRef.current === project.device_id && layoutTree) {
+      setLoadedProjectId(projectId);
+      setStateLoaded(true);
+      return;
+    }
+
+    prevDeviceRef.current = project.device_id;
     skipSaveRef.current = true;
     setStateLoaded(false);
     setLoadedProjectId("");
@@ -310,13 +320,13 @@ export function useWorkspaceLayout({
       const terminalTabs = existingTabs.filter((t) => t.kind === "terminal");
 
       if (explorerTabs.length === 0) {
-        explorerTabs.push(createFileExplorerTab());
+        explorerTabs.push(createFileExplorerTab(projectId));
       }
       if (editorTabs.length === 0) {
-        editorTabs.push(createTerminalTab("bash"));
+        editorTabs.push(createTerminalTab("bash", projectId));
       }
       if (terminalTabs.length === 0) {
-        terminalTabs.push(createTerminalTab("bash"));
+        terminalTabs.push(createTerminalTab("bash", projectId));
       }
 
       const explorerPanel: TerminalPanel = {
@@ -364,9 +374,9 @@ export function useWorkspaceLayout({
     } else if (type === 2) {
       const terminalTabs = existingTabs.filter((t) => t.kind === "terminal");
       if (terminalTabs.length === 0) {
-        terminalTabs.push(createTerminalTab("bash"));
+        terminalTabs.push(createTerminalTab("bash", projectId));
       }
-      const panel = createTerminalPanel("bash");
+      const panel = createTerminalPanel("bash", undefined, projectId);
       panel.tabs = terminalTabs;
       panel.activeTabId = terminalTabs[0].id;
       setLayoutTree(panel);
@@ -375,7 +385,7 @@ export function useWorkspaceLayout({
       const terminalTabs = existingTabs.filter((t) => t.kind === "terminal");
       if (terminalTabs.length < 2) {
         while (terminalTabs.length < 2) {
-          terminalTabs.push(createTerminalTab("bash"));
+          terminalTabs.push(createTerminalTab("bash", projectId));
         }
       }
       const mid = Math.ceil(terminalTabs.length / 2);
@@ -411,13 +421,13 @@ export function useWorkspaceLayout({
       const terminalTabs = existingTabs.filter((t) => t.kind === "terminal");
 
       if (explorerTabs.length === 0) {
-        explorerTabs.push(createFileExplorerTab());
+        explorerTabs.push(createFileExplorerTab(projectId));
       }
       if (editorTabs.length === 0) {
-        editorTabs.push(createTerminalTab("bash"));
+        editorTabs.push(createTerminalTab("bash", projectId));
       }
       if (terminalTabs.length === 0) {
-        terminalTabs.push(createTerminalTab("bash"));
+        terminalTabs.push(createTerminalTab("bash", projectId));
       }
 
       const leftPanel: TerminalPanel = {
@@ -490,25 +500,25 @@ export function useWorkspaceLayout({
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleAddTab(panelId: string, kind: TerminalKind) {
-    const tab = createTerminalTab(kind);
-    setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : createTerminalPanel(kind, panelId)));
+  function handleAddTab(panelId: string, kind: TerminalKind, tabProjectId?: string) {
+    const tab = createTerminalTab(kind, tabProjectId);
+    setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : createTerminalPanel(kind, panelId, tabProjectId)));
     setFocusedId(panelId);
     setNewTerminalType(kind);
     setAddMenuPanelId(null);
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleAddFileExplorer(panelId: string) {
-    const tab = createFileExplorerTab();
+  function handleAddFileExplorer(panelId: string, tabProjectId?: string) {
+    const tab = createFileExplorerTab(tabProjectId);
     setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : null));
     setFocusedId(panelId);
     setAddMenuPanelId(null);
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleAddAgentChat(panelId: string, agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "acpx") {
-    const tab = createAgentChatTab(agentKind, undefined, undefined, agentRuntime);
+  function handleAddAgentChat(panelId: string, agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "acpx", tabProjectId?: string) {
+    const tab = createAgentChatTab(agentKind, undefined, undefined, agentRuntime, tabProjectId);
     setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : null));
     setFocusedId(panelId);
     setAddMenuPanelId(null);
@@ -520,8 +530,8 @@ export function useWorkspaceLayout({
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleOpenFile(fromPanelId: string, path: string) {
-    const tab = createFileViewerTab(path);
+  function handleOpenFile(fromPanelId: string, path: string, tabProjectId?: string) {
+    const tab = createFileViewerTab(path, "unknown", tabProjectId);
     setLayoutTree((prev) => (prev ? replaceOrAddFileViewer(prev, fromPanelId, tab) : null));
     setFocusedId(fromPanelId);
     setLayoutVersion((value) => value + 1);
@@ -660,7 +670,7 @@ export function useWorkspaceLayout({
   }
 
   function handleCreateInitialPanel(kind: TerminalKind) {
-    const panel = createTerminalPanel(kind);
+    const panel = createTerminalPanel(kind, undefined, projectId);
     setLayoutTree(panel);
     setFocusedId(panel.id);
     setNewTerminalType(kind);
@@ -669,7 +679,7 @@ export function useWorkspaceLayout({
   }
 
   function handleCreateInitialFileExplorer() {
-    const tab = createFileExplorerTab();
+    const tab = createFileExplorerTab(projectId);
     const panel: TerminalPanel = {
       type: "panel",
       id: makeId("panel"),

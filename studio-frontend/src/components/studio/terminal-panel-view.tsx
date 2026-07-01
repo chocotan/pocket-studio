@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useMemo } from "react";
 import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal } from "lucide-react";
 import { OpenCode, Codex, ClaudeCode, KiloCode } from "@lobehub/icons";
 import {
@@ -33,15 +33,16 @@ interface TerminalPanelViewProps {
   isDraggingTab: boolean;
   projectId: string;
   project: Project;
+  projects: Project[];
   workspacePath: string;
   onFocus: (id: string) => void;
   onAddMenu: (id: string) => void;
   onSplitSelect: (id: string, dir: SplitDirection, kind: TerminalKind) => void;
-  onAddTab: (id: string, kind: TerminalKind) => void;
-  onAddFileExplorer: (id: string) => void;
-  onAddAgentChat: (panelId: string, agentKind: string, agentRuntime?: StudioTab["agentRuntime"]) => void;
+  onAddTab: (id: string, kind: TerminalKind, tabProjectId?: string) => void;
+  onAddFileExplorer: (id: string, tabProjectId?: string) => void;
+  onAddAgentChat: (panelId: string, agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string) => void;
   onUpdateTabProperties: (tabId: string, props: Partial<StudioTab>) => void;
-  onOpenFile: (panelId: string, path: string) => void;
+  onOpenFile: (panelId: string, path: string, tabProjectId?: string) => void;
   onActiveTab: (panelId: string, tabId: string) => void;
   onCloseTab: (panelId: string, tabId: string) => void;
   onTabDragStart: () => void;
@@ -66,6 +67,7 @@ function TerminalPanelViewComponent({
   isDraggingTab,
   projectId,
   project,
+  projects,
   workspacePath,
   onFocus,
   onAddMenu,
@@ -474,9 +476,12 @@ function TerminalPanelViewComponent({
           <TerminalTypeMenu
             align="left"
             style={addMenuPosition}
-            onSelect={(kind) => onAddTab(panel.id, kind)}
-            onFileExplorer={() => onAddFileExplorer(panel.id)}
-            onAddAgentChat={(agentKind, agentRuntime) => onAddAgentChat(panel.id, agentKind, agentRuntime)}
+            projects={projects}
+            projectId={projectId}
+            project={project}
+            onSelect={(kind, tabProjectId) => onAddTab(panel.id, kind, tabProjectId)}
+            onFileExplorer={(tabProjectId) => onAddFileExplorer(panel.id, tabProjectId)}
+            onAddAgentChat={(agentKind, agentRuntime, tabProjectId) => onAddAgentChat(panel.id, agentKind, agentRuntime, tabProjectId)}
           />
         )}
 
@@ -567,6 +572,9 @@ function TerminalPanelViewComponent({
           panel.tabs.map((tab) => {
             const type = terminalType(tab.termType);
             const active = tab.id === panel.activeTabId;
+            const tabProjectId = tab.projectId || projectId;
+            const tabProject = projects.find((p) => p.id === tabProjectId) || project;
+            const tabWorkspacePath = tabProject.workspace_path || workspacePath;
             return (
               <div
                 key={tab.id}
@@ -578,16 +586,16 @@ function TerminalPanelViewComponent({
               >
                 {tab.kind === "file_explorer" ? (
                   <FileExplorerTab
-                    projectId={projectId}
-                    workspacePath={workspacePath}
+                    projectId={tabProjectId}
+                    workspacePath={tabWorkspacePath}
                     active={active}
                     layoutVersion={layoutVersion}
-                    onOpenFile={(path) => onOpenFile(panel.id, path)}
+                    onOpenFile={(path) => onOpenFile(panel.id, path, tabProjectId)}
                     theme={theme}
                   />
                 ) : tab.kind === "file_viewer" ? (
                   <FileViewerTab
-                    projectId={projectId}
+                    projectId={tabProjectId}
                     path={tab.filePath || ""}
                     active={active}
                     dragSuspended={isDraggingTab}
@@ -595,23 +603,23 @@ function TerminalPanelViewComponent({
                   />
                 ) : tab.kind === "agent_chat" ? (
                   <AgentChatTab
-                    project={project}
+                    project={tabProject}
                     tab={tab}
                     active={active}
-                    workspacePath={workspacePath}
+                    workspacePath={tabWorkspacePath}
                     onUpdateTabProperties={onUpdateTabProperties}
                   />
                 ) : (
                   <XtermInstance
-                    projectId={projectId}
+                    projectId={tabProjectId}
                     terminalId={tab.id}
                     command={type.command}
                     isActive={isFocused && active}
                     layoutVersion={layoutVersion}
                     theme={theme}
                     scale={scale}
-                    directMode={Boolean(project.direct_mode)}
-                    directEndpoint={project.direct_mode ? project.direct_endpoint : undefined}
+                    directMode={Boolean(tabProject.direct_mode)}
+                    directEndpoint={tabProject.direct_mode ? tabProject.direct_endpoint : undefined}
                     onTitleChange={(title, command, fullTitle) => onTitleChange(tab.id, title, command, fullTitle)}
                     onActiveFocus={() => onTerminalFocus(panel.id, tab.id)}
                   />
@@ -630,17 +638,30 @@ export const TerminalPanelView = React.memo(TerminalPanelViewComponent);
 function TerminalTypeMenu({
   align,
   style,
+  projects,
+  projectId,
+  project,
   onSelect,
   onFileExplorer,
   onAddAgentChat,
 }: {
   align: "left" | "right";
   style?: React.CSSProperties;
-  onSelect: (kind: TerminalKind) => void;
-  onFileExplorer: () => void;
-  onAddAgentChat: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"]) => void;
+  projects: Project[];
+  projectId: string;
+  project: Project;
+  onSelect: (kind: TerminalKind, tabProjectId?: string) => void;
+  onFileExplorer: (tabProjectId?: string) => void;
+  onAddAgentChat: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string) => void;
 }) {
   const [submenu, setSubmenu] = useState<"terminal" | "acpx" | "acp" | null>(null);
+
+  const sameDeviceProjects = useMemo(() => {
+    return projects.filter((p) => p.device_id === project.device_id);
+  }, [projects, project.device_id]);
+
+  const [selectedProjId, setSelectedProjId] = useState(projectId);
+
   const terminalMenuItems = TERMINAL_TYPES
     .map((item) => ({
       ...item,
@@ -654,6 +675,23 @@ function TerminalTypeMenu({
       style={style}
       onClick={(event) => event.stopPropagation()}
     >
+      {sameDeviceProjects.length > 1 && (
+        <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-100 flex items-center justify-between gap-1 text-[10px] text-slate-500">
+          <span className="font-semibold shrink-0">运行项目:</span>
+          <select
+            value={selectedProjId}
+            onChange={(e) => setSelectedProjId(e.target.value)}
+            className="flex-1 bg-white border border-slate-200 rounded px-1 py-0.5 text-[10px] text-slate-700 outline-none cursor-pointer hover:border-indigo-300"
+          >
+            {sameDeviceProjects.map((p: Project) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {!submenu ? (
         <>
           <MenuBranch label="终端类型" icon={<Terminal className="h-3.5 w-3.5" />} tone="slate" onClick={() => setSubmenu("terminal")} />
@@ -662,7 +700,7 @@ function TerminalTypeMenu({
           <div className="border-t border-slate-100 my-1" />
           <button
             type="button"
-            onClick={onFileExplorer}
+            onClick={() => onFileExplorer(selectedProjId)}
             className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
           >
             <span className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-100 text-sky-750">
@@ -680,23 +718,23 @@ function TerminalTypeMenu({
               label={item.menuLabel}
               icon={item.logo}
               tone={item.accent}
-              onClick={() => onSelect(item.value)}
+              onClick={() => onSelect(item.value, selectedProjId)}
             />
           ))}
         </>
       ) : submenu === "acpx" ? (
         <>
           <MenuHeader label="ACPX会话" onBack={() => setSubmenu(null)} />
-          <MenuItem label="opencode" icon={<OpenCode width={14} height={14} />} tone="amber" onClick={() => onAddAgentChat("opencode", "acpx")} />
-          <MenuItem label="claude code" icon={<ClaudeCode width={14} height={14} />} tone="violet" onClick={() => onAddAgentChat("claude", "acpx")} />
-          <MenuItem label="pi" icon={<span className="text-[10px] font-black leading-none">π</span>} tone="cyan" onClick={() => onAddAgentChat("pi", "acpx")} />
+          <MenuItem label="opencode" icon={<OpenCode width={14} height={14} />} tone="amber" onClick={() => onAddAgentChat("opencode", "acpx", selectedProjId)} />
+          <MenuItem label="claude code" icon={<ClaudeCode width={14} height={14} />} tone="violet" onClick={() => onAddAgentChat("claude", "acpx", selectedProjId)} />
+          <MenuItem label="pi" icon={<span className="text-[10px] font-black leading-none">π</span>} tone="cyan" onClick={() => onAddAgentChat("pi", "acpx", selectedProjId)} />
         </>
       ) : (
         <>
           <MenuHeader label="ACP会话" onBack={() => setSubmenu(null)} />
-          <MenuItem label="opencode" icon={<OpenCode width={14} height={14} />} tone="amber" onClick={() => onAddAgentChat("opencode", "direct_acp")} />
-          <MenuItem label="kilo code" icon={<KiloCode width={14} height={14} />} tone="lime" onClick={() => onAddAgentChat("kilo", "direct_acp")} />
-          <MenuItem label="codex" icon={<Codex width={14} height={14} />} tone="emerald" onClick={() => onAddAgentChat("codex", "direct_acp")} />
+          <MenuItem label="opencode" icon={<OpenCode width={14} height={14} />} tone="amber" onClick={() => onAddAgentChat("opencode", "direct_acp", selectedProjId)} />
+          <MenuItem label="kilo code" icon={<KiloCode width={14} height={14} />} tone="lime" onClick={() => onAddAgentChat("kilo", "direct_acp", selectedProjId)} />
+          <MenuItem label="codex" icon={<Codex width={14} height={14} />} tone="emerald" onClick={() => onAddAgentChat("codex", "direct_acp", selectedProjId)} />
         </>
       )}
     </div>
