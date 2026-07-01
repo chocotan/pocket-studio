@@ -349,6 +349,11 @@ function TerminalPanelViewComponent({
             const active = tab.id === panel.activeTabId;
             const alerting = alertTerminalIds.has(tab.id) && !(isFocused && active);
             const tabIndex = panel.tabs.indexOf(tab);
+
+            const tabProjectId = tab.projectId || projectId;
+            const tabProject = projects.find((p) => p.id === tabProjectId);
+            const isCrossProject = tabProjectId !== projectId;
+
             return (
               <React.Fragment key={tab.id}>
                 {visibleDropIndex === tabIndex && <TabDropMarker panelId={panel.id} index={tabIndex} />}
@@ -402,6 +407,14 @@ function TerminalPanelViewComponent({
                         <span className="relative z-10 min-w-0 flex-1 truncate text-[11px] font-semibold leading-none">
                           {displayTitle}
                         </span>
+                        {isCrossProject && tabProject && (
+                          <span
+                            className="relative z-10 shrink-0 bg-indigo-50/80 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 px-1 py-0.5 rounded text-[8px] font-bold max-w-[80px] truncate border border-indigo-100/50 dark:border-indigo-900/50"
+                            title={`项目: ${tabProject.name}`}
+                          >
+                            {tabProject.name}
+                          </span>
+                        )}
                         <button
                           type="button"
                           onPointerDown={(event) => {
@@ -430,7 +443,14 @@ function TerminalPanelViewComponent({
                     }
                   />
                   <TooltipContent side="bottom" className="max-w-[420px] whitespace-normal break-words text-[10px] font-medium leading-relaxed">
-                    {fullTitle}
+                    <div className="flex flex-col gap-0.5">
+                      <div>{fullTitle}</div>
+                      {tabProject && (
+                        <div className="text-[9px] text-slate-400 dark:text-slate-500">
+                          项目: {tabProject.name}
+                        </div>
+                      )}
+                    </div>
                   </TooltipContent>
                 </Tooltip>
               </React.Fragment>
