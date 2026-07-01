@@ -313,6 +313,7 @@ export function XtermInstance({
   const wsRef       = useRef<WebSocket | null>(null);
   const connectionGenerationRef = useRef(0);
   const normalExitRef = useRef(false);
+  const kickedRef = useRef(false);
   const onTitleChangeRef = useRef(onTitleChange);
   const reconnectTimerRef = useRef<number | null>(null);
   const disposedRef = useRef(false);
@@ -707,6 +708,11 @@ export function XtermInstance({
                 return;
               }
               if (message.type === "exit") {
+                const isKick = (message as { reason?: string }).reason === "kick" || (message as { reason?: string }).reason === "replaced";
+                if (isKick) {
+                  term!.write("\r\n\x1b[31m[该终端已在其他窗口/浏览器打开，本窗口连接已被断开。]\x1b[0m\r\n");
+                  kickedRef.current = true;
+                }
                 normalExitRef.current = true;
                 return;
               }
@@ -723,7 +729,7 @@ export function XtermInstance({
 
         socket.onclose = () => {
           if (!isCurrentEffect() || socketGeneration !== connectionGenerationRef.current || wsRef.current !== socket) return;
-          if (normalExitRef.current) {
+          if (normalExitRef.current || kickedRef.current) {
             return;
           }
           if (!connectedOnce && connectAttempts >= 3) {
@@ -740,6 +746,7 @@ export function XtermInstance({
       };
 
       normalExitRef.current = false;
+      kickedRef.current = false;
       connectFrame = window.requestAnimationFrame(connect);
 
       /* ── 3. User input → WS ── */

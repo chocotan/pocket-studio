@@ -93,7 +93,7 @@ func TestDirectTerminalSubscribersReceiveDataTitleAndExit(t *testing.T) {
 	d.broadcastDirectTerminalExit(protocol.TerminalStreamExit{ProjectID: "project", TerminalID: "term"})
 }
 
-func TestDirectTerminalMultipleSubscribersCoexist(t *testing.T) {
+func TestDirectTerminalSubscriberReplacementClosesStaleSocket(t *testing.T) {
 	cfg := DefaultConfig()
 	d := New(cfg)
 	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,16 +125,25 @@ func TestDirectTerminalMultipleSubscribersCoexist(t *testing.T) {
 	defer second.Close()
 	second.SetReadDeadline(time.Now().Add(2 * time.Second))
 
-	d.broadcastDirectTerminalData(protocol.TerminalStreamData{ProjectID: "project", TerminalID: "term", Data: []byte("broadcast-message")})
+	var msg map[string]string
+	if err := first.ReadJSON(&msg); err != nil {
+		t.Fatalf("failed to read kick message: %v", err)
+	}
+	if msg["type"] != "exit" || msg["reason"] != "kick" {
+		t.Fatalf("first stale socket received invalid kick message: %#v", msg)
+	}
 
-	for i, ws := range []*websocket.Conn{first, second} {
-		msgType, data, err := ws.ReadMessage()
-		if err != nil {
-			t.Fatalf("subscriber %d error reading: %v", i+1, err)
-		}
-		if msgType != websocket.BinaryMessage || string(data) != "broadcast-message" {
-			t.Fatalf("subscriber %d received invalid frame: type %d %q", i+1, msgType, data)
-		}
+	if _, _, err := first.ReadMessage(); err == nil {
+		t.Fatal("first stale socket stayed open after kick message")
+	}
+
+	d.broadcastDirectTerminalData(protocol.TerminalStreamData{ProjectID: "project", TerminalID: "term", Data: []byte("only-latest")})
+	msgType, data, err := second.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msgType != websocket.BinaryMessage || string(data) != "only-latest" {
+		t.Fatalf("second socket data frame = type %d %q", msgType, data)
 	}
 }
 
