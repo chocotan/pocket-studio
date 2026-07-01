@@ -164,9 +164,8 @@ export function useWorkspaceLayout({
 
   useEffect(() => {
     let cancelled = false;
-    const shareDeviceLayout = localStorage.getItem("pocket-studio-share-device-layout") !== "false";
 
-    if (shareDeviceLayout && prevDeviceRef.current === project.device_id && layoutTree) {
+    if (prevDeviceRef.current === project.device_id && layoutTree) {
       setLoadedProjectId(projectId);
       setStateLoaded(true);
       return;

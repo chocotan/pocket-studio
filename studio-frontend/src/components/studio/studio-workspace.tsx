@@ -115,10 +115,6 @@ export function StudioWorkspace({
     if (typeof window === "undefined") return false;
     return localStorage.getItem(STUDIO_NAV_HIDDEN_KEY) === "true";
   });
-  const [shareDeviceLayout, setShareDeviceLayout] = useState(() => {
-    if (typeof window === "undefined") return true;
-    return localStorage.getItem("pocket-studio-share-device-layout") !== "false";
-  });
 
   const panelScale = pageZoom / 100;
 
@@ -319,20 +315,6 @@ export function StudioWorkspace({
           />
 
           <div className="flex shrink-0 items-center gap-1.5">
-            <label className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-700 cursor-pointer select-none border rounded-md px-2 h-7 bg-slate-50/50 hover:bg-white transition-colors dark:border-slate-800 dark:text-slate-400 dark:hover:text-slate-200">
-              <input
-                type="checkbox"
-                checked={shareDeviceLayout}
-                onChange={() => {
-                  const nextVal = !shareDeviceLayout;
-                  setShareDeviceLayout(nextVal);
-                  localStorage.setItem("pocket-studio-share-device-layout", String(nextVal));
-                }}
-                className="rounded border-slate-350 text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5 cursor-pointer dark:border-slate-750 dark:bg-slate-900"
-              />
-              <span>同机共享分栏</span>
-            </label>
-
             <ProjectSwitcher
               projects={projects}
               favoriteProjects={favoriteProjects}
