@@ -4508,7 +4508,7 @@ set-environment -g CLICOLOR 1
 set-environment -g CLICOLOR_FORCE 1
 set-environment -g FORCE_COLOR 1
 set-window-option -g allow-rename on
-set-window-option -g automatic-rename off
+set-window-option -g automatic-rename on
 set-window-option -g mode-keys vi
 bind-key v copy-mode
 bind-key -T copy-mode-vi v send-keys -X begin-selection
