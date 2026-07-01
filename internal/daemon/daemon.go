@@ -4427,7 +4427,27 @@ func pathRelativeToParent(path string) bool {
 }
 
 func tmuxTitleLooksShortenedPath(title string) bool {
-	return title == "~" || strings.HasPrefix(title, "~/") || strings.HasPrefix(title, "..")
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return true
+	}
+	if title == "~" || strings.HasPrefix(title, "~/") || strings.HasPrefix(title, "..") {
+		return true
+	}
+	if strings.HasPrefix(title, "/") || strings.Contains(title, "/") || strings.Contains(title, "\\") {
+		return true
+	}
+	lower := strings.ToLower(title)
+	if lower == "xterm" || lower == "xterm-256color" || lower == "tmux" || lower == "tmux-256color" || lower == "screen" || lower == "screen-256color" {
+		return true
+	}
+	if lower == "localhost" {
+		return true
+	}
+	if h, err := os.Hostname(); err == nil && lower == strings.ToLower(h) {
+		return true
+	}
+	return false
 }
 
 func tmuxCapturePane(sessionName string) []byte {
