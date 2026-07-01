@@ -38,6 +38,11 @@ import { NotificationCenter } from "./notification-center";
 import type { TerminalNotification } from "./terminal-notifications";
 import { ProjectCard } from "./project-card";
 
+export interface DirectEndpoint {
+  terminal_ws_url: string;
+  token?: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -46,6 +51,8 @@ export interface Project {
   agent_ids: string[];
   tmux_ids: string[];
   studio_state?: unknown;
+  direct_mode?: boolean;
+  direct_endpoint?: DirectEndpoint;
 }
 
 interface StudioDashboardProps {

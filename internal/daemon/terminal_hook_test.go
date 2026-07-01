@@ -416,6 +416,24 @@ func TestTerminalTitleFromPaneInfoUsesRuntimePaneFields(t *testing.T) {
 	if got := terminalTitleFromPaneInfo("", "/repo", "zsh"); got != "zsh" {
 		t.Fatalf("terminalTitleFromPaneInfo(empty pane title) = %q, want current command", got)
 	}
+	if got := terminalTitleFromPaneInfo("Shell", "/repo", "claude"); got != "Claude Code" {
+		t.Fatalf("terminalTitleFromPaneInfo(initial shell title, claude command) = %q, want Claude Code", got)
+	}
+	if got := terminalTitleFromPaneInfo("Shell", "/repo", "codex"); got != "Codex" {
+		t.Fatalf("terminalTitleFromPaneInfo(initial shell title, codex command) = %q, want Codex", got)
+	}
+	if got := terminalTitleFromPaneInfo("Claude Code", "/repo", "bash"); got != "Shell" {
+		t.Fatalf("terminalTitleFromPaneInfo(stale claude title, bash command) = %q, want Shell", got)
+	}
+	if got := terminalTitleFromPaneInfo("Claude Code", "/repo", "node"); got != "Claude Code" {
+		t.Fatalf("terminalTitleFromPaneInfo(agent title, unknown runtime command) = %q, want Claude Code", got)
+	}
+	if got := terminalTitleFromPaneInfo("xterm", "/repo", "claude"); got != "Claude Code" {
+		t.Fatalf("terminalTitleFromPaneInfo(xterm title, claude command) = %q, want Claude Code", got)
+	}
+	if got := terminalTitleFromPaneInfo("xterm-256color", "/repo", "codex"); got != "Codex" {
+		t.Fatalf("terminalTitleFromPaneInfo(xterm-256color title, codex command) = %q, want Codex", got)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		t.Skip("home directory is not available")

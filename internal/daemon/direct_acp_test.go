@@ -262,6 +262,30 @@ rl.on("line", (line) => {
 	}
 }
 
+func TestDirectACPStartingSessionIsReportedAsRunning(t *testing.T) {
+	cfg := DefaultConfig()
+	d := New(cfg)
+
+	start := &directACPStart{done: make(chan struct{})}
+	d.mu.Lock()
+	d.directACPStarts["task-1"] = start
+	d.startingTasks["task-1"] = struct{}{}
+	d.mu.Unlock()
+
+	if got := d.runningTaskIDs(); !stringSliceContains(got, "task-1") {
+		t.Fatalf("runningTaskIDs() = %#v, want starting direct ACP task", got)
+	}
+
+	d.mu.Lock()
+	delete(d.directACPStarts, "task-1")
+	delete(d.startingTasks, "task-1")
+	d.mu.Unlock()
+
+	if got := d.runningTaskIDs(); stringSliceContains(got, "task-1") {
+		t.Fatalf("runningTaskIDs() = %#v, want starting task removed", got)
+	}
+}
+
 func TestDirectACPDispatchSetsRequestedModelBeforePrompt(t *testing.T) {
 	dir := t.TempDir()
 	orderPath := filepath.Join(dir, "order")
@@ -720,6 +744,15 @@ func hasTaskEvent(events []protocol.TaskEvent, eventType string) bool {
 	return false
 }
 
+func stringSliceContains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 func historyHasUserPrompt(events []protocol.TaskEvent, prompt string) bool {
 	for _, event := range events {
 		if event.EventType != "user.prompt" {
@@ -808,4 +841,3 @@ printf '[{"acpxRecordId":"agent-session-1","name":"acpx-chat-1","cwd":"%s","crea
 		t.Errorf("lost subsequent user prompt: %#v", record.Events)
 	}
 }
-

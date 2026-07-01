@@ -45,7 +45,7 @@ import {
   removeTabForMove,
   editableTargetShouldKeepKeyboard,
 } from "../studio-layout-ops";
-import { getJSON, postJSON, websocketURL } from "@/lib/api";
+import { directWebsocketURL, getJSON, postJSON, websocketURL } from "@/lib/api";
 import type { NotificationJumpTarget } from "../terminal-notifications";
 
 interface UseWorkspaceLayoutProps {
@@ -109,19 +109,41 @@ export function useWorkspaceLayout({
 
   function closeTerminalSession(tab: StudioTab) {
     if (tab.kind !== "terminal") return;
-    const socket = new WebSocket(websocketURL("/ws/terminal", new URLSearchParams({
+    const params = new URLSearchParams({
       project_id: projectId,
       terminal_id: tab.id,
       command: tab.activeCommand || "",
-    })));
+    });
+    const endpoint = project.direct_mode ? project.direct_endpoint : undefined;
+    if (project.direct_mode && !endpoint?.terminal_ws_url) {
+      console.warn("Direct mode is enabled, but the daemon has not reported a direct terminal endpoint; closing via server relay.");
+    }
+    const relayURL = websocketURL("/ws/terminal", params);
+    const directURL = endpoint?.terminal_ws_url ? directWebsocketURL(endpoint.terminal_ws_url, params, endpoint.token) : "";
     const message = JSON.stringify({ type: "exit", close_session: true });
-    socket.onopen = () => {
-      socket.send(message);
-      socket.close();
+    const sendClose = (url: string, fallbackURL = "") => {
+      const socket = new WebSocket(url);
+      let sent = false;
+      let fallbackStarted = false;
+      const fallback = () => {
+        if (!fallbackURL || sent || fallbackStarted) return;
+        fallbackStarted = true;
+        sendClose(fallbackURL);
+      };
+      socket.onopen = () => {
+        sent = true;
+        socket.send(message);
+        socket.close();
+      };
+      socket.onerror = (error) => {
+        console.error("Failed to close terminal session", error);
+        fallback();
+      };
+      socket.onclose = () => {
+        fallback();
+      };
     };
-    socket.onerror = (error) => {
-      console.error("Failed to close terminal session", error);
-    };
+    sendClose(directURL || relayURL, directURL ? relayURL : "");
   }
 
   function closeBackendResources(tab: StudioTab) {
@@ -607,8 +629,19 @@ export function useWorkspaceLayout({
     const nextTitle = (title || "").trim();
     const nextFullTitle = (fullTitle || "").trim();
     const nextCommand = (command || "").trim();
-    const previousTitle = terminalTitlesRef.current[tabId]?.title || "";
-    if (previousTitle && isPlaceholderTerminalTitle(nextTitle, nextCommand)) {
+    const previous = terminalTitlesRef.current[tabId];
+    if (isPlaceholderTerminalTitle(nextTitle, nextCommand)) {
+      const nextTitles = {
+        ...terminalTitlesRef.current,
+        [tabId]: {
+          title: previous?.title || "",
+          fullTitle: previous?.fullTitle || "",
+          command: nextCommand,
+          source: previous?.source || "initial" as const,
+        },
+      };
+      terminalTitlesRef.current = nextTitles;
+      setTerminalTitles(nextTitles);
       return;
     }
     const nextSource = nextTitle ? "tmux" as const : "initial" as const;
@@ -623,9 +656,7 @@ export function useWorkspaceLayout({
     };
     terminalTitlesRef.current = nextTitles;
     setTerminalTitles(nextTitles);
-    if (!isPlaceholderTerminalTitle(nextTitle, nextCommand)) {
-      setLayoutTree((tree) => (tree ? updateTabTitleInTree(tree, tabId, nextTitle, nextCommand, nextSource) : tree));
-    }
+    setLayoutTree((tree) => (tree ? updateTabTitleInTree(tree, tabId, nextTitle, nextCommand, nextSource) : tree));
   }
 
   function handleCreateInitialPanel(kind: TerminalKind) {

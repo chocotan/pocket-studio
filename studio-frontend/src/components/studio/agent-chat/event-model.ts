@@ -10,6 +10,7 @@ export function getUnixTimestamp(): number {
 }
 
 export function isTerminalTaskEvent(evt: TaskEvent, _agentRuntime?: string): boolean {
+  void _agentRuntime;
   // NOTE: `metric.updated` is a mid-stream usage/progress event for the ACP
   // runtimes (acpx / direct_acp), not a completion signal. It must NOT be
   // treated as terminal: in the runStatus effect the check is

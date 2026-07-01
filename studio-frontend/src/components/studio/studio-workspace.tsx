@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Columns, Maximize, Palette, Check } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Columns, Maximize, Palette, Check, Cable } from "lucide-react";
 import type { Device } from "@/lib/types";
 import { type StudioTheme } from "./terminal-types";
 import type { Project } from "./studio-dashboard";
@@ -17,6 +17,7 @@ import { TerminalPanelView } from "./terminal-panel-view";
 import { ZoomSelect } from "./zoom-select";
 import { NotificationCenter } from "./notification-center";
 import type { PageZoom } from "@/lib/zoom";
+import { postJSON } from "@/lib/api";
 import type { NotificationJumpTarget, TerminalNotification } from "./terminal-notifications";
 import { useWorkspaceLayout } from "./hooks/useWorkspaceLayout";
 import { updateSplitSizes } from "./studio-layout-ops";
@@ -44,6 +45,7 @@ interface StudioWorkspaceProps {
   onSelectNotification?: (notification: TerminalNotification) => void;
   onMarkAllNotificationsRead?: () => void;
   onBackToDashboard: () => void;
+  onProjectUpdated?: (project: Project) => void;
 }
 
 const Columns3Icon = (props: React.SVGProps<SVGSVGElement>) => (
@@ -90,6 +92,7 @@ export function StudioWorkspace({
   onSelectNotification = () => {},
   onMarkAllNotificationsRead = () => {},
   onBackToDashboard,
+  onProjectUpdated = () => {},
 }: StudioWorkspaceProps) {
   const [theme, setTheme] = useState<StudioTheme>(() => {
     if (typeof window !== "undefined") {
@@ -106,6 +109,8 @@ export function StudioWorkspace({
     return "light";
   });
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [directModeSaving, setDirectModeSaving] = useState(false);
+  const [directModeError, setDirectModeError] = useState("");
   const [navHidden, setNavHidden] = useState(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem(STUDIO_NAV_HIDDEN_KEY) === "true";
@@ -160,6 +165,33 @@ export function StudioWorkspace({
     localStorage.setItem(STUDIO_NAV_HIDDEN_KEY, String(navHidden));
     if (navHidden) setThemeMenuOpen(false);
   }, [navHidden]);
+
+
+  useEffect(() => {
+    setDirectModeError("");
+  }, [projectId, project.direct_mode]);
+
+  async function toggleDirectMode() {
+    if (directModeSaving) return;
+    const desiredDirectMode = !project.direct_mode;
+    const previousProject = project;
+    setDirectModeError("");
+    setDirectModeSaving(true);
+    onProjectUpdated({ ...project, direct_mode: desiredDirectMode });
+    try {
+      const updated = await postJSON<Project>("/api/project/direct-mode", {
+        project_id: projectId,
+        direct_mode: desiredDirectMode,
+      });
+      onProjectUpdated(updated);
+    } catch (err) {
+      console.error("failed to toggle direct mode:", err);
+      onProjectUpdated(previousProject);
+      setDirectModeError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDirectModeSaving(false);
+    }
+  }
 
   function renderNode(node: LayoutNode): React.ReactNode {
     if (node.type === "panel") {
@@ -293,6 +325,25 @@ export function StudioWorkspace({
               onMoveFavorite={onMoveFavorite}
               triggerClassName="hidden md:flex"
             />
+
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                void toggleDirectMode();
+              }}
+              disabled={directModeSaving}
+              className={`flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-bold transition-colors ${project.direct_mode ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300" : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground"} disabled:opacity-60`}
+              title={project.direct_mode ? `直连终端已开启：${project.direct_endpoint?.terminal_ws_url || "等待 daemon 上报端点"}` : "开启后终端 WebSocket 将直连 daemon，文件/Agent 仍走服务器"}
+            >
+              <Cable className="h-3.5 w-3.5" />
+              <span className="hidden lg:inline">{directModeSaving ? "保存中" : project.direct_mode ? "直连" : "中转"}</span>
+            </button>
+            {directModeError ? (
+              <span className="hidden max-w-[260px] truncate rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-semibold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300" title={directModeError}>
+                直连切换失败：{directModeError}
+              </span>
+            ) : null}
             <NotificationCenter
               notifications={notifications}
               open={notificationCenterOpen}

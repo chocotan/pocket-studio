@@ -5,12 +5,15 @@ import '@fontsource-variable/jetbrains-mono/index.css'
 import 'highlight.js/styles/night-owl.css'
 import './index.css'
 import App from './App.tsx'
+import { AppErrorBoundary } from './error-boundary.tsx'
 import { TooltipProvider } from '@/components/ui/tooltip'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <TooltipProvider delay={300}>
-      <App />
-    </TooltipProvider>
+    <AppErrorBoundary>
+      <TooltipProvider delay={300}>
+        <App />
+      </TooltipProvider>
+    </AppErrorBoundary>
   </StrictMode>,
 )

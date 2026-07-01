@@ -30,38 +30,46 @@ var (
 	safeTerminalIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,96}$`)
 )
 
+const terminalRelayWriteTimeout = 2 * time.Second
+
 type Project struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	DeviceID      string          `json:"device_id"`
-	WorkspacePath string          `json:"workspace_path"`
-	AgentIDs      []string        `json:"agent_ids"`
-	TmuxIDs       []string        `json:"tmux_ids"`
-	StudioState   json.RawMessage `json:"studio_state,omitempty"`
-	UserID        string          `json:"-"`
+	ID             string                   `json:"id"`
+	Name           string                   `json:"name"`
+	DeviceID       string                   `json:"device_id"`
+	WorkspacePath  string                   `json:"workspace_path"`
+	AgentIDs       []string                 `json:"agent_ids"`
+	TmuxIDs        []string                 `json:"tmux_ids"`
+	StudioState    json.RawMessage          `json:"studio_state,omitempty"`
+	DirectMode     bool                     `json:"direct_mode,omitempty"`
+	DirectEndpoint *protocol.DirectEndpoint `json:"direct_endpoint,omitempty"`
+	UserID         string                   `json:"-"`
 }
 
 func projectFromProtocol(project protocol.Project) Project {
 	return Project{
-		ID:            project.ID,
-		Name:          project.Name,
-		DeviceID:      project.DeviceID,
-		WorkspacePath: project.WorkspacePath,
-		AgentIDs:      project.AgentIDs,
-		TmuxIDs:       project.TmuxIDs,
-		StudioState:   project.StudioState,
+		ID:             project.ID,
+		Name:           project.Name,
+		DeviceID:       project.DeviceID,
+		WorkspacePath:  project.WorkspacePath,
+		AgentIDs:       project.AgentIDs,
+		TmuxIDs:        project.TmuxIDs,
+		StudioState:    project.StudioState,
+		DirectMode:     project.DirectMode,
+		DirectEndpoint: project.DirectEndpoint,
 	}
 }
 
 func protocolProjectFromProject(project Project) protocol.Project {
 	return protocol.Project{
-		ID:            project.ID,
-		Name:          project.Name,
-		DeviceID:      project.DeviceID,
-		WorkspacePath: project.WorkspacePath,
-		AgentIDs:      project.AgentIDs,
-		TmuxIDs:       project.TmuxIDs,
-		StudioState:   project.StudioState,
+		ID:             project.ID,
+		Name:           project.Name,
+		DeviceID:       project.DeviceID,
+		WorkspacePath:  project.WorkspacePath,
+		AgentIDs:       project.AgentIDs,
+		TmuxIDs:        project.TmuxIDs,
+		StudioState:    project.StudioState,
+		DirectMode:     project.DirectMode,
+		DirectEndpoint: project.DirectEndpoint,
 	}
 }
 
@@ -92,6 +100,7 @@ type daemonConn struct {
 	send           chan protocol.Envelope
 	mu             sync.Mutex
 	terminalBinary bool
+	directEndpoint *protocol.DirectEndpoint
 	lastSeen       time.Time
 }
 
@@ -122,6 +131,7 @@ type DeviceView struct {
 	Agents     []protocol.AgentCapability `json:"agents,omitempty"`
 	LastSeenAt int64                      `json:"last_seen_at"`
 	Workspaces []protocol.Workspace       `json:"workspaces"`
+	Features   []string                   `json:"features,omitempty"`
 }
 
 type StateView struct {
@@ -203,6 +213,22 @@ func projectFromDaemonWorkspace(userID string, deviceID string, workspace protoc
 	}
 }
 
+func (h *Hub) attachDirectEndpointLocked(project Project) Project {
+	project.DirectEndpoint = nil
+	if !project.DirectMode {
+		return project
+	}
+	if dc := h.daemons[daemonKey(project.UserID, project.DeviceID)]; dc != nil && dc.directEndpoint != nil {
+		endpoint := *dc.directEndpoint
+		expiry := time.Now().Add(15 * time.Minute).Truncate(5 * time.Minute)
+		endpoint.Token = protocol.NewDirectTerminalToken(endpoint.Token, project.ID, expiry)
+		if endpoint.Token != "" {
+			project.DirectEndpoint = &endpoint
+		}
+	}
+	return project
+}
+
 func (h *Hub) daemonWorkspaceProjectByIDLocked(userID string, projectID string) (Project, bool) {
 	for _, dc := range h.daemons {
 		if dc.userID != userID {
@@ -211,7 +237,7 @@ func (h *Hub) daemonWorkspaceProjectByIDLocked(userID string, projectID string) 
 		for _, workspace := range dc.workspaces {
 			project := projectFromDaemonWorkspace(userID, dc.deviceID, workspace)
 			if project.ID == projectID {
-				return project, true
+				return h.attachDirectEndpointLocked(project), true
 			}
 		}
 	}
@@ -225,7 +251,7 @@ func (h *Hub) listProjectsLocked(userID string) []Project {
 		if project.UserID != userID {
 			continue
 		}
-		list = append(list, project)
+		list = append(list, h.attachDirectEndpointLocked(project))
 		seen[project.DeviceID+"\x00"+project.WorkspacePath] = true
 	}
 	for _, dc := range h.daemons {
@@ -241,7 +267,7 @@ func (h *Hub) listProjectsLocked(userID string) []Project {
 				continue
 			}
 			project := projectFromDaemonWorkspace(userID, dc.deviceID, workspace)
-			list = append(list, project)
+			list = append(list, h.attachDirectEndpointLocked(project))
 			seen[key] = true
 		}
 	}
@@ -445,11 +471,52 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 			DeviceID:      req.DeviceID,
 			WorkspacePath: req.WorkspacePath,
 		})
-		writeProjectResult(w, env, err, true, func(project Project) {
+		writeProjectResult(w, env, err, true, func(project *Project) {
 			project.UserID = userID
 			h.mu.Lock()
-			h.projects[scopedKey(userID, project.ID)] = project
+			*project = h.attachDirectEndpointLocked(*project)
+			h.projects[scopedKey(userID, project.ID)] = *project
 			h.mu.Unlock()
+		})
+		return
+	}
+	if r.URL.Path == "/api/project/direct-mode" && r.Method == http.MethodPost {
+		var req struct {
+			ProjectID  string `json:"project_id"`
+			DirectMode bool   `json:"direct_mode"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		project, ok := h.projectByID(userID, req.ProjectID)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
+			return
+		}
+		requestID := protocol.NewID("req")
+		env, err := h.requestDaemonForDevice(r, project.DeviceID, protocol.TypeProjectCreate, project.WorkspacePath, requestID, protocol.ProjectCreateRequest{
+			RequestID:     requestID,
+			Name:          project.Name,
+			DeviceID:      project.DeviceID,
+			WorkspacePath: project.WorkspacePath,
+			DirectMode:    req.DirectMode,
+		})
+		writeProjectResult(w, env, err, true, func(updated *Project) {
+			updated.UserID = userID
+			if updated.DeviceID == "" {
+				updated.DeviceID = project.DeviceID
+			}
+			if updated.WorkspacePath == "" {
+				updated.WorkspacePath = project.WorkspacePath
+			}
+			if updated.Name == "" {
+				updated.Name = project.Name
+			}
+			h.mu.Lock()
+			*updated = h.attachDirectEndpointLocked(*updated)
+			h.projects[scopedKey(userID, updated.ID)] = *updated
+			h.mu.Unlock()
+			h.broadcastToUser(userID, protocol.NewEnvelope("server.state", "server", h.stateView(userID)))
 		})
 		return
 	}
@@ -1057,6 +1124,7 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 		dc.agents = hello.Agents
 		dc.workspaces = hello.Workspaces
 		dc.terminalBinary = hasFeature(hello.Features, protocol.FeatureTerminalBinaryV1)
+		dc.directEndpoint = hello.DirectEndpoint
 		dc.lastSeen = time.Now()
 		h.mu.Lock()
 		key := daemonKey(dc.userID, hello.DeviceID)
@@ -1211,14 +1279,15 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 		if err == nil {
 			key := terminalKey(dc.userID, streamTitle.ProjectID, streamTitle.TerminalID)
 			for _, wc := range h.terminalSubscribers(key) {
-				wc.mu.Lock()
-				_ = wc.conn.WriteJSON(map[string]string{
+				if err := wc.writeJSON(map[string]string{
 					"type":       "title",
 					"title":      streamTitle.Title,
 					"full_title": streamTitle.FullTitle,
 					"command":    streamTitle.Command,
-				})
-				wc.mu.Unlock()
+				}); err != nil {
+					h.removeTerminalSubscriber(key, wc)
+					_ = wc.conn.Close()
+				}
 			}
 		}
 	case protocol.TypeTerminalStreamAlert:
@@ -1259,6 +1328,17 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 	}
 }
 
+func deviceFeatures(dc *daemonConn) []string {
+	features := make([]string, 0, 2)
+	if dc.terminalBinary {
+		features = append(features, protocol.FeatureTerminalBinaryV1)
+	}
+	if dc.directEndpoint != nil {
+		features = append(features, protocol.FeatureDirectTerminalV1)
+	}
+	return features
+}
+
 func (h *Hub) stateView(userID string) StateView {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -1276,6 +1356,7 @@ func (h *Hub) stateView(userID string) StateView {
 			Agents:     dc.agents,
 			LastSeenAt: dc.lastSeen.Unix(),
 			Workspaces: dc.workspaces,
+			Features:   deviceFeatures(dc),
 		})
 	}
 
@@ -1489,10 +1570,40 @@ func isTerminalTaskStatus(status string) bool {
 func (h *Hub) forwardTerminalStreamData(userID string, streamData protocol.TerminalStreamData) {
 	key := terminalKey(userID, streamData.ProjectID, streamData.TerminalID)
 	for _, wc := range h.terminalSubscribers(key) {
-		wc.mu.Lock()
-		_ = wc.conn.WriteMessage(websocket.BinaryMessage, streamData.Data)
-		wc.mu.Unlock()
+		if err := wc.writeMessage(websocket.BinaryMessage, streamData.Data); err != nil {
+			h.removeTerminalSubscriber(key, wc)
+			_ = wc.conn.Close()
+		}
 	}
+}
+
+func (h *Hub) removeTerminalSubscriber(key string, wc *terminalConn) {
+	h.termMu.Lock()
+	if subscribers := h.terminalConns[key]; subscribers != nil {
+		delete(subscribers, wc)
+		if len(subscribers) == 0 {
+			delete(h.terminalConns, key)
+		}
+	}
+	h.termMu.Unlock()
+}
+
+func (wc *terminalConn) writeMessage(messageType int, data []byte) error {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	_ = wc.conn.SetWriteDeadline(time.Now().Add(terminalRelayWriteTimeout))
+	err := wc.conn.WriteMessage(messageType, data)
+	_ = wc.conn.SetWriteDeadline(time.Time{})
+	return err
+}
+
+func (wc *terminalConn) writeJSON(value any) error {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	_ = wc.conn.SetWriteDeadline(time.Now().Add(terminalRelayWriteTimeout))
+	err := wc.conn.WriteJSON(value)
+	_ = wc.conn.SetWriteDeadline(time.Time{})
+	return err
 }
 
 func (h *Hub) terminalSubscribers(key string) []*terminalConn {
@@ -1862,7 +1973,7 @@ func writeProjectFileReadEnvelope(w http.ResponseWriter, requestedPath string, e
 	writeJSON(w, http.StatusOK, response)
 }
 
-func writeProjectResult(w http.ResponseWriter, env protocol.Envelope, err error, includeProject bool, onProject func(Project)) {
+func writeProjectResult(w http.ResponseWriter, env protocol.Envelope, err error, includeProject bool, onProject func(*Project)) {
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "daemon_request_failed", Message: err.Error()})
 		return
@@ -1883,7 +1994,7 @@ func writeProjectResult(w http.ResponseWriter, env protocol.Envelope, err error,
 		}
 		project := projectFromProtocol(*result.Project)
 		if onProject != nil {
-			onProject(project)
+			onProject(&project)
 		}
 		writeJSON(w, http.StatusOK, project)
 		return
@@ -2117,11 +2228,14 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	key := terminalKey(userID, projID, terminalID)
 	terminal := &terminalConn{conn: conn}
 	h.termMu.Lock()
-	if h.terminalConns[key] == nil {
-		h.terminalConns[key] = make(map[*terminalConn]struct{})
+	replaced := h.terminalConns[key]
+	h.terminalConns[key] = map[*terminalConn]struct{}{
+		terminal: {},
 	}
-	h.terminalConns[key][terminal] = struct{}{}
 	h.termMu.Unlock()
+	for old := range replaced {
+		_ = old.conn.Close()
+	}
 	defer func() {
 		h.termMu.Lock()
 		if subscribers := h.terminalConns[key]; subscribers != nil {

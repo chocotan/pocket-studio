@@ -43,7 +43,10 @@ const (
 	TypeTerminalStreamExit   = "terminal.stream.exit"
 )
 
-const FeatureTerminalBinaryV1 = "terminal.binary.v1"
+const (
+	FeatureTerminalBinaryV1 = "terminal.binary.v1"
+	FeatureDirectTerminalV1 = "terminal.direct.v1"
+)
 
 type Envelope struct {
 	ID        string          `json:"id"`
@@ -73,14 +76,20 @@ type AgentCapability struct {
 }
 
 type DaemonHello struct {
-	DeviceID      string            `json:"device_id"`
-	DeviceName    string            `json:"device_name"`
-	DaemonVersion string            `json:"daemon_version"`
-	Agent         string            `json:"agent,omitempty"`
-	AgentLabel    string            `json:"agent_label,omitempty"`
-	Agents        []AgentCapability `json:"agents,omitempty"`
-	Workspaces    []Workspace       `json:"workspaces"`
-	Features      []string          `json:"features,omitempty"`
+	DeviceID       string            `json:"device_id"`
+	DeviceName     string            `json:"device_name"`
+	DaemonVersion  string            `json:"daemon_version"`
+	Agent          string            `json:"agent,omitempty"`
+	AgentLabel     string            `json:"agent_label,omitempty"`
+	Agents         []AgentCapability `json:"agents,omitempty"`
+	Workspaces     []Workspace       `json:"workspaces"`
+	Features       []string          `json:"features,omitempty"`
+	DirectEndpoint *DirectEndpoint   `json:"direct_endpoint,omitempty"`
+}
+
+type DirectEndpoint struct {
+	TerminalWebSocketURL string `json:"terminal_ws_url"`
+	Token                string `json:"token,omitempty"`
 }
 
 type ServerHello struct {
@@ -240,13 +249,15 @@ type WorkspaceResult struct {
 }
 
 type Project struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	DeviceID      string          `json:"device_id"`
-	WorkspacePath string          `json:"workspace_path"`
-	AgentIDs      []string        `json:"agent_ids"`
-	TmuxIDs       []string        `json:"tmux_ids"`
-	StudioState   json.RawMessage `json:"studio_state,omitempty"`
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	DeviceID       string          `json:"device_id"`
+	WorkspacePath  string          `json:"workspace_path"`
+	AgentIDs       []string        `json:"agent_ids"`
+	TmuxIDs        []string        `json:"tmux_ids"`
+	StudioState    json.RawMessage `json:"studio_state,omitempty"`
+	DirectMode     bool            `json:"direct_mode,omitempty"`
+	DirectEndpoint *DirectEndpoint `json:"direct_endpoint,omitempty"`
 }
 
 type ProjectCreateRequest struct {
@@ -254,6 +265,7 @@ type ProjectCreateRequest struct {
 	Name          string `json:"name"`
 	DeviceID      string `json:"device_id,omitempty"`
 	WorkspacePath string `json:"workspace_path"`
+	DirectMode    bool   `json:"direct_mode,omitempty"`
 }
 
 type ProjectStateGetRequest struct {

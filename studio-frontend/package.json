@@ -12,7 +12,8 @@
     "build:electron:mac": "npm run build && electron-builder --mac dmg",
     "build:electron:win": "npm run build && electron-builder --win nsis",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:direct-terminal": "node ../scripts/e2e-direct-terminal.mjs"
   },
   "build": {
     "appId": "com.pocketstudio.app",

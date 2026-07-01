@@ -407,6 +407,7 @@ func (d *Daemon) ensureDirectACPSession(ctx context.Context, task protocol.TaskD
 		}
 		start := &directACPStart{done: make(chan struct{})}
 		d.directACPStarts[taskID] = start
+		d.startingTasks[taskID] = struct{}{}
 		d.mu.Unlock()
 
 		err := d.createDirectACPSession(ctx, task, workspacePath, taskID)
@@ -414,6 +415,7 @@ func (d *Daemon) ensureDirectACPSession(ctx context.Context, task protocol.TaskD
 		d.mu.Lock()
 		start.err = err
 		delete(d.directACPStarts, taskID)
+		delete(d.startingTasks, taskID)
 		close(start.done)
 		d.mu.Unlock()
 		return err

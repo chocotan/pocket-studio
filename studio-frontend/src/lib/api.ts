@@ -30,6 +30,22 @@ export function websocketURL(path: string, params?: URLSearchParams): string {
   return base.toString();
 }
 
+export function directWebsocketURL(endpointURL: string, params?: URLSearchParams, token?: string): string {
+  const base = new URL(endpointURL);
+  if (base.protocol === "http:") base.protocol = "ws:";
+  if (base.protocol === "https:") base.protocol = "wss:";
+  const wsParams = new URLSearchParams(base.search);
+  if (params) {
+    params.forEach((value, key) => wsParams.set(key, value));
+  }
+  if (token) {
+    wsParams.set("token", token);
+  }
+  base.search = wsParams.toString();
+  base.hash = "";
+  return base.toString();
+}
+
 export async function postJSON<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(apiURL(url), {
     method: "POST",

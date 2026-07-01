@@ -31,6 +31,7 @@ export default function App() {
   const projectsRef = useRef<Project[]>([]);
   const orderedProjectsRef = useRef<Project[]>([]);
   const webTransportRef = useRef<StudioWebTransport | null>(null);
+  const refreshProjectsRef = useRef<() => void>(() => {});
   const orderedProjects = projects;
   const favoriteProjects = useMemo(() => favoriteProjectsFrom(projects, favorites), [favorites, projects]);
   const favoriteIdSet = useMemo(() => new Set(favorites), [favorites]);
@@ -71,19 +72,24 @@ export default function App() {
 
   useEffect(() => {
     envelopeHandlerRef.current = (envelope) => {
-      if (envelope.type !== "terminal.stream.alert") return;
-      const payload = envelope.payload;
-      if (!payload || typeof payload !== "object") return;
-      const alert = payload as Record<string, unknown>;
-      if (typeof alert.project_id !== "string" || typeof alert.terminal_id !== "string") return;
-      addTerminalNotification({
-        projectId: alert.project_id,
-        tabId: alert.terminal_id,
-        panelId: typeof alert.panel_id === "string" ? alert.panel_id : "",
-        title: notificationTerminalTitle(alert.title, alert.agent),
-        reason: typeof alert.reason === "string" ? alert.reason : "bell",
-        message: typeof alert.message === "string" ? alert.message : "",
-      });
+      if (envelope.type === "terminal.stream.alert") {
+        const payload = envelope.payload;
+        if (!payload || typeof payload !== "object") return;
+        const alert = payload as Record<string, unknown>;
+        if (typeof alert.project_id !== "string" || typeof alert.terminal_id !== "string") return;
+        addTerminalNotification({
+          projectId: alert.project_id,
+          tabId: alert.terminal_id,
+          panelId: typeof alert.panel_id === "string" ? alert.panel_id : "",
+          title: notificationTerminalTitle(alert.title, alert.agent),
+          reason: typeof alert.reason === "string" ? alert.reason : "bell",
+          message: typeof alert.message === "string" ? alert.message : "",
+        });
+        return;
+      }
+      if (envelope.type === "server.state") {
+        refreshProjectsRef.current();
+      }
     };
   }, []);
 
@@ -94,6 +100,7 @@ export default function App() {
       setClientConfigLoaded(true);
       refreshAll();
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -127,6 +134,22 @@ export default function App() {
     }
   }, [orderedProjects, selectedProjectId]);
 
+
+  async function refreshProjects() {
+    try {
+      const projectData = await getJSON<unknown>("/api/project/list");
+      if (Array.isArray(projectData)) {
+        setProjects(projectData.filter(isProject));
+      } else if (isObject(projectData) && Array.isArray(projectData.projects)) {
+        setProjects(projectData.projects);
+      }
+    } catch (err) {
+      console.error("failed to refresh projects:", err);
+    }
+  }
+
+  refreshProjectsRef.current = () => { void refreshProjects(); };
+
   async function refreshAll() {
     try {
       const stateData = await getJSON<unknown>("/api/state");
@@ -136,12 +159,7 @@ export default function App() {
         setDevices(stateData.filter(isDevice));
       }
 
-      const projectData = await getJSON<unknown>("/api/project/list");
-      if (Array.isArray(projectData)) {
-        setProjects(projectData.filter(isProject));
-      } else if (isObject(projectData) && Array.isArray(projectData.projects)) {
-        setProjects(projectData.projects);
-      }
+      await refreshProjects();
     } catch (err) {
       console.error("failed to fetch devices/projects:", err);
     }
@@ -231,6 +249,18 @@ export default function App() {
     });
   }
 
+  function handleProjectUpdated(updated: Project) {
+    setProjects((current) => {
+      let found = false;
+      const next = current.map((project) => {
+        if (project.id !== updated.id) return project;
+        found = true;
+        return { ...project, ...updated };
+      });
+      return found ? next : [...next, updated];
+    });
+  }
+
   function handleMoveFavorite(projectId: string, direction: "up" | "down") {
     setFavorites((current) => {
       const next = moveInList(current, projectId, direction);
@@ -240,9 +270,10 @@ export default function App() {
   }
 
   const activeProject = orderedProjects.find((p) => p.id === selectedProjectId);
+  const showWorkspace = view === "studio_workspace" && activeProject;
   return (
     <div className="h-full w-full">
-      {view === "studio_dashboard" ? (
+      {!showWorkspace ? (
         <StudioDashboard
           devices={devices}
           projects={orderedProjects}
@@ -261,7 +292,6 @@ export default function App() {
           onMarkAllNotificationsRead={handleMarkAllNotificationsRead}
         />
       ) : (
-        activeProject && (
           <StudioWorkspace
             projectId={selectedProjectId}
             project={activeProject}
@@ -284,6 +314,7 @@ export default function App() {
             onNotificationCenterOpenChange={setNotificationCenterOpen}
             onSelectNotification={handleSelectNotification}
             onMarkAllNotificationsRead={handleMarkAllNotificationsRead}
+            onProjectUpdated={handleProjectUpdated}
             onBackToDashboard={() => {
               refreshAll();
               setView("studio_dashboard");
@@ -291,7 +322,6 @@ export default function App() {
               pushPath(studioPath("/"));
             }}
           />
-        )
       )}
     </div>
   );

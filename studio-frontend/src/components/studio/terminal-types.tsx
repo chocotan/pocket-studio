@@ -79,11 +79,33 @@ export function cleanTerminalTitle(title: string, fallback: string, kind?: Termi
 
 export function isPlaceholderTerminalTitle(title: string, command?: string) {
   const normalizedTitle = cleanTerminalTitle(title, "");
-  const normalizedCommand = (command || "").trim();
   if (!normalizedTitle) return true;
+  const lowerTitle = normalizedTitle.toLowerCase();
+  if (lowerTitle === "xterm" || lowerTitle === "xterm-256color" || lowerTitle === "tmux" || lowerTitle === "tmux-256color" || lowerTitle === "screen" || lowerTitle === "screen-256color") return true;
   if (/^(term|pane|panel)-[a-z0-9_-]+$/i.test(normalizedTitle)) return true;
+  const normalizedCommand = (command || "").trim();
   if (normalizedCommand && normalizedTitle === normalizedCommand) return true;
+  const commandTitle = knownTerminalTitleForCommand(normalizedCommand);
+  if (commandTitle && isDefaultTerminalTitle(normalizedTitle) && normalizedTitle !== commandTitle) return true;
   return false;
+}
+
+function knownTerminalTitleForCommand(command: string) {
+  const normalized = command.trim().toLowerCase();
+  if (!normalized) return "";
+  if (normalized === "bash" || normalized === "zsh" || normalized === "sh") return "Shell";
+  if (normalized === "online" || normalized === "acpx" || normalized.startsWith("acpx ")) return "ACPX";
+  if (normalized.includes("claude")) return "Claude Code";
+  if (normalized.includes("codex")) return "Codex";
+  if (normalized.includes("opencode")) return "OpenCode";
+  if (normalized.includes("kilo")) return "Kilo Code";
+  if (normalized === "pi" || normalized.startsWith("pi ")) return "Pi";
+  if (normalized === "agy" || normalized.includes("antigravity")) return "Antigravity";
+  return "";
+}
+
+function isDefaultTerminalTitle(title: string) {
+  return ["Shell", "Claude Code", "Codex", "OpenCode", "Kilo Code", "Pi", "Antigravity", "ACPX"].includes(title);
 }
 
 function extractQuotedPocketTitle(title: string) {

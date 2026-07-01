@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"encoding/json"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -40,6 +43,54 @@ func TestNormalizeConfigTrimsServerCredentials(t *testing.T) {
 	}
 	if got.Server.Token != "ps_test" {
 		t.Fatalf("NormalizeConfig() server token = %q, want trimmed token", got.Server.Token)
+	}
+}
+
+func TestNormalizeConfigDropsUnreportableDirectWebPublicHost(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Device.ID = "dev_test"
+	cfg.Server.URL = "ws://localhost:18080/ws/daemon"
+	cfg.DirectWeb.PublicHost = "172.18.0.1"
+	cfg.Workspaces = nil
+
+	got, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeConfig() error = %v", err)
+	}
+	if got.DirectWeb.PublicHost != "" {
+		t.Fatalf("NormalizeConfig() public host = %q, want empty fallback", got.DirectWeb.PublicHost)
+	}
+}
+
+func TestLoadOrCreateDeviceConfigRefreshesAndPersistsStaleDockerName(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("POCKET_STUDIO_DAEMON_CONFIG_DIR", dir)
+	stale := DeviceConfig{ID: "dev_test", Name: "xps9500 (172.18.0.1)"}
+	raw, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "device.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := loadOrCreateDeviceConfig("")
+	if err != nil {
+		t.Fatalf("loadOrCreateDeviceConfig() error = %v", err)
+	}
+	if got.Name == stale.Name || strings.Contains(got.Name, "172.18.0.1") {
+		t.Fatalf("loadOrCreateDeviceConfig() name = %q, want refreshed", got.Name)
+	}
+	raw, err = os.ReadFile(filepath.Join(dir, "device.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted DeviceConfig
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Name != got.Name {
+		t.Fatalf("persisted name = %q, want %q", persisted.Name, got.Name)
 	}
 }
 

@@ -3,7 +3,7 @@ import { Terminal as XTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { StudioTheme } from "./terminal-types";
-import { websocketURL } from "@/lib/api";
+import { directWebsocketURL, getJSON, websocketURL } from "@/lib/api";
 import { pocketElectronAPI } from "@/lib/electron-api";
 
 export function getXtermTheme(theme: StudioTheme) {
@@ -259,12 +259,40 @@ interface XtermInstanceProps {
   // Instead we cancel the ancestor scale (net identity transform) and zoom via
   // font size, which keeps xterm's coordinate math self-consistent.
   scale?: number;
+  directMode?: boolean;
+  directEndpoint?: { terminal_ws_url: string; token?: string };
   onTitleChange?: (title: string, command?: string, fullTitle?: string) => void;
   onActiveFocus?: () => void;
 }
 
 const BASE_FONT_SIZE = 12;
 
+type TerminalConnectionOwner = {
+  id: number;
+  close: () => void;
+};
+
+let nextTerminalConnectionOwnerId = 1;
+const terminalConnectionOwners = new Map<string, TerminalConnectionOwner>();
+
+async function refreshDirectEndpoint(projectId: string): Promise<{ terminal_ws_url: string; token?: string } | undefined> {
+  try {
+    const projectData = await getJSON<unknown>("/api/project/list");
+    const projects = Array.isArray(projectData)
+      ? projectData
+      : projectData && typeof projectData === "object" && Array.isArray((projectData as { projects?: unknown }).projects)
+        ? (projectData as { projects: unknown[] }).projects
+        : [];
+    const project = projects.find((item): item is { id: string; direct_mode?: boolean; direct_endpoint?: { terminal_ws_url?: string; token?: string } } => {
+      return Boolean(item && typeof item === "object" && (item as { id?: unknown }).id === projectId);
+    });
+    const endpoint = project?.direct_mode ? project.direct_endpoint : undefined;
+    return endpoint?.terminal_ws_url ? { terminal_ws_url: endpoint.terminal_ws_url, token: endpoint.token } : undefined;
+  } catch (err) {
+    console.warn("failed to refresh direct terminal endpoint:", err);
+    return undefined;
+  }
+}
 
 export function XtermInstance({
   projectId,
@@ -274,6 +302,8 @@ export function XtermInstance({
   layoutVersion = 0,
   theme = "light",
   scale = 1,
+  directMode = false,
+  directEndpoint,
   onTitleChange,
   onActiveFocus,
 }: XtermInstanceProps) {
@@ -281,6 +311,8 @@ export function XtermInstance({
   const xtermRef    = useRef<XTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const wsRef       = useRef<WebSocket | null>(null);
+  const connectionGenerationRef = useRef(0);
+  const normalExitRef = useRef(false);
   const onTitleChangeRef = useRef(onTitleChange);
   const reconnectTimerRef = useRef<number | null>(null);
   const disposedRef = useRef(false);
@@ -436,13 +468,35 @@ export function XtermInstance({
     let cancelPasteHandler: (() => void) | null = null;
     let cancelFocusHandler: (() => void) | null = null;
     let osc52Disposable: { dispose: () => void } | null = null;
+    let dataDisposable: { dispose: () => void } | null = null;
     const postOpenResizeTimers: number[] = [];
+    const ownedSockets = new Set<WebSocket>();
+    const generation = connectionGenerationRef.current + 1;
+    connectionGenerationRef.current = generation;
+    const connectionKey = `${projectId}::${terminalId}`;
+    const ownerId = nextTerminalConnectionOwnerId++;
 
     let initialized = false;
+    let disposed = false;
     disposedRef.current = false;
+    const isCurrentEffect = () => !disposed && !disposedRef.current && connectionGenerationRef.current === generation;
+    const closeOwnedSockets = () => {
+      disposed = true;
+      disposedRef.current = true;
+      for (const socket of ownedSockets) {
+        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+          socket.close();
+        }
+      }
+      ownedSockets.clear();
+    };
+    terminalConnectionOwners.get(connectionKey)?.close();
+    disposed = false;
+    disposedRef.current = false;
+    terminalConnectionOwners.set(connectionKey, { id: ownerId, close: closeOwnedSockets });
 
-    const initTerminalAndWS = () => {
-      if (initialized || disposedRef.current) return;
+    const initTerminalAndWS = async () => {
+      if (initialized || !isCurrentEffect()) return;
       initialized = true;
       receivedFirstFrameRef.current = false;
       terminalReadyRef.current = false;
@@ -540,7 +594,7 @@ export function XtermInstance({
       }
       window.requestAnimationFrame(() => {
         window.requestAnimationFrame(() => {
-          if (disposedRef.current) return;
+          if (!isCurrentEffect()) return;
           if (fitAndNotify({ notify: false })) {
             terminalReadyRef.current = true;
             flushTerminalData();
@@ -551,7 +605,7 @@ export function XtermInstance({
       cancelInitialFit = scheduleFitBurst();
       cancelFontFit = scheduleFitBurst();
       void document.fonts?.ready.then(() => {
-        if (!disposedRef.current && fitAddon) {
+        if (isCurrentEffect() && fitAddon) {
           try {
             fitAddon.fit();
           } catch {
@@ -571,18 +625,60 @@ export function XtermInstance({
         wsParams.set("cols", String(initialSize.cols));
         wsParams.set("rows", String(initialSize.rows));
       }
-      const wsUrl = websocketURL("/ws/terminal", wsParams);
+      const relayWsUrl = directMode ? "" : websocketURL("/ws/terminal", wsParams);
+      let currentDirectEndpoint = directEndpoint;
+      if (directMode && !currentDirectEndpoint?.terminal_ws_url) {
+        const refreshedEndpoint = await refreshDirectEndpoint(projectId);
+        if (!isCurrentEffect()) return;
+        if (refreshedEndpoint) currentDirectEndpoint = refreshedEndpoint;
+      }
+      if (!isCurrentEffect()) return;
+      const directWsUrl = currentDirectEndpoint?.terminal_ws_url
+        ? directWebsocketURL(currentDirectEndpoint.terminal_ws_url, wsParams, currentDirectEndpoint.token)
+        : "";
+      if (directMode && !directWsUrl) {
+        term!.write("\r\n\x1b[31m[直连模式已开启，但 daemon 尚未上报可用直连端点；请检查 daemon 内网地址或关闭直连。]\x1b[0m\r\n");
+        return;
+      }
+      const activeWsUrl = directMode ? directWsUrl : relayWsUrl;
       let connectAttempts = 0;
       let connectedOnce = false;
 
+      if (!activeWsUrl) {
+        term!.write("\r\n\x1b[31m[WebSocket connection failed: missing terminal endpoint]\x1b[0m\r\n");
+        return;
+      }
+
+      const scheduleReconnect = (delay: number) => {
+        if (reconnectTimerRef.current !== null) {
+          window.clearTimeout(reconnectTimerRef.current);
+        }
+        reconnectTimerRef.current = window.setTimeout(() => {
+          reconnectTimerRef.current = null;
+          if (isCurrentEffect()) connect();
+        }, delay);
+      };
+
       const connect = () => {
-        if (disposedRef.current) return;
+        if (!isCurrentEffect()) return;
         connectAttempts += 1;
-        const socket = new WebSocket(wsUrl);
+        const socket = new WebSocket(activeWsUrl);
+        const socketGeneration = generation;
+        if (wsRef.current && wsRef.current !== socket && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+          wsRef.current.close();
+        }
         wsRef.current = socket;
+        ownedSockets.add(socket);
+        socket.addEventListener("close", () => {
+          ownedSockets.delete(socket);
+        }, { once: true });
         socket.binaryType = "arraybuffer";
 
         socket.onopen = () => {
+          if (!isCurrentEffect() || socketGeneration !== connectionGenerationRef.current || wsRef.current !== socket) {
+            socket.close();
+            return;
+          }
           connectedOnce = true;
           connectAttempts = 0;
           for (const chunk of inputBuf.current) {
@@ -600,6 +696,7 @@ export function XtermInstance({
         };
 
         socket.onmessage = (event) => {
+          if (!isCurrentEffect() || socketGeneration !== connectionGenerationRef.current || wsRef.current !== socket) return;
           if (event.data instanceof ArrayBuffer) {
             writeTerminalData(new Uint8Array(event.data));
           } else if (typeof event.data === "string") {
@@ -607,6 +704,10 @@ export function XtermInstance({
               const message = JSON.parse(event.data) as { type?: string; title?: string; full_title?: string; command?: string };
               if (message.type === "title" && typeof message.title === "string") {
                 onTitleChangeRef.current?.(message.title, message.command, message.full_title);
+                return;
+              }
+              if (message.type === "exit") {
+                normalExitRef.current = true;
                 return;
               }
             } catch {
@@ -617,26 +718,33 @@ export function XtermInstance({
         };
 
         socket.onerror = () => {
-          if (disposedRef.current) return;
-          if (!connectedOnce && connectAttempts >= 3) {
-            term!.write(`\r\n\x1b[31m[WebSocket connection failed: ${wsUrl}]\x1b[0m\r\n`);
-          }
+          // Let onclose decide whether to retry or report failure.
         };
 
         socket.onclose = () => {
-          if (disposedRef.current) return;
-          if (connectedOnce) {
-            term!.write("\r\n\x1b[33m[Connection closed, reconnecting...]\x1b[0m\r\n");
+          if (!isCurrentEffect() || socketGeneration !== connectionGenerationRef.current || wsRef.current !== socket) return;
+          if (normalExitRef.current) {
+            return;
+          }
+          if (!connectedOnce && connectAttempts >= 3) {
+            term!.write(`\r\n\x1b[31m[WebSocket connection failed: ${activeWsUrl}]\x1b[0m\r\n`);
+          } else if (connectedOnce) {
+            term!.write(directMode
+              ? "\r\n\x1b[33m[直连 daemon 连接断开，正在重连直连端点...]\x1b[0m\r\n"
+              : "\r\n\x1b[33m[Connection closed, reconnecting...]\x1b[0m\r\n");
           }
           const delay = Math.min(5000, 300 * connectAttempts);
-          reconnectTimerRef.current = window.setTimeout(connect, delay);
+          scheduleReconnect(delay);
         };
+
       };
 
+      normalExitRef.current = false;
       connectFrame = window.requestAnimationFrame(connect);
 
       /* ── 3. User input → WS ── */
-      term.onData((data) => {
+      dataDisposable = term.onData((data) => {
+        if (!isCurrentEffect()) return;
         const current = wsRef.current;
         if (current?.readyState === WebSocket.OPEN) {
           current.send(data);
@@ -649,7 +757,7 @@ export function XtermInstance({
     // Check size immediately to see if we can initialize right away
     const rect = container.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
-      initTerminalAndWS();
+      void initTerminalAndWS();
     }
 
     /* ── 4. Resize observer — refit when container dimensions change ── */
@@ -657,7 +765,7 @@ export function XtermInstance({
       const r = container.getBoundingClientRect();
       if (r.width > 0 && r.height > 0) {
         if (!initialized) {
-          initTerminalAndWS();
+          void initTerminalAndWS();
         } else {
           scheduleFitBurst();
           scheduleResizeAfterFit();
@@ -679,7 +787,12 @@ export function XtermInstance({
 
     /* ── 5. Cleanup ── */
     return () => {
-      disposedRef.current = true;
+      connectionGenerationRef.current += 1;
+      const owner = terminalConnectionOwners.get(connectionKey);
+      if (owner?.id === ownerId) {
+        terminalConnectionOwners.delete(connectionKey);
+      }
+      closeOwnedSockets();
       if (cancelCopyPasteShortcut) cancelCopyPasteShortcut();
       if (cancelPasteHandler) cancelPasteHandler();
       if (cancelFocusHandler) cancelFocusHandler();
@@ -700,19 +813,16 @@ export function XtermInstance({
       incomingBuf.current = [];
       ro.disconnect();
       if (osc52Disposable) osc52Disposable.dispose();
+      if (dataDisposable) dataDisposable.dispose();
       if (connectFrame !== null) window.cancelAnimationFrame(connectFrame);
-      const socket = wsRef.current;
-      if (socket) {
-        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
-          socket.close();
-        }
+      if (connectionGenerationRef.current === generation + 1) {
+        wsRef.current = null;
       }
-      wsRef.current = null;
       if (term) term.dispose();
       inputBuf.current = [];
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, terminalId, command]);
+  }, [projectId, terminalId, command, directMode, directEndpoint?.terminal_ws_url, directEndpoint?.token]);
 
   /* Dynamic xterm theme switching */
   useEffect(() => {

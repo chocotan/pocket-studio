@@ -610,6 +610,8 @@ function TerminalPanelViewComponent({
                     layoutVersion={layoutVersion}
                     theme={theme}
                     scale={scale}
+                    directMode={Boolean(project.direct_mode)}
+                    directEndpoint={project.direct_mode ? project.direct_endpoint : undefined}
                     onTitleChange={(title, command, fullTitle) => onTitleChange(tab.id, title, command, fullTitle)}
                     onActiveFocus={() => onTerminalFocus(panel.id, tab.id)}
                   />

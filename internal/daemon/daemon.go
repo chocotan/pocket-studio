@@ -34,21 +34,23 @@ import (
 type Daemon struct {
 	cfg Config
 
-	mu              sync.Mutex
-	tasks           map[string]*runningTask
-	history         map[string]protocol.TaskRecord
-	projects        map[string]protocol.Project
-	projectStates   map[string]json.RawMessage
-	send            chan protocol.Envelope
-	sendBinary      chan []byte
-	terminalBinary  bool
-	termMu          sync.Mutex
-	terminalPTYs    map[string]*runningPTY
-	hookURL         string
-	hookToken       string
-	hookAlerts      map[string]time.Time
-	directACP       map[string]*directACPSession
-	directACPStarts map[string]*directACPStart
+	mu                  sync.Mutex
+	tasks               map[string]*runningTask
+	history             map[string]protocol.TaskRecord
+	projects            map[string]protocol.Project
+	projectStates       map[string]json.RawMessage
+	send                chan protocol.Envelope
+	sendBinary          chan []byte
+	terminalBinary      bool
+	termMu              sync.Mutex
+	terminalPTYs        map[string]*runningPTY
+	directTerminalConns map[string]map[*directTerminalSubscriber]struct{}
+	hookURL             string
+	hookToken           string
+	hookAlerts          map[string]time.Time
+	directACP           map[string]*directACPSession
+	directACPStarts     map[string]*directACPStart
+	startingTasks       map[string]struct{}
 }
 
 const (
@@ -89,22 +91,32 @@ type directACPStart struct {
 
 func New(cfg Config) *Daemon {
 	return &Daemon{
-		cfg:             cfg,
-		tasks:           make(map[string]*runningTask),
-		history:         make(map[string]protocol.TaskRecord),
-		projects:        make(map[string]protocol.Project),
-		projectStates:   make(map[string]json.RawMessage),
-		send:            make(chan protocol.Envelope, 128),
-		sendBinary:      make(chan []byte, 256),
-		terminalPTYs:    make(map[string]*runningPTY),
-		hookToken:       randomHookToken(),
-		hookAlerts:      make(map[string]time.Time),
-		directACP:       make(map[string]*directACPSession),
-		directACPStarts: make(map[string]*directACPStart),
+		cfg:                 cfg,
+		tasks:               make(map[string]*runningTask),
+		history:             make(map[string]protocol.TaskRecord),
+		projects:            make(map[string]protocol.Project),
+		projectStates:       make(map[string]json.RawMessage),
+		send:                make(chan protocol.Envelope, 128),
+		sendBinary:          make(chan []byte, 256),
+		terminalPTYs:        make(map[string]*runningPTY),
+		directTerminalConns: make(map[string]map[*directTerminalSubscriber]struct{}),
+		hookToken:           randomHookToken(),
+		hookAlerts:          make(map[string]time.Time),
+		directACP:           make(map[string]*directACPSession),
+		directACPStarts:     make(map[string]*directACPStart),
+		startingTasks:       make(map[string]struct{}),
 	}
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
+	if strings.TrimSpace(d.cfg.DirectWeb.Token) == "" {
+		d.cfg.DirectWeb.Token = randomHookToken()
+	}
+	if stopDirectWebServer, err := d.startDirectWebServer(ctx); err != nil {
+		log.Printf("start direct web server: %v", err)
+	} else {
+		defer stopDirectWebServer()
+	}
 	if stopHookServer, err := d.startTerminalHookServer(ctx); err != nil {
 		log.Printf("start terminal hook server: %v", err)
 	} else {
@@ -908,12 +920,31 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 		}
 	}
 
-	runCtx := ctx
-	runCancel := func() {}
-	if d.cfg.ACPX.Enabled {
-		runCtx, runCancel = d.acpxCommandContext(ctx, task.Options.TimeoutSeconds)
-	}
+	// The prompt command uses an IDLE timeout, not a total one: a turn that is
+	// actively streaming output (thinking, tool calls, text) keeps resetting the
+	// timer and is never killed, no matter how long it legitimately runs. Only a
+	// turn that produces NO output for the whole idle window is treated as hung.
+	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
+
+	idleTimeout := time.Duration(0)
+	if d.cfg.ACPX.Enabled {
+		idleTimeout = d.acpxCommandTimeout(task.Options.TimeoutSeconds)
+	}
+	activityCh := make(chan struct{}, 1)
+	markActivity := func() {
+		select {
+		case activityCh <- struct{}{}:
+		default:
+		}
+	}
+	idleCh := make(chan struct{})
+	if idleTimeout > 0 {
+		go d.watchACPXIdle(runCtx, idleTimeout, activityCh, func() {
+			close(idleCh)
+			runCancel()
+		})
+	}
 
 	cmd := exec.CommandContext(runCtx, command, args...)
 	cmd.Dir = workspace.Path
@@ -990,11 +1021,11 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		d.scanOutput(stdout, "stdout", emitter)
+		d.scanOutput(stdout, "stdout", emitter, markActivity)
 	}()
 	go func() {
 		defer wg.Done()
-		d.scanTextOutput(stderr, "stderr", emitter)
+		d.scanTextOutput(stderr, "stderr", emitter, markActivity)
 	}()
 
 	waitErr := cmd.Wait()
@@ -1012,11 +1043,20 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 			emitter.emit("task.killed", map[string]any{"reason": "user_requested"}, nil)
 			return
 		}
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		idleHit := false
+		select {
+		case <-idleCh:
+			idleHit = true
+		default:
+		}
+		if idleHit {
 			if d.tryClaudeFallback(ctx, task, workspace.Path, emitter) {
 				return
 			}
-			emitter.emit("task.failed", map[string]any{"error": d.acpxTimeoutError("prompt", d.acpxCommandTimeout(task.Options.TimeoutSeconds))}, nil)
+			emitter.emit("task.failed", map[string]any{
+				"error":  fmt.Sprintf("acpx prompt produced no output for %s (idle timeout)", idleTimeout),
+				"reason": "idle_timeout",
+			}, nil)
 			return
 		}
 		if emitter.completedNormally() {
@@ -1260,6 +1300,33 @@ func (d *Daemon) acpxCommandContext(parent context.Context, taskTimeoutSeconds i
 	return context.WithTimeout(parent, timeout)
 }
 
+func (d *Daemon) watchACPXIdle(ctx context.Context, timeout time.Duration, activity <-chan struct{}, onIdle func()) {
+	if timeout <= 0 {
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-activity:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(timeout)
+		case <-timer.C:
+			if onIdle != nil {
+				onIdle()
+			}
+			return
+		}
+	}
+}
+
 func (d *Daemon) acpxTimeoutError(operation string, timeout time.Duration) string {
 	if timeout <= 0 {
 		return "acpx " + operation + " timed out"
@@ -1325,11 +1392,11 @@ func (d *Daemon) tryClaudeFallback(parent context.Context, task protocol.TaskDis
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		d.scanOutput(stdout, "stdout", emitter)
+		d.scanOutput(stdout, "stdout", emitter, func() {})
 	}()
 	go func() {
 		defer wg.Done()
-		d.scanTextOutput(stderr, "stderr", emitter)
+		d.scanTextOutput(stderr, "stderr", emitter, func() {})
 	}()
 	waitErr := cmd.Wait()
 	wg.Wait()
@@ -1480,12 +1547,15 @@ func (e *taskEmitter) errorText() string {
 	return e.lastError
 }
 
-func (d *Daemon) scanOutput(r io.Reader, stream string, emitter *taskEmitter) {
+func (d *Daemon) scanOutput(r io.Reader, stream string, emitter *taskEmitter, onActivity func()) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	adapter := newAgentOutputAdapter(emitter)
 	defer adapter.flush()
 	for scanner.Scan() {
+		if onActivity != nil {
+			onActivity()
+		}
 		line := scanner.Bytes()
 		var raw json.RawMessage
 		if json.Valid(line) {
@@ -1673,10 +1743,13 @@ func (d *Daemon) emitACPXModelListFromSessions(ctx context.Context, task protoco
 	}
 }
 
-func (d *Daemon) scanTextOutput(r io.Reader, stream string, emitter *taskEmitter) {
+func (d *Daemon) scanTextOutput(r io.Reader, stream string, emitter *taskEmitter, onActivity func()) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
+		if onActivity != nil {
+			onActivity()
+		}
 		text := scanner.Text()
 		if d.cfg.ACPX.Enabled {
 			emitter.markError(extractACPXErrorText(text))
@@ -2511,6 +2584,7 @@ func (d *Daemon) createProject(request protocol.ProjectCreateRequest) {
 		WorkspacePath: workspace.Path,
 		AgentIDs:      []string{},
 		TmuxIDs:       []string{},
+		DirectMode:    request.DirectMode,
 	}
 	d.mu.Lock()
 	d.projects[project.ID] = project
@@ -2651,14 +2725,15 @@ func (d *Daemon) sendProjectError(requestID string, message string) {
 
 func (d *Daemon) sendHello() {
 	d.send <- protocol.NewEnvelope(protocol.TypeDaemonHello, "daemon", protocol.DaemonHello{
-		DeviceID:      d.cfg.Device.ID,
-		DeviceName:    hostinfo.ResolveDeviceName(d.cfg.Device.Name),
-		DaemonVersion: "0.1.0",
-		Agent:         d.agentName(),
-		AgentLabel:    d.agentLabel(),
-		Agents:        d.agentCapabilities(),
-		Workspaces:    d.workspacesSnapshot(),
-		Features:      []string{protocol.FeatureTerminalBinaryV1},
+		DeviceID:       d.cfg.Device.ID,
+		DeviceName:     hostinfo.ResolveDeviceName(d.cfg.Device.Name),
+		DaemonVersion:  "0.1.0",
+		Agent:          d.agentName(),
+		AgentLabel:     d.agentLabel(),
+		Agents:         d.agentCapabilities(),
+		Workspaces:     d.workspacesSnapshot(),
+		Features:       []string{protocol.FeatureTerminalBinaryV1, protocol.FeatureDirectTerminalV1},
+		DirectEndpoint: d.directEndpoint(),
 	})
 }
 
@@ -2747,8 +2822,14 @@ func collectTerminalTabIDsFromRaw(raw json.RawMessage) []string {
 func (d *Daemon) runningTaskIDs() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	ids := make([]string, 0, len(d.tasks))
+	ids := make([]string, 0, len(d.tasks)+len(d.startingTasks))
 	for id := range d.tasks {
+		ids = append(ids, id)
+	}
+	for id := range d.startingTasks {
+		if _, running := d.tasks[id]; running {
+			continue
+		}
 		ids = append(ids, id)
 	}
 	return ids
@@ -4033,6 +4114,7 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 				ProjectID:  req.ProjectID,
 				TerminalID: req.TerminalID,
 			}
+			d.broadcastDirectTerminalExit(exitPayload)
 			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "daemon", exitPayload)
 		}()
 
@@ -4060,15 +4142,18 @@ func (d *Daemon) sendTerminalStreamData(data protocol.TerminalStreamData) {
 		frame, err := protocol.MarshalTerminalStreamDataBinary(data)
 		if err != nil {
 			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", data)
+			d.broadcastDirectTerminalData(data)
 			return
 		}
 		select {
 		case d.sendBinary <- frame:
+			d.broadcastDirectTerminalData(data)
 			return
 		default:
 		}
 	}
 	d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", data)
+	d.broadcastDirectTerminalData(data)
 }
 
 type terminalHookEvent struct {
@@ -4173,13 +4258,15 @@ func (d *Daemon) sendTerminalSnapshot(projectID string, terminalID string, sessi
 	}
 	title, fullTitle, command := tmuxTerminalInfo(sessionName)
 	if title != "" {
-		d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamTitle, "daemon", protocol.TerminalStreamTitle{
+		titlePayload := protocol.TerminalStreamTitle{
 			ProjectID:  projectID,
 			TerminalID: terminalID,
 			Title:      title,
 			FullTitle:  fullTitle,
 			Command:    command,
-		})
+		}
+		d.broadcastDirectTerminalTitle(titlePayload)
+		d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamTitle, "daemon", titlePayload)
 	}
 }
 
@@ -4195,13 +4282,15 @@ func (d *Daemon) watchTerminalTitle(ctx context.Context, projectID string, termi
 			lastTitle = title
 			lastFullTitle = fullTitle
 			lastCommand = command
-			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamTitle, "daemon", protocol.TerminalStreamTitle{
+			titlePayload := protocol.TerminalStreamTitle{
 				ProjectID:  projectID,
 				TerminalID: terminalID,
 				Title:      title,
 				FullTitle:  fullTitle,
 				Command:    command,
-			})
+			}
+			d.broadcastDirectTerminalTitle(titlePayload)
+			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamTitle, "daemon", titlePayload)
 		}
 		select {
 		case <-ctx.Done():
@@ -4241,11 +4330,68 @@ func terminalTitleFromPaneInfo(paneTitle string, currentPath string, command str
 	title := paneTitle
 	if title == "" {
 		title = command
+	} else if tmuxTitleLooksInitialPlaceholder(title, command) {
+		title = terminalTitleFromCommand(command)
 	}
 	if currentPath != "" && tmuxTitleLooksShortenedPath(title) {
 		title = compactPathTitle(currentPath)
 	}
 	return title
+}
+
+func terminalTitleFromCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	return initialTerminalTitle(command, "")
+}
+
+func tmuxTitleLooksInitialPlaceholder(title string, command string) bool {
+	title = strings.TrimSpace(title)
+	lowerTitle := strings.ToLower(title)
+	if lowerTitle == "xterm" || lowerTitle == "xterm-256color" || lowerTitle == "tmux" || lowerTitle == "tmux-256color" || lowerTitle == "screen" || lowerTitle == "screen-256color" {
+		return true
+	}
+	command = strings.TrimSpace(command)
+	if title == "" || command == "" {
+		return false
+	}
+	commandTitle, ok := knownTerminalTitleForCommand(command)
+	if !ok {
+		return false
+	}
+	switch title {
+	case "Shell", "Claude Code", "Codex", "OpenCode", "Kilo Code", "Pi", "Antigravity", "ACPX":
+		return title != commandTitle
+	default:
+		return false
+	}
+}
+
+func knownTerminalTitleForCommand(command string) (string, bool) {
+	command = strings.TrimSpace(command)
+	if command == "" || command == "bash" || command == "zsh" || command == "sh" {
+		return "Shell", command != ""
+	}
+	switch {
+	case command == "online" || command == "acpx" || strings.HasPrefix(command, "acpx "):
+		return "ACPX", true
+	case strings.Contains(command, "claude"):
+		return "Claude Code", true
+	case strings.Contains(command, "codex"):
+		return "Codex", true
+	case strings.Contains(command, "opencode"):
+		return "OpenCode", true
+	case strings.Contains(command, "kilo"):
+		return "Kilo Code", true
+	case command == "pi" || strings.HasPrefix(command, "pi "):
+		return "Pi", true
+	case command == "agy" || strings.Contains(command, "antigravity"):
+		return "Antigravity", true
+	default:
+		return "", false
+	}
 }
 
 func fullTerminalTitle(title string, paneTitle string, currentPath string) string {

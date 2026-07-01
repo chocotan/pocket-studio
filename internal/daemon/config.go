@@ -19,6 +19,7 @@ type Config struct {
 	Server     ServerConfig         `json:"server"`
 	ACPX       ACPXConfig           `json:"acpx"`
 	DirectACP  DirectACPConfig      `json:"direct_acp"`
+	DirectWeb  DirectWebConfig      `json:"direct_web"`
 	Claude     ClaudeConfig         `json:"claude"`
 	Workspaces []protocol.Workspace `json:"workspaces"`
 }
@@ -59,6 +60,13 @@ type DirectACPAgentConfig struct {
 	Env     map[string]string `json:"env"`
 }
 
+type DirectWebConfig struct {
+	Enabled    bool   `json:"enabled"`
+	ListenAddr string `json:"listen_addr"`
+	PublicHost string `json:"public_host,omitempty"`
+	Token      string `json:"token,omitempty"`
+}
+
 func NormalizeConfig(cfg Config) (Config, error) {
 	if strings.TrimSpace(cfg.Device.ID) == "" {
 		device, err := loadOrCreateDeviceConfig(cfg.Device.Name)
@@ -94,6 +102,14 @@ func NormalizeConfig(cfg Config) (Config, error) {
 		return cfg, fmt.Errorf("acpx.command_timeout_seconds must be >= 0")
 	}
 	cfg.DirectACP.Agents = normalizeDirectACPAgents(cfg.DirectACP.Agents)
+	if cfg.DirectWeb.ListenAddr == "" {
+		cfg.DirectWeb.ListenAddr = ":18082"
+	}
+	cfg.DirectWeb.PublicHost = strings.TrimSpace(cfg.DirectWeb.PublicHost)
+	if hostinfo.IsUnreportableHost(cfg.DirectWeb.PublicHost) {
+		cfg.DirectWeb.PublicHost = ""
+	}
+	cfg.DirectWeb.Token = strings.TrimSpace(cfg.DirectWeb.Token)
 	if len(cfg.Workspaces) == 0 {
 		home, _ := os.UserHomeDir()
 		cfg.Workspaces = []protocol.Workspace{{
@@ -142,6 +158,10 @@ func DefaultConfig() Config {
 		DirectACP: DirectACPConfig{
 			Enabled: true,
 			Agents:  normalizeDirectACPAgents(nil),
+		},
+		DirectWeb: DirectWebConfig{
+			Enabled:    true,
+			ListenAddr: ":18082",
 		},
 		Workspaces: []protocol.Workspace{
 			{
@@ -197,8 +217,21 @@ func loadOrCreateDeviceConfig(name string) (DeviceConfig, error) {
 			return DeviceConfig{}, err
 		}
 		if strings.TrimSpace(device.ID) != "" {
+			changed := false
 			if strings.TrimSpace(name) != "" {
-				device.Name = name
+				nextName := hostinfo.ResolveDeviceName(name)
+				if device.Name != nextName {
+					device.Name = nextName
+					changed = true
+				}
+			} else if strings.TrimSpace(device.Name) == "" || hostinfo.HasEmbeddedUnreportableIPv4(device.Name) {
+				device.Name = hostinfo.DisplayName()
+				changed = true
+			}
+			if changed {
+				if err := saveDeviceConfig(device); err != nil {
+					return DeviceConfig{}, err
+				}
 			}
 			return device, nil
 		}
@@ -213,17 +246,25 @@ func loadOrCreateDeviceConfig(name string) (DeviceConfig, error) {
 	if strings.TrimSpace(device.Name) == "" {
 		device.Name = hostinfo.DisplayName()
 	}
-	if err := os.MkdirAll(filepath.Dir(daemonDevicePath()), 0o755); err != nil {
-		return DeviceConfig{}, err
-	}
-	raw, err := json.MarshalIndent(device, "", "  ")
-	if err != nil {
-		return DeviceConfig{}, err
-	}
-	if err := os.WriteFile(daemonDevicePath(), append(raw, '\n'), 0o600); err != nil {
+	device.Name = hostinfo.ResolveDeviceName(device.Name)
+	if err := saveDeviceConfig(device); err != nil {
 		return DeviceConfig{}, err
 	}
 	return device, nil
+}
+
+func saveDeviceConfig(device DeviceConfig) error {
+	if err := os.MkdirAll(filepath.Dir(daemonDevicePath()), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(device, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(daemonDevicePath(), append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	return nil
 }
 
 func randomDeviceID() string {

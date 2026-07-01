@@ -27,16 +27,35 @@ export function createStudioWebTransport({ onEnvelope }: StudioWebTransportOptio
   let socket: WebSocket | null = null;
   let reconnectTimer: number | null = null;
 
+  const scheduleReconnect = () => {
+    if (closed || reconnectTimer !== null) return;
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      connect();
+    }, 1500);
+  };
+
   const connect = () => {
     if (closed) return;
-    socket = new WebSocket(websocketURL("/ws/web"));
+    try {
+      const url = websocketURL("/ws/web");
+      socket = new WebSocket(url);
+    } catch (err) {
+      console.error("failed to create studio websocket:", err);
+      scheduleReconnect();
+      return;
+    }
     socket.onmessage = (event) => {
       const envelope = parseEnvelope(event.data);
       if (envelope) onEnvelope(envelope);
     };
+    socket.onerror = () => {
+      // Let onclose drive reconnect. Some WebView builds emit onerror without a
+      // useful Error object, so keep this side-effect free.
+    };
     socket.onclose = () => {
       if (closed) return;
-      reconnectTimer = window.setTimeout(connect, 1500);
+      scheduleReconnect();
     };
   };
 
