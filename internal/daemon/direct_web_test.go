@@ -93,7 +93,7 @@ func TestDirectTerminalSubscribersReceiveDataTitleAndExit(t *testing.T) {
 	d.broadcastDirectTerminalExit(protocol.TerminalStreamExit{ProjectID: "project", TerminalID: "term"})
 }
 
-func TestDirectTerminalSubscriberReplacementClosesStaleSocket(t *testing.T) {
+func TestDirectTerminalMultipleSubscribersCoexist(t *testing.T) {
 	cfg := DefaultConfig()
 	d := New(cfg)
 	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,17 +125,16 @@ func TestDirectTerminalSubscriberReplacementClosesStaleSocket(t *testing.T) {
 	defer second.Close()
 	second.SetReadDeadline(time.Now().Add(2 * time.Second))
 
-	if _, _, err := first.ReadMessage(); err == nil {
-		t.Fatal("first stale direct terminal socket stayed open after replacement")
-	}
+	d.broadcastDirectTerminalData(protocol.TerminalStreamData{ProjectID: "project", TerminalID: "term", Data: []byte("broadcast-message")})
 
-	d.broadcastDirectTerminalData(protocol.TerminalStreamData{ProjectID: "project", TerminalID: "term", Data: []byte("only-latest")})
-	msgType, data, err := second.ReadMessage()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if msgType != websocket.BinaryMessage || string(data) != "only-latest" {
-		t.Fatalf("second socket data frame = type %d %q", msgType, data)
+	for i, ws := range []*websocket.Conn{first, second} {
+		msgType, data, err := ws.ReadMessage()
+		if err != nil {
+			t.Fatalf("subscriber %d error reading: %v", i+1, err)
+		}
+		if msgType != websocket.BinaryMessage || string(data) != "broadcast-message" {
+			t.Fatalf("subscriber %d received invalid frame: type %d %q", i+1, msgType, data)
+		}
 	}
 }
 

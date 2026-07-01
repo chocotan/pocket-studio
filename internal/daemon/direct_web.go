@@ -199,14 +199,13 @@ func terminalKey(projectID string, terminalID string) string {
 
 func (d *Daemon) addDirectTerminalSubscriber(key string, subscriber *directTerminalSubscriber) {
 	d.termMu.Lock()
-	replaced := d.directTerminalConns[key]
-	d.directTerminalConns[key] = map[*directTerminalSubscriber]struct{}{
-		subscriber: {},
+	defer d.termMu.Unlock()
+	subscribers := d.directTerminalConns[key]
+	if subscribers == nil {
+		subscribers = make(map[*directTerminalSubscriber]struct{})
+		d.directTerminalConns[key] = subscribers
 	}
-	d.termMu.Unlock()
-	for old := range replaced {
-		_ = old.conn.Close()
-	}
+	subscribers[subscriber] = struct{}{}
 }
 
 func (d *Daemon) removeDirectTerminalSubscriber(key string, subscriber *directTerminalSubscriber) {
