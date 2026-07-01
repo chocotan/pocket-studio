@@ -721,7 +721,7 @@ function TerminalTypeMenu({
           <select
             value={selectedProjId}
             onChange={(e) => setSelectedProjId(e.target.value)}
-            className="flex-1 bg-white border border-slate-200 rounded px-1 py-0.5 text-[10px] text-slate-700 outline-none cursor-pointer hover:border-indigo-300"
+            className="w-[110px] truncate bg-white border border-slate-200 rounded px-1 py-0.5 text-[10px] text-slate-700 outline-none cursor-pointer hover:border-indigo-300"
           >
             {groupedProjects.map((group) => (
               <optgroup key={group.deviceName} label={group.deviceName}>
