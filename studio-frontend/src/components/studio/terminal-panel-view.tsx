@@ -404,22 +404,23 @@ function TerminalPanelViewComponent({
                               ? tab.fileKind === "image" ? <ImageIcon className="h-3.5 w-3.5" /> : <FileText className="h-3.5 w-3.5" />
                               : displayType.logo}
                         </span>
-                        <span className="relative z-10 min-w-0 flex-1 truncate text-[11px] font-semibold leading-none">
-                          {displayTitle}
-                        </span>
                         {isCrossProject && tabProject && (() => {
                           const tabDevice = devices.find((d) => d.id === tabProject.device_id);
                           const devName = deviceDisplayName(tabDevice, tabProject.device_id);
+                          const devInitial = devName.trim().charAt(0).toUpperCase();
                           const projInitial = tabProject.name.trim().charAt(0).toLowerCase();
                           return (
                             <span
                               className="relative z-10 shrink-0 bg-indigo-50/80 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 px-1 py-0.5 rounded text-[8px] font-bold border border-indigo-100/50 dark:border-indigo-900/50"
                               title={`机器: ${devName} | 项目: ${tabProject.name}`}
                             >
-                              {devName}:{projInitial}
+                              {devInitial}:{projInitial}
                             </span>
                           );
                         })()}
+                        <span className="relative z-10 min-w-0 flex-1 truncate text-[11px] font-semibold leading-none">
+                          {displayTitle}
+                        </span>
                         <button
                           type="button"
                           onPointerDown={(event) => {
