@@ -324,11 +324,11 @@ export function ProjectNavMenu({
   );
 }
 
-function deviceForProject(devices: Device[], project: Project) {
+export function deviceForProject(devices: Device[], project: Project) {
   return devices.find((device) => device.id === project.device_id);
 }
 
-function deviceDisplayName(device: Device | undefined, fallback = "") {
+export function deviceDisplayName(device: Device | undefined, fallback = "") {
   const raw = (device?.name || fallback).trim();
   if (!raw) return fallback;
   const withoutAddress = raw.replace(/\s*\([^)]*\)\s*$/, "").trim();

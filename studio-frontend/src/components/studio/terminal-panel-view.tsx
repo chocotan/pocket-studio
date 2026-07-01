@@ -13,6 +13,8 @@ import { SplitBottomIcon, SplitLeftIcon, SplitRightIcon, SplitTopIcon } from "./
 import type { TerminalPanel, StudioTab } from "./studio-layout";
 import { AgentChatTab } from "./agent-chat/agent-chat-tab";
 import type { Project } from "./studio-dashboard";
+import type { Device } from "@/lib/types";
+import { deviceDisplayName } from "./project-switcher";
 import {
   cleanTerminalTitle,
   terminalType,
@@ -34,6 +36,7 @@ interface TerminalPanelViewProps {
   projectId: string;
   project: Project;
   projects: Project[];
+  devices: Device[];
   workspacePath: string;
   onFocus: (id: string) => void;
   onAddMenu: (id: string) => void;
@@ -68,6 +71,7 @@ function TerminalPanelViewComponent({
   projectId,
   project,
   projects,
+  devices,
   workspacePath,
   onFocus,
   onAddMenu,
@@ -477,8 +481,8 @@ function TerminalPanelViewComponent({
             align="left"
             style={addMenuPosition}
             projects={projects}
+            devices={devices}
             projectId={projectId}
-            project={project}
             onSelect={(kind, tabProjectId) => onAddTab(panel.id, kind, tabProjectId)}
             onFileExplorer={(tabProjectId) => onAddFileExplorer(panel.id, tabProjectId)}
             onAddAgentChat={(agentKind, agentRuntime, tabProjectId) => onAddAgentChat(panel.id, agentKind, agentRuntime, tabProjectId)}
@@ -639,8 +643,8 @@ function TerminalTypeMenu({
   align,
   style,
   projects,
+  devices,
   projectId,
-  project,
   onSelect,
   onFileExplorer,
   onAddAgentChat,
@@ -648,17 +652,33 @@ function TerminalTypeMenu({
   align: "left" | "right";
   style?: React.CSSProperties;
   projects: Project[];
+  devices: Device[];
   projectId: string;
-  project: Project;
   onSelect: (kind: TerminalKind, tabProjectId?: string) => void;
   onFileExplorer: (tabProjectId?: string) => void;
   onAddAgentChat: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string) => void;
 }) {
   const [submenu, setSubmenu] = useState<"terminal" | "acpx" | "acp" | null>(null);
 
-  const sameDeviceProjects = useMemo(() => {
-    return projects.filter((p) => p.device_id === project.device_id);
-  }, [projects, project.device_id]);
+  const groupedProjects = useMemo(() => {
+    const groups: Array<{ deviceName: string; list: Project[] }> = [];
+    const deviceMap = new Map<string, Project[]>();
+    for (const p of projects) {
+      const devId = p.device_id || "unknown";
+      let list = deviceMap.get(devId);
+      if (!list) {
+        list = [];
+        deviceMap.set(devId, list);
+      }
+      list.push(p);
+    }
+    deviceMap.forEach((list, devId) => {
+      const dev = devices.find((d) => d.id === devId);
+      const deviceName = deviceDisplayName(dev, devId);
+      groups.push({ deviceName, list });
+    });
+    return groups;
+  }, [projects, devices]);
 
   const [selectedProjId, setSelectedProjId] = useState(projectId);
 
@@ -675,7 +695,7 @@ function TerminalTypeMenu({
       style={style}
       onClick={(event) => event.stopPropagation()}
     >
-      {sameDeviceProjects.length > 1 && (
+      {projects.length > 1 && (
         <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-100 flex items-center justify-between gap-1 text-[10px] text-slate-500">
           <span className="font-semibold shrink-0">运行项目:</span>
           <select
@@ -683,10 +703,14 @@ function TerminalTypeMenu({
             onChange={(e) => setSelectedProjId(e.target.value)}
             className="flex-1 bg-white border border-slate-200 rounded px-1 py-0.5 text-[10px] text-slate-700 outline-none cursor-pointer hover:border-indigo-300"
           >
-            {sameDeviceProjects.map((p: Project) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
+            {groupedProjects.map((group) => (
+              <optgroup key={group.deviceName} label={group.deviceName}>
+                {group.list.map((p: Project) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
         </div>

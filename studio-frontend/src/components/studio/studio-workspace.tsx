@@ -206,6 +206,7 @@ export function StudioWorkspace({
           projectId={projectId}
           project={project}
           projects={projects}
+          devices={devices}
           workspacePath={project.workspace_path}
           onFocus={handleFocus}
           onAddMenu={(panelId) => setAddMenuPanelId((prev) => prev === panelId ? null : panelId)}
