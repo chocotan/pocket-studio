@@ -263,6 +263,7 @@ interface XtermInstanceProps {
   directEndpoint?: { terminal_ws_url: string; token?: string };
   onTitleChange?: (title: string, command?: string, fullTitle?: string) => void;
   onActiveFocus?: () => void;
+  filePath?: string;
 }
 
 const BASE_FONT_SIZE = 12;
@@ -306,6 +307,7 @@ export function XtermInstance({
   directEndpoint,
   onTitleChange,
   onActiveFocus,
+  filePath,
 }: XtermInstanceProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const xtermRef    = useRef<XTerminal | null>(null);
@@ -726,6 +728,9 @@ export function XtermInstance({
         terminal_id: terminalId,
         command,
       });
+      if (filePath) {
+        wsParams.set("path", filePath);
+      }
       if (initialSize.cols > 0 && initialSize.rows > 0) {
         wsParams.set("cols", String(initialSize.cols));
         wsParams.set("rows", String(initialSize.rows));

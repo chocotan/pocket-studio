@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Columns, Maximize, Palette, Check, Cable } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Palette, Check, Cable, Layers, FolderTree, FileText, Plus } from "lucide-react";
 import type { Device } from "@/lib/types";
-import { type StudioTheme } from "./terminal-types";
+import { type StudioTheme, terminalType, terminalTypeFromCommand, cleanTerminalTitle, type TerminalKind } from "./terminal-types";
 import type { Project } from "./studio-dashboard";
 import { EmptyWorkspace } from "./empty-workspace";
 import { ProjectNavMenu, ProjectSwitcher } from "./project-switcher";
@@ -13,7 +13,8 @@ import {
   type LayoutNode,
   type SplitGroup,
 } from "./studio-layout";
-import { TerminalPanelView } from "./terminal-panel-view";
+import { TerminalPanelView, TerminalTypeMenu } from "./terminal-panel-view";
+import { FloatingWindow } from "./floating-window";
 import { ZoomSelect } from "./zoom-select";
 import { NotificationCenter } from "./notification-center";
 import type { PageZoom } from "@/lib/zoom";
@@ -47,25 +48,6 @@ interface StudioWorkspaceProps {
   onBackToDashboard: () => void;
   onProjectUpdated?: (project: Project) => void;
 }
-
-const Columns3Icon = (props: React.SVGProps<SVGSVGElement>) => (
-  <svg
-    xmlns="http://www.w3.org/2000/svg"
-    width="24"
-    height="24"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="2.2"
-    strokeLinecap="round"
-    strokeLinejoin="round"
-    {...props}
-  >
-    <rect width="18" height="18" x="3" y="3" rx="2" />
-    <path d="M9 3v18" />
-    <path d="M15 3v18" />
-  </svg>
-);
 
 const STUDIO_NAV_HIDDEN_KEY = "pocket-studio-nav-hidden";
 
@@ -109,13 +91,13 @@ export function StudioWorkspace({
     return "light";
   });
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [dockMenuOpen, setDockMenuOpen] = useState(false);
   const [directModeSaving, setDirectModeSaving] = useState(false);
   const [directModeError, setDirectModeError] = useState("");
   const [navHidden, setNavHidden] = useState(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem(STUDIO_NAV_HIDDEN_KEY) === "true";
   });
-
   const panelScale = pageZoom / 100;
 
   const {
@@ -131,7 +113,6 @@ export function StudioWorkspace({
     setLayoutVersion,
     addMenuPanelId,
     setAddMenuPanelId,
-    applyPresetLayout,
     handleFocus,
     handleSplit,
     handleClosePanel,
@@ -148,6 +129,15 @@ export function StudioWorkspace({
     handleTerminalFocus,
     handleCreateInitialPanel,
     handleCreateInitialFileExplorer,
+    handleCreateNewPanel,
+    handleCreateNewFileExplorer,
+    handleCreateNewAgentChat,
+    layoutMode,
+    setLayoutMode,
+    floatingPanels,
+    setFloatingPanels,
+    focusFloatingPanel,
+    panels,
   } = useWorkspaceLayout({
     projectId,
     project,
@@ -218,6 +208,10 @@ export function StudioWorkspace({
           onOpenFile={handleOpenFile}
           onActiveTab={handleActiveTab}
           onCloseTab={handleCloseTab}
+          layoutMode={layoutMode}
+          onCreateNewPanel={handleCreateNewPanel}
+          onCreateNewFileExplorer={handleCreateNewFileExplorer}
+          onCreateNewAgentChat={handleCreateNewAgentChat}
           onTabDragStart={() => setIsDraggingTab(true)}
           onTabDragMove={handleTabDragMove}
           onTabDragEnd={handleTabDragEnd}
@@ -354,45 +348,35 @@ export function StudioWorkspace({
               onMarkAllRead={onMarkAllNotificationsRead}
             />
             <ZoomSelect value={pageZoom} onChange={onPageZoomChange} compact />
-            {/* Preset Layout Buttons */}
+
+            {/* Display Mode Toggle */}
             <div className="flex items-center bg-muted/40 p-0.5 rounded-lg border border-border/60">
-              {/* Preset 1: Full workspace */}
               <button
                 type="button"
-                onClick={() => applyPresetLayout(1)}
-                className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-all cursor-pointer"
-                title="应用布局：全功能工作区 (文件管理器+编辑器区+终端)"
+                onClick={() => setLayoutMode("grid")}
+                className={`p-1.5 rounded-md hover:bg-accent hover:text-accent-foreground transition-all cursor-pointer ${
+                  layoutMode === "grid"
+                    ? "bg-accent text-accent-foreground shadow-sm font-bold"
+                    : "text-muted-foreground"
+                }`}
+                title="平铺网格模式 / Grid Mode"
               >
                 <LayoutGrid className="h-3.5 w-3.5" />
               </button>
-              {/* Preset 2: Single terminal */}
               <button
                 type="button"
-                onClick={() => applyPresetLayout(2)}
-                className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-all cursor-pointer"
-                title="应用布局：单终端面板"
+                onClick={() => setLayoutMode("floating")}
+                className={`p-1.5 rounded-md hover:bg-accent hover:text-accent-foreground transition-all cursor-pointer ${
+                  layoutMode === "floating"
+                    ? "bg-accent text-accent-foreground shadow-sm font-bold"
+                    : "text-muted-foreground"
+                }`}
+                title="悬浮窗口模式 / Floating Windows Mode"
               >
-                <Maximize className="h-3.5 w-3.5" />
-              </button>
-              {/* Preset 3: Side by side terminals */}
-              <button
-                type="button"
-                onClick={() => applyPresetLayout(3)}
-                className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-all cursor-pointer"
-                title="应用布局：左右双终端"
-              >
-                <Columns className="h-3.5 w-3.5" />
-              </button>
-              {/* Preset 4: Three-column layout */}
-              <button
-                type="button"
-                onClick={() => applyPresetLayout(4)}
-                className="p-1.5 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-all cursor-pointer"
-                title="应用布局：左侧文件+中间编辑+右侧终端"
-              >
-                <Columns3Icon className="h-3.5 w-3.5" />
+                <Layers className="h-3.5 w-3.5" />
               </button>
             </div>
+
 
             <div className="h-4 w-px bg-border" />
 
@@ -491,7 +475,7 @@ export function StudioWorkspace({
         </button>
       )}
 
-      <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-1 bg-slate-50 dark:bg-[#0f131c] transition-colors duration-150">
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-1 bg-slate-50 dark:bg-[#0f131c] transition-colors duration-150 relative">
         <div className="relative min-h-0 flex-1 overflow-hidden">
           <div
             className="absolute left-0 top-0"
@@ -502,16 +486,269 @@ export function StudioWorkspace({
               transformOrigin: "top left",
             }}
           >
-            {layoutTree ? (
-              renderNode(layoutTree)
+            {layoutMode === "grid" ? (
+              layoutTree ? (
+                renderNode(layoutTree)
+              ) : (
+                <EmptyWorkspace
+                  onCreate={handleCreateInitialPanel}
+                  onCreateFileExplorer={handleCreateInitialFileExplorer}
+                />
+              )
             ) : (
-              <EmptyWorkspace
-                onCreate={handleCreateInitialPanel}
-                onCreateFileExplorer={handleCreateInitialFileExplorer}
-              />
+              /* Floating Mode Desktop */
+              <div 
+                className="relative w-full h-full overflow-hidden"
+                style={{
+                  backgroundImage: theme === "dark" || theme === "synthwave" || theme === "onedark" || theme === "charcoal"
+                    ? "radial-gradient(rgba(255,255,255,0.06) 1px, transparent 0)"
+                    : "radial-gradient(rgba(0,0,0,0.06) 1px, transparent 0)",
+                  backgroundSize: "24px 24px"
+                }}
+              >
+                {panels.length === 0 ? (
+                  <EmptyWorkspace
+                    onCreate={handleCreateInitialPanel}
+                    onCreateFileExplorer={handleCreateInitialFileExplorer}
+                  />
+                ) : (
+                  panels.map((p) => {
+                    const floatState = floatingPanels[p.id];
+                    if (!floatState) return null;
+
+                    return (
+                      <FloatingWindow
+                        key={p.id}
+                        id={p.id}
+                        x={floatState.x}
+                        y={floatState.y}
+                        width={floatState.width}
+                        height={floatState.height}
+                        zIndex={floatState.zIndex}
+                        isMaximized={floatState.isMaximized}
+                        isMinimized={floatState.isMinimized}
+                        focused={focusedId === p.id && !floatState.isMinimized}
+                        onFocus={() => focusFloatingPanel(p.id)}
+                        onUpdatePosition={(newX, newY) => {
+                          setFloatingPanels((prev) => ({
+                            ...prev,
+                            [p.id]: { ...prev[p.id], x: newX, y: newY },
+                          }));
+                        }}
+                        onUpdateSize={(newX, newY, newW, newH) => {
+                          setFloatingPanels((prev) => ({
+                            ...prev,
+                            [p.id]: {
+                              ...prev[p.id],
+                              x: newX,
+                              y: newY,
+                              width: newW,
+                              height: newH,
+                            },
+                          }));
+                        }}
+                        onToggleMaximize={() => {
+                          setFloatingPanels((prev) => ({
+                            ...prev,
+                            [p.id]: {
+                              ...prev[p.id],
+                              isMaximized: !prev[p.id].isMaximized,
+                            },
+                          }));
+                        }}
+                        onMinimize={() => {
+                          setFloatingPanels((prev) => ({
+                            ...prev,
+                            [p.id]: { ...prev[p.id], isMinimized: true },
+                          }));
+                        }}
+                      >
+                        {(floatProps) => (
+                          <TerminalPanelView
+                            key={p.id}
+                            panel={p}
+                            focused={focusedId === p.id}
+                            addMenuPanelId={addMenuPanelId}
+                            dragTarget={tabDragTarget}
+                            isDraggingTab={isDraggingTab}
+                            projectId={projectId}
+                            project={project}
+                            projects={projects}
+                            devices={devices}
+                            workspacePath={project.workspace_path}
+                            onFocus={handleFocus}
+                            onAddMenu={(panelId) => setAddMenuPanelId((prev) => prev === panelId ? null : panelId)}
+                            onSplitSelect={handleSplit}
+                            onAddTab={handleAddTab}
+                            onAddFileExplorer={handleAddFileExplorer}
+                            onAddAgentChat={handleAddAgentChat}
+                            onUpdateTabProperties={handleUpdateTabProperties}
+                            onOpenFile={handleOpenFile}
+                            onActiveTab={handleActiveTab}
+                            onCloseTab={handleCloseTab}
+                            layoutMode={layoutMode}
+                            onCreateNewPanel={handleCreateNewPanel}
+                            onCreateNewFileExplorer={handleCreateNewFileExplorer}
+                            onCreateNewAgentChat={handleCreateNewAgentChat}
+                            onTabDragStart={() => setIsDraggingTab(true)}
+                            onTabDragMove={handleTabDragMove}
+                            onTabDragEnd={handleTabDragEnd}
+                            onTabDragCancel={() => {
+                              setTabDragTarget(null);
+                              setIsDraggingTab(false);
+                            }}
+                            onClosePanel={handleClosePanel}
+                            onTitleChange={handleTerminalTitle}
+                            onTerminalFocus={handleTerminalFocus}
+                            terminalTitles={terminalTitles}
+                            alertTerminalIds={alertTerminalIds}
+                            layoutVersion={layoutVersion}
+                            theme={theme}
+                            scale={panelScale}
+                            {...floatProps}
+                          />
+                        )}
+                      </FloatingWindow>
+                    );
+                  })
+                )}
+              </div>
             )}
           </div>
         </div>
+
+        {/* Dock Taskbar for Floating Mode */}
+        {layoutMode === "floating" && (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-1.5 backdrop-blur-md bg-white/70 dark:bg-slate-900/70 border border-border/80 shadow-lg rounded-xl px-3 py-1.5 animate-in fade-in slide-in-from-bottom-4 duration-300">
+            {panels.flatMap((p) => p.tabs.map((t) => ({ tab: t, panel: p }))).map(({ tab, panel }) => {
+              const float = floatingPanels[panel.id];
+              const isMinimized = float?.isMinimized;
+              const isPanelFocused = focusedId === panel.id && !isMinimized;
+              const isActive = isPanelFocused && panel.activeTabId === tab.id;
+              
+              const isFileExplorer = tab.kind === "file_explorer";
+              const isFileViewer = tab.kind === "file_viewer";
+              const liveTitle = tab.kind === "terminal" ? terminalTitles[tab.id] : undefined;
+              const activeCommand = liveTitle?.command || tab.activeCommand || "";
+              const displayType = terminalType(
+                tab.kind === "agent_chat"
+                  ? (tab.agentKind as TerminalKind || "opencode")
+                  : terminalTypeFromCommand(activeCommand, tab.termType)
+              );
+              
+              const isCrossProject = (tab.projectId || projectId) !== projectId;
+              const tabProject = projects.find((proj) => proj.id === (tab.projectId || projectId));
+              
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => {
+                    if (isMinimized) {
+                      setFloatingPanels((prev) => ({
+                        ...prev,
+                        [panel.id]: { ...prev[panel.id], isMinimized: false }
+                      }));
+                      handleActiveTab(panel.id, tab.id);
+                      focusFloatingPanel(panel.id);
+                    } else if (isActive) {
+                      setFloatingPanels((prev) => ({
+                        ...prev,
+                        [panel.id]: { ...prev[panel.id], isMinimized: true }
+                      }));
+                    } else {
+                      handleActiveTab(panel.id, tab.id);
+                      focusFloatingPanel(panel.id);
+                    }
+                  }}
+                  className={`relative flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold border rounded-lg transition-all duration-200 hover:scale-105 active:scale-95 ${
+                    isActive
+                      ? "bg-indigo-600 border-indigo-600 text-white shadow-sm shadow-indigo-500/25"
+                      : (panel.activeTabId === tab.id && isMinimized)
+                        ? "bg-muted/40 border-border/40 text-muted-foreground opacity-60 hover:opacity-100"
+                        : "bg-card border-border text-foreground hover:bg-accent"
+                  }`}
+                  title={tab.title}
+                >
+                  <span className="flex h-4 w-4 items-center justify-center rounded">
+                    {isFileExplorer ? (
+                      <FolderTree className="h-3.5 w-3.5 text-sky-500" />
+                    ) : isFileViewer ? (
+                      <FileText className="h-3.5 w-3.5 text-emerald-500" />
+                    ) : (
+                      displayType.logo
+                    )}
+                  </span>
+                  <span className="max-w-[100px] truncate text-[10px] pr-1.5">
+                    {tab.kind === "file_explorer"
+                      ? "文件"
+                      : tab.kind === "file_viewer"
+                        ? tab.title
+                        : tab.kind === "agent_chat"
+                          ? tab.title
+                          : cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType)
+                    }
+                  </span>
+                  
+                  {isCrossProject && tabProject && (
+                    <span className="absolute -top-1.5 -right-1.5 text-[7px] bg-amber-500 text-white rounded px-0.5 border border-amber-600 font-bold scale-90">
+                      P
+                    </span>
+                  )}
+                  
+                  {/* Status dot: only show for active tab of the panel */}
+                  {panel.activeTabId === tab.id && (
+                    <span className={`absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-0.5 rounded-full ${
+                      isActive ? "bg-white" : isMinimized ? "bg-amber-500" : "bg-indigo-500"
+                    }`} />
+                  )}
+                </button>
+              );
+            })}
+
+            {/* Separator between items and New Window button */}
+            {panels.length > 0 && (
+              <div className="h-5 w-px bg-border/80 mx-1.5" />
+            )}
+
+            {/* New Window Button with Dropdown Menu */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setDockMenuOpen((prev) => !prev)}
+                className="flex items-center justify-center h-7 w-7 rounded-lg border border-border bg-card text-foreground hover:bg-accent hover:text-accent-foreground transition-all duration-250 hover:scale-105 active:scale-95 shadow-sm cursor-pointer"
+                title="新建终端、文件浏览器或 AI 助手窗口"
+              >
+                <Plus className="h-4 w-4 text-indigo-500 shrink-0" />
+              </button>
+
+              {dockMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-40 cursor-default" onClick={() => setDockMenuOpen(false)} />
+                  <TerminalTypeMenu
+                    align="right"
+                    style={{ bottom: "34px", top: "auto", position: "absolute" }}
+                    projects={projects}
+                    devices={devices}
+                    projectId={projectId}
+                    onSelect={(kind, tabProjectId) => {
+                      handleCreateNewPanel(kind, tabProjectId);
+                      setDockMenuOpen(false);
+                    }}
+                    onFileExplorer={(tabProjectId) => {
+                      handleCreateNewFileExplorer(tabProjectId);
+                      setDockMenuOpen(false);
+                    }}
+                    onAddAgentChat={(agentKind, agentRuntime, tabProjectId) => {
+                      handleCreateNewAgentChat(agentKind, agentRuntime, tabProjectId);
+                      setDockMenuOpen(false);
+                    }}
+                  />
+                </>
+              )}
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

@@ -92,10 +92,15 @@ func (d *Daemon) handleDirectTerminalWebSocket(w http.ResponseWriter, r *http.Re
 	d.addDirectTerminalSubscriber(key, subscriber)
 	defer d.removeDirectTerminalSubscriber(key, subscriber)
 
+	workspacePath := project.WorkspacePath
+	if customPath := strings.TrimSpace(r.URL.Query().Get("path")); customPath != "" {
+		workspacePath = customPath
+	}
+
 	start := protocol.TerminalStreamStart{
 		ProjectID:     projectID,
 		TerminalID:    terminalID,
-		WorkspacePath: project.WorkspacePath,
+		WorkspacePath: workspacePath,
 		Command:       r.URL.Query().Get("command"),
 		InitialTitle:  initialTerminalTitle(r.URL.Query().Get("command"), ""),
 		Cols:          parseDirectTerminalDimension(r.URL.Query().Get("cols")),

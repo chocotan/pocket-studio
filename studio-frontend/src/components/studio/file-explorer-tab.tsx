@@ -20,6 +20,11 @@ import {
   Search,
   Trash2,
   X,
+  List,
+  FolderTree,
+  ArrowUp,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { postJSON } from "@/lib/api";
 
@@ -43,11 +48,17 @@ interface FileTreeNode {
   name: string;
   path: string;
   isDir: boolean;
+  size?: number;
+  modified?: number;
   children?: FileTreeNode[];
   loaded?: boolean;
 }
 
-import { type StudioTheme } from "./terminal-types";
+import { type StudioTheme, type TerminalKind } from "./terminal-types";
+import { createPortal } from "react-dom";
+import { TerminalTypeMenu } from "./terminal-panel-view";
+import type { Project } from "./studio-dashboard";
+import type { Device } from "@/lib/types";
 
 interface FileExplorerTabProps {
   projectId: string;
@@ -56,9 +67,26 @@ interface FileExplorerTabProps {
   layoutVersion: number;
   onOpenFile: (path: string) => void;
   theme?: StudioTheme;
+  projects?: Project[];
+  devices?: Device[];
+  onCreateTab?: (kind: TerminalKind, tabProjectId?: string, filePath?: string) => void;
+  onCreateFileExplorer?: (tabProjectId?: string, filePath?: string) => void;
+  onCreateAgentChat?: (agentKind: string, agentRuntime?: "acpx" | "direct_acp", tabProjectId?: string, filePath?: string) => void;
 }
 
-function FileExplorerTabView({ projectId, workspacePath, active, layoutVersion, onOpenFile, theme = "light" }: FileExplorerTabProps) {
+function FileExplorerTabView({
+  projectId,
+  workspacePath,
+  active,
+  layoutVersion,
+  onOpenFile,
+  theme = "light",
+  projects = [],
+  devices = [],
+  onCreateTab,
+  onCreateFileExplorer,
+  onCreateAgentChat,
+}: FileExplorerTabProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   void theme;
   const [treeData, setTreeData] = useState<FileTreeNode[]>([]);
@@ -70,19 +98,127 @@ function FileExplorerTabView({ projectId, workspacePath, active, layoutVersion, 
   const [searching, setSearching] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<FileTreeNode | null>(null);
   const [height, setHeight] = useState(320);
-  const rootName = useMemo(() => basename(workspacePath) || workspacePath || "工作目录", [workspacePath]);
+
+  const [explorerRootPath, setExplorerRootPath] = useState("");
+  const [viewMode, setViewMode] = useState<"tree" | "list">("tree");
+  const [currentFolderPath, setCurrentFolderPath] = useState("");
+  const [listEntries, setListEntries] = useState<FileTreeNode[]>([]);
+  const [loadingFolder, setLoadingFolder] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; node: FileTreeNode } | null>(null);
+  const [showHidden, setShowHidden] = useState(false);
+
+  const filteredTreeData = useMemo(() => {
+    if (showHidden) return treeData;
+    const filterNodes = (nodes: FileTreeNode[]): FileTreeNode[] => {
+      return nodes
+        .filter((n) => !n.name.startsWith("."))
+        .map((n) => {
+          if (n.children) {
+            return {
+              ...n,
+              children: filterNodes(n.children),
+            };
+          }
+          return n;
+        });
+    };
+    return filterNodes(treeData);
+  }, [treeData, showHidden]);
+
+  const filteredListEntries = useMemo(() => {
+    if (showHidden) return listEntries;
+    return listEntries.filter((n) => !n.name.startsWith("."));
+  }, [listEntries, showHidden]);
+
+  const [sortField, setSortField] = useState<"name" | "size" | "modified" | null>(null);
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+
+  const sortedListEntries = useMemo(() => {
+    const baseList = [...filteredListEntries];
+    if (!sortField) return baseList;
+
+    baseList.sort((a, b) => {
+
+      let valA: any = "";
+      let valB: any = "";
+
+      if (sortField === "name") {
+        valA = a.name.toLowerCase();
+        valB = b.name.toLowerCase();
+      } else if (sortField === "size") {
+        valA = a.size || 0;
+        valB = b.size || 0;
+      } else if (sortField === "modified") {
+        valA = a.modified ? new Date(a.modified).getTime() : 0;
+        valB = b.modified ? new Date(b.modified).getTime() : 0;
+      }
+
+      if (valA < valB) return sortDirection === "asc" ? -1 : 1;
+      if (valA > valB) return sortDirection === "asc" ? 1 : -1;
+      return 0;
+    });
+
+    return baseList;
+  }, [filteredListEntries, sortField, sortDirection]);
+
+  const handleSort = (field: "name" | "size" | "modified") => {
+    if (sortField === field) {
+      if (sortDirection === "asc") {
+        setSortDirection("desc");
+      } else {
+        setSortField(null);
+      }
+    } else {
+      setSortField(field);
+      setSortDirection("asc");
+    }
+  };
+
+  const renderSortIndicator = (field: "name" | "size" | "modified") => {
+    if (sortField !== field) return null;
+    return (
+      <span className="ml-1 inline-block text-[10px] text-indigo-500 font-bold">
+        {sortDirection === "asc" ? "▲" : "▼"}
+      </span>
+    );
+  };
+
+  const resolvedRootPath = useMemo(() => {
+    return explorerRootPath || workspacePath;
+  }, [explorerRootPath, workspacePath]);
+
+  const rootName = useMemo(() => {
+    return basename(resolvedRootPath) || resolvedRootPath || "根目录";
+  }, [resolvedRootPath]);
+
+  function getParentOfPath(path: string) {
+    if (!path || path === "/") return "/";
+    const parts = path.replace(/\/+$/, "").split("/");
+    parts.pop();
+    const parent = parts.join("/");
+    return parent || "/";
+  }
+
+  const handleGoUp = () => {
+    const parent = getParentOfPath(resolvedRootPath);
+    setExplorerRootPath(parent);
+  };
+
+  useEffect(() => {
+    setCurrentFolderPath(explorerRootPath);
+  }, [explorerRootPath]);
 
   useEffect(() => {
     let cancelled = false;
     setLoadingRoot(true);
     setError("");
-    loadDirectory("")
+    loadDirectory(explorerRootPath)
       .then((children) => {
         if (cancelled) return;
         setTreeData([{
-          id: ".",
+          id: explorerRootPath || ".",
           name: rootName,
-          path: "",
+          path: explorerRootPath,
           isDir: true,
           loaded: true,
           children,
@@ -98,7 +234,27 @@ function FileExplorerTabView({ projectId, workspacePath, active, layoutVersion, 
     return () => {
       cancelled = true;
     };
-  }, [projectId, workspacePath, rootName]);
+  }, [projectId, workspacePath, explorerRootPath, rootName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingFolder(true);
+    loadDirectory(currentFolderPath)
+      .then((children) => {
+        if (cancelled) return;
+        setListEntries(children);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingFolder(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, currentFolderPath]);
 
   useEffect(() => {
     const element = containerRef.current;
@@ -182,12 +338,12 @@ function FileExplorerTabView({ projectId, workspacePath, active, layoutVersion, 
     setTreeData([]);
     setError("");
     setLoadingRoot(true);
-    loadDirectory("")
+    loadDirectory(explorerRootPath)
       .then((children) => {
         setTreeData([{
-          id: ".",
+          id: explorerRootPath || ".",
           name: rootName,
-          path: "",
+          path: explorerRootPath,
           isDir: true,
           loaded: true,
           children,
@@ -195,6 +351,12 @@ function FileExplorerTabView({ projectId, workspacePath, active, layoutVersion, 
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoadingRoot(false));
+
+    setLoadingFolder(true);
+    loadDirectory(currentFolderPath)
+      .then(setListEntries)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setLoadingFolder(false));
   }
 
   function parentPath(path: string) {
@@ -205,7 +367,7 @@ function FileExplorerTabView({ projectId, workspacePath, active, layoutVersion, 
   }
 
   function actionBasePath() {
-    if (!selectedEntry) return "";
+    if (!selectedEntry) return explorerRootPath;
     return selectedEntry.isDir ? selectedEntry.path : parentPath(selectedEntry.path);
   }
 
@@ -252,40 +414,75 @@ function FileExplorerTabView({ projectId, workspacePath, active, layoutVersion, 
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }
 
+  function createFileInDir(dirPath: string) {
+    const name = window.prompt("新建文件路径", dirPath ? `${dirPath}/untitled.txt` : "untitled.txt");
+    if (!name) return;
+    runFileAction("create_file", name)
+      .then(() => {
+        if (viewMode === "list") {
+          return loadDirectory(currentFolderPath).then(setListEntries);
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }
+
+  function createDirectoryInDir(dirPath: string) {
+    const name = window.prompt("新建目录路径", dirPath ? `${dirPath}/new-folder` : "new-folder");
+    if (!name) return;
+    runFileAction("mkdir", name)
+      .then(() => {
+        if (viewMode === "list") {
+          return loadDirectory(currentFolderPath).then(setListEntries);
+        }
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }
+
   return (
     <div ref={containerRef} className="flex h-full min-h-0 flex-col bg-card text-card-foreground">
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-border/60 px-3">
-        <div className="min-w-0">
-          <div className="truncate text-[11px] font-bold text-foreground/80">{rootName}</div>
-          <div className="truncate text-[10px] text-muted-foreground">{workspacePath}</div>
-        </div>
-        <button
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            refresh();
-          }}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-indigo-650 dark:hover:text-indigo-400 transition-colors"
-          aria-label="刷新文件资源管理器"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${loadingRoot ? "animate-spin" : ""}`} />
-        </button>
-      </div>
       {error && (
         <div className="mx-2 mt-2 rounded-md border border-rose-200/30 bg-rose-500/10 px-2 py-1.5 text-[11px] text-rose-600 dark:text-rose-400">
           {error}
         </div>
       )}
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-border/40 px-2 bg-muted/20">
+        <ToolbarButton title="向上一级" onClick={handleGoUp}>
+          <ArrowUp className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
+        </ToolbarButton>
+        <div className="h-4 w-px bg-border" />
         <ToolbarButton title="新建文件" onClick={createFile}><FilePlus2 className="h-3.5 w-3.5" /></ToolbarButton>
         <ToolbarButton title="新建目录" onClick={createDirectory}><FolderPlus className="h-3.5 w-3.5" /></ToolbarButton>
         <ToolbarButton title="移动" onClick={moveSelected} disabled={!selectedEntry?.path}><MoveRight className="h-3.5 w-3.5" /></ToolbarButton>
         <ToolbarButton title="删除" onClick={deleteSelected} disabled={!selectedEntry?.path}><Trash2 className="h-3.5 w-3.5" /></ToolbarButton>
         <div className="h-4 w-px bg-border" />
-        <ToolbarButton title="刷新" onClick={refresh}><RefreshCw className={`h-3.5 w-3.5 ${loadingRoot ? "animate-spin" : ""}`} /></ToolbarButton>
-        {selectedEntry?.path && (
-          <span className="ml-1 min-w-0 flex-1 truncate text-[10px] text-muted-foreground" title={selectedEntry.path}>
+        {/* Toggle Display Mode */}
+        <ToolbarButton
+          title={viewMode === "tree" ? "切换为列表模式" : "切换为树形模式"}
+          onClick={() => setViewMode((prev) => (prev === "tree" ? "list" : "tree"))}
+        >
+          {viewMode === "tree" ? <List className="h-3.5 w-3.5" /> : <FolderTree className="h-3.5 w-3.5" />}
+        </ToolbarButton>
+        {/* Toggle Hidden Files */}
+        <ToolbarButton
+          title={showHidden ? "隐藏隐藏文件" : "显示隐藏文件"}
+          onClick={() => setShowHidden((prev) => !prev)}
+        >
+          {showHidden ? (
+            <Eye className="h-3.5 w-3.5 text-indigo-500" />
+          ) : (
+            <EyeOff className="h-3.5 w-3.5" />
+          )}
+        </ToolbarButton>
+        <ToolbarButton title="刷新" onClick={refresh}>
+          <RefreshCw className={`h-3.5 w-3.5 ${loadingRoot ? "animate-spin" : ""}`} />
+        </ToolbarButton>
+        {selectedEntry?.path ? (
+          <span className="ml-2 min-w-0 flex-1 truncate text-[10px] text-muted-foreground" title={selectedEntry.path}>
             {selectedEntry.path}
+          </span>
+        ) : (
+          <span className="ml-2 min-w-0 flex-1 truncate text-[10px] text-muted-foreground" title={resolvedRootPath}>
+            {resolvedRootPath}
           </span>
         )}
       </div>
@@ -319,18 +516,100 @@ function FileExplorerTabView({ projectId, workspacePath, active, layoutVersion, 
             searching={searching}
             onOpenFile={onOpenFile}
           />
+        ) : viewMode === "list" ? (
+          <div className="overflow-auto h-full text-foreground/90 select-none" style={{ height }}>
+            {loadingFolder && listEntries.length === 0 ? (
+              <div className="px-2 py-1 text-[11px] text-slate-400">加载中...</div>
+            ) : (
+              <table className="w-full border-collapse text-[11px]">
+                <thead>
+                  <tr className="border-b border-border/40 text-muted-foreground font-semibold text-left">
+                    <th className="py-1 px-2 cursor-pointer select-none hover:bg-muted/50 transition-colors" onClick={() => handleSort("name")}>
+                      名称 {renderSortIndicator("name")}
+                    </th>
+                    <th className="py-1 px-2 w-20 text-right cursor-pointer select-none hover:bg-muted/50 transition-colors" onClick={() => handleSort("size")}>
+                      大小 {renderSortIndicator("size")}
+                    </th>
+                    <th className="py-1 px-2 w-32 text-right cursor-pointer select-none hover:bg-muted/50 transition-colors" onClick={() => handleSort("modified")}>
+                      修改时间 {renderSortIndicator("modified")}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {currentFolderPath !== explorerRootPath && (
+                    <tr
+                      className="hover:bg-muted/70 cursor-default transition-colors text-indigo-650 dark:text-indigo-400 font-semibold"
+                      onDoubleClick={() => {
+                        setCurrentFolderPath(getParentOfPath(currentFolderPath));
+                      }}
+                    >
+                      <td className="py-1 px-2 flex items-center gap-1.5">
+                        <FolderOpen className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+                        <span>.. (返回上一级)</span>
+                      </td>
+                      <td className="py-1 px-2 text-right">-</td>
+                      <td className="py-1 px-2 text-right">-</td>
+                    </tr>
+                  )}
+                  {sortedListEntries.map((node) => {
+                    const Icon = node.isDir ? Folder : fileIconForPath(node.path);
+                    const isSelected = selectedEntry?.path === node.path;
+                    return (
+                      <tr
+                        key={node.id}
+                        onClick={() => setSelectedEntry(node)}
+                        onDoubleClick={() => {
+                          if (node.isDir) {
+                            setCurrentFolderPath(node.path);
+                          } else {
+                            onOpenFile(node.path);
+                          }
+                        }}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setSelectedEntry(node);
+                          setContextMenu({
+                            x: event.clientX,
+                            y: event.clientY,
+                            node,
+                          });
+                        }}
+                        className={`hover:bg-muted/70 cursor-default transition-colors ${
+                          isSelected
+                            ? "bg-indigo-500/15 font-semibold text-indigo-650 dark:text-indigo-400"
+                            : "text-foreground/80 hover:text-foreground"
+                        }`}
+                      >
+                        <td className="py-1 px-2">
+                          <div className="flex items-center gap-1.5 truncate">
+                            <span className={fileIconClass(node)}>
+                              <Icon className="h-3.5 w-3.5 shrink-0" />
+                            </span>
+                            <span className="truncate">{node.name}</span>
+                          </div>
+                        </td>
+                        <td className="py-1 px-2 text-right text-muted-foreground">{formatSize(node.size)}</td>
+                        <td className="py-1 px-2 text-right text-muted-foreground">{formatDate(node.modified)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
         ) : loadingRoot && treeData.length === 0 ? (
           <div className="px-2 py-1 text-[11px] text-slate-400">加载文件...</div>
         ) : (
           <Tree<FileTreeNode>
-            key={`${projectId}:${workspacePath}`}
-            data={treeData}
+            key={`${projectId}:${resolvedRootPath}`}
+            data={filteredTreeData}
             width="100%"
             height={height}
             rowHeight={24}
             indent={16}
             openByDefault={false}
-            initialOpenState={{ ".": true }}
+            initialOpenState={{ [explorerRootPath || "."]: true }}
             disableDrag
             disableDrop
             disableEdit
@@ -344,11 +623,72 @@ function FileExplorerTabView({ projectId, workspacePath, active, layoutVersion, 
                 loadingPaths={loadingPaths}
                 onSelectEntry={setSelectedEntry}
                 onOpenFile={onOpenFile}
+                onContextMenu={(event, node) => {
+                  setContextMenu({
+                    x: event.clientX,
+                    y: event.clientY,
+                    node,
+                  });
+                }}
               />
             )}
           </Tree>
         )}
       </div>
+
+      {/* Context Menu Popup via React Portal to prevent scale/transform offset */}
+      {contextMenu && createPortal(
+        <>
+          <div
+            className="fixed inset-0 z-[9998] cursor-default"
+            onClick={() => setContextMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setContextMenu(null);
+            }}
+          />
+          <TerminalTypeMenu
+            align="left"
+            style={{
+              position: "fixed",
+              left: `${contextMenu.x}px`,
+              top: `${contextMenu.y}px`,
+              zIndex: 9999,
+            }}
+            projects={projects}
+            devices={devices}
+            projectId={projectId}
+            dirPath={contextMenu.node.isDir ? contextMenu.node.path : parentPath(contextMenu.node.path)}
+            onNewFile={(dirPath) => {
+              setContextMenu(null);
+              createFileInDir(dirPath);
+            }}
+            onNewFolder={(dirPath) => {
+              setContextMenu(null);
+              createDirectoryInDir(dirPath);
+            }}
+            onSelect={(kind, tabProjectId) => {
+              setContextMenu(null);
+              if (onCreateTab) {
+                onCreateTab(kind, tabProjectId, contextMenu.node.path);
+              }
+            }}
+            onFileExplorer={(tabProjectId) => {
+              setContextMenu(null);
+              if (onCreateFileExplorer) {
+                onCreateFileExplorer(tabProjectId, contextMenu.node.path);
+              }
+            }}
+            onAddAgentChat={(agentKind, agentRuntime, tabProjectId) => {
+              setContextMenu(null);
+              if (onCreateAgentChat) {
+                onCreateAgentChat(agentKind, agentRuntime, tabProjectId, contextMenu.node.path);
+              }
+            }}
+          />
+        </>,
+        document.body
+      )}
     </div>
   );
 }
@@ -361,10 +701,12 @@ function FileTreeRow({
   loadingPaths,
   onSelectEntry,
   onOpenFile,
+  onContextMenu,
 }: NodeRendererProps<FileTreeNode> & {
   loadingPaths: Set<string>;
   onSelectEntry: (entry: FileTreeNode) => void;
   onOpenFile: (path: string) => void;
+  onContextMenu: (event: React.MouseEvent, node: FileTreeNode) => void;
 }) {
   const loading = loadingPaths.has(node.data.path);
   const Icon = node.data.isDir ? (node.isOpen ? FolderOpen : Folder) : fileIconForPath(node.data.path);
@@ -386,6 +728,13 @@ function FileTreeRow({
           node.activate();
           onOpenFile(node.data.path);
         }
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        node.select();
+        onSelectEntry(node.data);
+        onContextMenu(event, node.data);
       }}
       className={`group flex cursor-default select-none items-center gap-1 rounded px-1.5 py-0.5 text-[11px] transition-colors ${
         node.isSelected
@@ -452,6 +801,8 @@ function toTreeNode(entry: FileEntry): FileTreeNode {
     name: entry.name,
     path: entry.path,
     isDir: entry.is_dir,
+    size: entry.size,
+    modified: entry.modified,
     loaded: !entry.is_dir,
     children: entry.is_dir ? [] : undefined,
   };
@@ -529,4 +880,22 @@ function fileIconClass(node: Pick<FileTreeNode, "isDir" | "path">) {
   if (["md", "txt", "log"].includes(ext)) return "text-slate-500";
   if (["zip", "gz", "tar", "rar", "7z", "jar", "war"].includes(ext)) return "text-violet-500";
   return "text-slate-400";
+}
+
+function formatSize(bytes?: number) {
+  if (bytes === undefined || bytes === null || bytes === 0) return "-";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDate(timestamp?: number) {
+  if (!timestamp) return "-";
+  return new Date(timestamp * 1000).toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }

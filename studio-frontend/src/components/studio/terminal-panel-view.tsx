@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
-import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal, Minus, Minimize2, Maximize2, FilePlus2, FolderPlus } from "lucide-react";
 import { OpenCode, Codex, ClaudeCode, KiloCode } from "@lobehub/icons";
 import {
   Tooltip,
@@ -41,9 +41,9 @@ interface TerminalPanelViewProps {
   onFocus: (id: string) => void;
   onAddMenu: (id: string) => void;
   onSplitSelect: (id: string, dir: SplitDirection, kind: TerminalKind) => void;
-  onAddTab: (id: string, kind: TerminalKind, tabProjectId?: string) => void;
-  onAddFileExplorer: (id: string, tabProjectId?: string) => void;
-  onAddAgentChat: (panelId: string, agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string) => void;
+  onAddTab: (id: string, kind: TerminalKind, tabProjectId?: string, filePath?: string) => void;
+  onAddFileExplorer: (id: string, tabProjectId?: string, filePath?: string) => void;
+  onAddAgentChat: (panelId: string, agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string, filePath?: string) => void;
   onUpdateTabProperties: (tabId: string, props: Partial<StudioTab>) => void;
   onOpenFile: (panelId: string, path: string, tabProjectId?: string) => void;
   onActiveTab: (panelId: string, tabId: string) => void;
@@ -60,6 +60,16 @@ interface TerminalPanelViewProps {
   layoutVersion: number;
   theme?: StudioTheme;
   scale?: number;
+  isFloating?: boolean;
+  isMaximized?: boolean;
+  onMinimize?: () => void;
+  onMaximize?: () => void;
+  onHeaderPointerDown?: (e: React.PointerEvent) => void;
+  onHeaderDoubleClick?: (e: React.MouseEvent) => void;
+  layoutMode?: "grid" | "floating";
+  onCreateNewPanel?: (kind: TerminalKind, tabProjectId?: string, filePath?: string) => void;
+  onCreateNewFileExplorer?: (tabProjectId?: string, filePath?: string) => void;
+  onCreateNewAgentChat?: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string, filePath?: string) => void;
 }
 
 function TerminalPanelViewComponent({
@@ -95,6 +105,16 @@ function TerminalPanelViewComponent({
   layoutVersion,
   theme = "light",
   scale = 1,
+  isFloating = false,
+  isMaximized = false,
+  onMinimize,
+  onMaximize,
+  onHeaderPointerDown,
+  onHeaderDoubleClick,
+  layoutMode = "grid",
+  onCreateNewPanel,
+  onCreateNewFileExplorer,
+  onCreateNewAgentChat,
 }: TerminalPanelViewProps) {
   const tabbarRef = useRef<HTMLDivElement | null>(null);
   const tabScrollerRef = useRef<HTMLDivElement | null>(null);
@@ -303,7 +323,7 @@ function TerminalPanelViewComponent({
       data-alert={panelAlert ? "true" : "false"}
       onClick={() => onFocus(panel.id)}
       onPointerEnter={() => {
-        if (!isFocused) onFocus(panel.id);
+        if (!isFloating && !isFocused) onFocus(panel.id);
       }}
       style={panelStyle}
       className={`studio-panel box-border bg-card text-card-foreground transition-[border-color,box-shadow] duration-150 ${focusClasses}`}
@@ -313,6 +333,8 @@ function TerminalPanelViewComponent({
         data-studio-tabbar="true"
         data-panel-id={panel.id}
         data-tab-count={panel.tabs.length}
+        onPointerDown={onHeaderPointerDown}
+        onDoubleClick={onHeaderDoubleClick}
         className="studio-tabbar relative flex h-6 shrink-0 items-end gap-0.5 overflow-visible border-b-0 bg-muted px-1"
       >
         {scrollState.canLeft && (
@@ -542,6 +564,56 @@ function TerminalPanelViewComponent({
             </Tooltip>
           ))}
 
+          {isFloating && (
+            <>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onMinimize?.();
+                      }}
+                      className="flex h-6 w-5 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-slate-100 hover:text-foreground dark:hover:bg-slate-800"
+                      title="最小化"
+                    >
+                      <Minus className="h-3.5 w-3.5" />
+                    </button>
+                  }
+                />
+                <TooltipContent side="bottom" className="text-[10px] font-medium">
+                  最小化
+                </TooltipContent>
+              </Tooltip>
+
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onMaximize?.();
+                      }}
+                      className="flex h-6 w-5 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-slate-100 hover:text-foreground dark:hover:bg-slate-800"
+                      title={isMaximized ? "还原" : "最大化"}
+                    >
+                      {isMaximized ? (
+                        <Minimize2 className="h-3.5 w-3.5" />
+                      ) : (
+                        <Maximize2 className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  }
+                />
+                <TooltipContent side="bottom" className="text-[10px] font-medium">
+                  {isMaximized ? "还原" : "最大化"}
+                </TooltipContent>
+              </Tooltip>
+            </>
+          )}
+
           <div className="mx-0.5 h-3.5 w-px bg-slate-200" />
           <Tooltip>
             <TooltipTrigger
@@ -608,7 +680,7 @@ function TerminalPanelViewComponent({
             const active = tab.id === panel.activeTabId;
             const tabProjectId = tab.projectId || projectId;
             const tabProject = projects.find((p) => p.id === tabProjectId) || project;
-            const tabWorkspacePath = tabProject.workspace_path || workspacePath;
+            const tabWorkspacePath = tab.filePath || tabProject.workspace_path || workspacePath;
             return (
               <div
                 key={tab.id}
@@ -626,6 +698,29 @@ function TerminalPanelViewComponent({
                     layoutVersion={layoutVersion}
                     onOpenFile={(path) => onOpenFile(panel.id, path, tabProjectId)}
                     theme={theme}
+                    projects={projects}
+                    devices={devices}
+                    onCreateTab={(kind, tabProjectId, filePath) => {
+                      if (layoutMode === "floating" && onCreateNewPanel) {
+                        onCreateNewPanel(kind, tabProjectId, filePath);
+                      } else {
+                        onAddTab(panel.id, kind, tabProjectId, filePath);
+                      }
+                    }}
+                    onCreateFileExplorer={(tabProjectId, filePath) => {
+                      if (layoutMode === "floating" && onCreateNewFileExplorer) {
+                        onCreateNewFileExplorer(tabProjectId, filePath);
+                      } else {
+                        onAddFileExplorer(panel.id, tabProjectId, filePath);
+                      }
+                    }}
+                    onCreateAgentChat={(agentKind, agentRuntime, tabProjectId, filePath) => {
+                      if (layoutMode === "floating" && onCreateNewAgentChat) {
+                        onCreateNewAgentChat(agentKind, agentRuntime, tabProjectId, filePath);
+                      } else {
+                        onAddAgentChat(panel.id, agentKind, agentRuntime, tabProjectId, filePath);
+                      }
+                    }}
                   />
                 ) : tab.kind === "file_viewer" ? (
                   <FileViewerTab
@@ -656,6 +751,7 @@ function TerminalPanelViewComponent({
                     directEndpoint={tabProject.direct_mode ? tabProject.direct_endpoint : undefined}
                     onTitleChange={(title, command, fullTitle) => onTitleChange(tab.id, title, command, fullTitle)}
                     onActiveFocus={() => onTerminalFocus(panel.id, tab.id)}
+                    filePath={tab.filePath}
                   />
                 )}
               </div>
@@ -669,7 +765,7 @@ function TerminalPanelViewComponent({
 
 export const TerminalPanelView = React.memo(TerminalPanelViewComponent);
 
-function TerminalTypeMenu({
+export function TerminalTypeMenu({
   align,
   style,
   projects,
@@ -678,6 +774,9 @@ function TerminalTypeMenu({
   onSelect,
   onFileExplorer,
   onAddAgentChat,
+  dirPath,
+  onNewFile,
+  onNewFolder,
 }: {
   align: "left" | "right";
   style?: React.CSSProperties;
@@ -687,6 +786,9 @@ function TerminalTypeMenu({
   onSelect: (kind: TerminalKind, tabProjectId?: string) => void;
   onFileExplorer: (tabProjectId?: string) => void;
   onAddAgentChat: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string) => void;
+  dirPath?: string;
+  onNewFile?: (dirPath: string) => void;
+  onNewFolder?: (dirPath: string) => void;
 }) {
   const [submenu, setSubmenu] = useState<"terminal" | "acpx" | "acp" | null>(null);
 
@@ -748,6 +850,31 @@ function TerminalTypeMenu({
 
       {!submenu ? (
         <>
+          {dirPath && onNewFile && onNewFolder && (
+            <>
+              <button
+                type="button"
+                onClick={() => onNewFile(dirPath)}
+                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-indigo-50 text-indigo-650 dark:bg-indigo-900/40 dark:text-indigo-400">
+                  <FilePlus2 className="h-3.5 w-3.5" />
+                </span>
+                <span>新建文件</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onNewFolder(dirPath)}
+                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-amber-50 text-amber-600 dark:bg-amber-900/40 dark:text-amber-400">
+                  <FolderPlus className="h-3.5 w-3.5" />
+                </span>
+                <span>新建目录</span>
+              </button>
+              <div className="border-t border-slate-100 dark:border-slate-800 my-1" />
+            </>
+          )}
           <MenuBranch label="终端类型" icon={<Terminal className="h-3.5 w-3.5" />} tone="slate" onClick={() => setSubmenu("terminal")} />
           <MenuBranch label="ACPX会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="amber" onClick={() => setSubmenu("acpx")} />
           <MenuBranch label="ACP会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="emerald" onClick={() => setSubmenu("acp")} />

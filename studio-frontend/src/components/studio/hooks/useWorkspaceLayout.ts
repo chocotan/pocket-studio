@@ -21,11 +21,9 @@ import {
   type TerminalTitleState,
 } from "../terminal-types";
 import {
-  PANEL_DIRECTIONS,
   loadShortcutConfig,
   normalizeShortcut,
   shortcutFromEvent,
-  type PanelDirection,
   type ShortcutAction,
 } from "../shortcut-settings";
 import {
@@ -47,6 +45,12 @@ import {
 } from "../studio-layout-ops";
 import { directWebsocketURL, getJSON, postJSON, websocketURL } from "@/lib/api";
 import type { NotificationJumpTarget } from "../terminal-notifications";
+
+function collectAllPanels(node: LayoutNode | null): TerminalPanel[] {
+  if (!node) return [];
+  if (node.type === "panel") return [node];
+  return node.children.flatMap(collectAllPanels);
+}
 
 interface UseWorkspaceLayoutProps {
   projectId: string;
@@ -77,6 +81,18 @@ export function useWorkspaceLayout({
   const terminalTitlesRef = useRef<Record<string, TerminalTitleState>>({});
   const [stateLoaded, setStateLoaded] = useState(false);
   const [loadedProjectId, setLoadedProjectId] = useState("");
+
+  const [layoutMode, setLayoutMode] = useState<"grid" | "floating">("grid");
+  interface FloatingPanelState {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    zIndex: number;
+    isMaximized: boolean;
+    isMinimized: boolean;
+  }
+  const [floatingPanels, setFloatingPanels] = useState<Record<string, FloatingPanelState>>({});
 
   const skipSaveRef = useRef(true);
 
@@ -176,6 +192,26 @@ export function useWorkspaceLayout({
       setLayoutTree(next.layoutTree);
       setFocusedId(next.focusedId);
       setNewTerminalType(next.newTerminalType);
+
+      const raw = stateProject.studio_state as any;
+      if (raw) {
+        if (raw.layoutMode === "grid" || raw.layoutMode === "floating") {
+          setLayoutMode(raw.layoutMode);
+        } else {
+          const saved = typeof window !== "undefined" ? localStorage.getItem("pocket-studio-layout-mode") : null;
+          setLayoutMode(saved === "floating" ? "floating" : "grid");
+        }
+        if (raw.floatingPanels && typeof raw.floatingPanels === "object") {
+          setFloatingPanels(raw.floatingPanels);
+        } else {
+          setFloatingPanels({});
+        }
+      } else {
+        const saved = typeof window !== "undefined" ? localStorage.getItem("pocket-studio-layout-mode") : null;
+        setLayoutMode(saved === "floating" ? "floating" : "grid");
+        setFloatingPanels({});
+      }
+
       setLayoutVersion((value) => value + 1);
     };
 
@@ -230,13 +266,92 @@ export function useWorkspaceLayout({
           layoutTree: cleanLayoutTitles(layoutTree),
           focusedId,
           newTerminalType,
+          layoutMode,
+          floatingPanels,
         },
       }).catch((err) => {
         console.error("failed to save studio state:", err);
       });
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [layoutTree, focusedId, newTerminalType, projectId, stateLoaded]);
+  }, [layoutTree, focusedId, newTerminalType, layoutMode, floatingPanels, projectId, stateLoaded]);
+
+  const panels = collectAllPanels(layoutTree);
+
+  useEffect(() => {
+    if (!layoutTree) return;
+    const currentPanels = collectAllPanels(layoutTree);
+    
+    setFloatingPanels((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      
+      currentPanels.forEach((panel, index) => {
+        if (!next[panel.id]) {
+          changed = true;
+          const cascadeIndex = index % 8;
+          next[panel.id] = {
+            x: 60 + cascadeIndex * 35,
+            y: 40 + cascadeIndex * 30,
+            width: 700,
+            height: 480,
+            zIndex: index + 1,
+            isMaximized: false,
+            isMinimized: false,
+          };
+        }
+      });
+      
+      // Clean up deleted panels
+      const activeIds = new Set(currentPanels.map((p) => p.id));
+      Object.keys(next).forEach((id) => {
+        if (!activeIds.has(id)) {
+          delete next[id];
+          changed = true;
+        }
+      });
+      
+      return changed ? next : prev;
+    });
+  }, [layoutTree]);
+
+  // Sync focused panel to top of floating z-index stack
+  useEffect(() => {
+    if (layoutMode === "floating" && focusedId) {
+      setFloatingPanels((prev) => {
+        const current = prev[focusedId];
+        if (!current) return prev;
+        const maxZ = Object.values(prev).reduce((max, p) => Math.max(max, p.zIndex), 1);
+        if (current.zIndex === maxZ && maxZ > 1) return prev;
+        return {
+          ...prev,
+          [focusedId]: {
+            ...current,
+            zIndex: maxZ + 1,
+            isMinimized: false
+          }
+        };
+      });
+    }
+  }, [focusedId, layoutMode]);
+
+  const focusFloatingPanel = (panelId: string) => {
+    setFloatingPanels((prev) => {
+      const current = prev[panelId];
+      if (!current) return prev;
+      const maxZ = Object.values(prev).reduce((max, p) => Math.max(max, p.zIndex), 1);
+      if (current.zIndex === maxZ && maxZ > 1) return prev;
+      return {
+        ...prev,
+        [panelId]: {
+          ...current,
+          zIndex: maxZ + 1,
+          isMinimized: false,
+        }
+      };
+    });
+    handleFocus(panelId);
+  };
 
   useEffect(() => {
     if (!stateLoaded || loadedProjectId !== projectId || !layoutTree || !notificationJumpTarget) return;
@@ -291,7 +406,11 @@ export function useWorkspaceLayout({
       if (!matched) return;
       const handled = matched === "panel.newRight"
         ? createPanelRightOfFocused()
-        : matched in PANEL_DIRECTIONS && focusPanelByDirection(PANEL_DIRECTIONS[matched as keyof typeof PANEL_DIRECTIONS]);
+        : (matched === "panel.left" || matched === "panel.up")
+          ? switchGlobalTab("left")
+          : (matched === "panel.right" || matched === "panel.down")
+            ? switchGlobalTab("right")
+            : false;
       if (handled) {
         event.preventDefault();
         event.stopPropagation();
@@ -458,6 +577,22 @@ export function useWorkspaceLayout({
 
   function handleFocus(panelId: string) {
     setFocusedId(panelId);
+    if (layoutMode === "floating" && panelId) {
+      setFloatingPanels((prev) => {
+        const current = prev[panelId];
+        if (!current) return prev;
+        const maxZ = Object.values(prev).reduce((max, p) => Math.max(max, p.zIndex), 1);
+        if (current.zIndex === maxZ && maxZ > 1) return prev;
+        return {
+          ...prev,
+          [panelId]: {
+            ...current,
+            zIndex: maxZ + 1,
+            isMinimized: false,
+          }
+        };
+      });
+    }
   }
 
   function handleSplit(panelId: string, dir: SplitDirection, kind: TerminalKind) {
@@ -472,6 +607,36 @@ export function useWorkspaceLayout({
     setLayoutVersion((value) => value + 1);
   }
 
+  function findNextFloatingPanelId(tree: LayoutNode, closedPanelId: string): string {
+    const allPanels: TerminalPanel[] = [];
+    const collectPanels = (n: LayoutNode) => {
+      if (n.type === "panel") {
+        if (n.id !== closedPanelId) {
+          allPanels.push(n);
+        }
+      } else if (n.type === "split") {
+        n.children.forEach(collectPanels);
+      }
+    };
+    collectPanels(tree);
+
+    if (allPanels.length === 0) return "";
+
+    const sorted = allPanels.map((p) => {
+      const conf = floatingPanels[p.id] || { zIndex: 1, isMinimized: false };
+      return { id: p.id, zIndex: conf.zIndex || 1, isMinimized: !!conf.isMinimized };
+    });
+
+    const nonMinimized = sorted.filter((s) => !s.isMinimized);
+    if (nonMinimized.length > 0) {
+      nonMinimized.sort((a, b) => b.zIndex - a.zIndex);
+      return nonMinimized[0].id;
+    }
+
+    sorted.sort((a, b) => b.zIndex - a.zIndex);
+    return sorted[0].id;
+  }
+
   function handleClosePanel(panelId: string) {
     if (!layoutTree) return;
     const panel = findPanel(layoutTree, panelId);
@@ -479,7 +644,14 @@ export function useWorkspaceLayout({
       closeBackendResourcesForTabs(panel.tabs);
     }
     const isFocused = focusedId === panelId;
-    const nextFocused = isFocused ? findNextPanelId(layoutTree, panelId) : focusedId;
+    let nextFocused = focusedId;
+    if (isFocused) {
+      if (layoutMode === "floating") {
+        nextFocused = findNextFloatingPanelId(layoutTree, panelId);
+      } else {
+        nextFocused = findNextPanelId(layoutTree, panelId);
+      }
+    }
     const nextTree = removePanel(layoutTree, panelId);
     setLayoutTree(nextTree);
     if (nextTree) {
@@ -491,25 +663,25 @@ export function useWorkspaceLayout({
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleAddTab(panelId: string, kind: TerminalKind, tabProjectId?: string) {
-    const tab = createTerminalTab(kind, tabProjectId);
-    setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : createTerminalPanel(kind, panelId, tabProjectId)));
+  function handleAddTab(panelId: string, kind: TerminalKind, tabProjectId?: string, filePath?: string) {
+    const tab = createTerminalTab(kind, tabProjectId, filePath);
+    setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : createTerminalPanel(kind, panelId, tabProjectId, filePath)));
     setFocusedId(panelId);
     setNewTerminalType(kind);
     setAddMenuPanelId(null);
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleAddFileExplorer(panelId: string, tabProjectId?: string) {
-    const tab = createFileExplorerTab(tabProjectId);
+  function handleAddFileExplorer(panelId: string, tabProjectId?: string, filePath?: string) {
+    const tab = createFileExplorerTab(tabProjectId, filePath);
     setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : null));
     setFocusedId(panelId);
     setAddMenuPanelId(null);
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleAddAgentChat(panelId: string, agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "acpx", tabProjectId?: string) {
-    const tab = createAgentChatTab(agentKind, undefined, undefined, agentRuntime, tabProjectId);
+  function handleAddAgentChat(panelId: string, agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "acpx", tabProjectId?: string, filePath?: string) {
+    const tab = createAgentChatTab(agentKind, undefined, undefined, agentRuntime, tabProjectId, filePath);
     setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : null));
     setFocusedId(panelId);
     setAddMenuPanelId(null);
@@ -684,89 +856,95 @@ export function useWorkspaceLayout({
     setLayoutVersion((value) => value + 1);
   }
 
-  function findDirectionalPanelId(direction: PanelDirection): string {
-    if (!layoutTree || !focusedId) return "";
-    const current = document.querySelector<HTMLElement>(`[data-studio-panel="true"][data-panel-id="${CSS.escape(focusedId)}"]`);
-    if (!current) return "";
-    const currentRect = current.getBoundingClientRect();
-    const currentCenterX = currentRect.left + currentRect.width / 2;
-    const currentCenterY = currentRect.top + currentRect.height / 2;
-    const allPanels = Array.from(document.querySelectorAll<HTMLElement>("[data-studio-panel='true']"))
-      .map((panel) => {
-        const rect = panel.getBoundingClientRect();
-        return {
-          id: panel.dataset.panelId || "",
-          rect,
-          centerX: rect.left + rect.width / 2,
-          centerY: rect.top + rect.height / 2,
-        };
-      })
-      .filter((panel) => panel.id);
-    const candidates = allPanels
-      .filter((panel) => panel.id !== focusedId)
-      .map((panel) => {
-        const horizontalOverlap = Math.max(0, Math.min(currentRect.right, panel.rect.right) - Math.max(currentRect.left, panel.rect.left));
-        const verticalOverlap = Math.max(0, Math.min(currentRect.bottom, panel.rect.bottom) - Math.max(currentRect.top, panel.rect.top));
-        const primaryDistance = direction === "left"
-          ? currentRect.left - panel.rect.right
-          : direction === "right"
-            ? panel.rect.left - currentRect.right
-            : direction === "up"
-              ? currentRect.top - panel.rect.bottom
-              : panel.rect.top - currentRect.bottom;
-        const centerDistance = direction === "left" || direction === "right"
-          ? Math.abs(panel.centerY - currentCenterY)
-          : Math.abs(panel.centerX - currentCenterX);
-        const overlap = direction === "left" || direction === "right" ? verticalOverlap : horizontalOverlap;
-        return {
-          id: panel.id,
-          primaryDistance,
-          centerDistance,
-          overlap,
-        };
-      })
-      .filter((panel) => panel.primaryDistance >= -1);
 
-    if (candidates.length > 0) {
-      candidates.sort((a, b) => {
-        if (a.primaryDistance !== b.primaryDistance) return a.primaryDistance - b.primaryDistance;
-        if (a.overlap !== b.overlap) return b.overlap - a.overlap;
-        return a.centerDistance - b.centerDistance;
-      });
-      return candidates[0].id;
-    }
-
-    return findWrappedPanelId(allPanels, focusedId, direction);
-  }
-
-  function findWrappedPanelId(
-    panels: Array<{ id: string; rect: DOMRect; centerX: number; centerY: number }>,
-    currentPanelId: string,
-    direction: PanelDirection
-  ) {
-    const ordered = [...panels].sort((a, b) => {
-      if (Math.abs(a.rect.top - b.rect.top) > 8) return a.rect.top - b.rect.top;
-      return a.rect.left - b.rect.left;
-    });
-    const currentIndex = ordered.findIndex((panel) => panel.id === currentPanelId);
-    if (currentIndex < 0 || ordered.length <= 1) return "";
-    if (direction === "right" || direction === "down") {
-      return ordered[(currentIndex + 1) % ordered.length].id;
-    }
-    return ordered[(currentIndex - 1 + ordered.length) % ordered.length].id;
-  }
-
-  function focusPanelByDirection(direction: PanelDirection) {
-    const nextPanelId = findDirectionalPanelId(direction);
-    if (!nextPanelId) return false;
-    handleFocus(nextPanelId);
-    return true;
-  }
 
   function createPanelRightOfFocused() {
     if (!focusedId) return false;
     handleSplit(focusedId, "right", newTerminalType);
     return true;
+  }
+
+  function switchGlobalTab(direction: "left" | "right") {
+    const currentPanels = collectAllPanels(layoutTree);
+    const allTabsWithPanel = currentPanels.flatMap((p) =>
+      p.tabs.map((t) => ({ tab: t, panel: p }))
+    );
+    if (allTabsWithPanel.length <= 1) return false;
+
+    const activeIndex = allTabsWithPanel.findIndex(({ tab, panel }) => {
+      return panel.id === focusedId && panel.activeTabId === tab.id;
+    });
+
+    let nextIndex = 0;
+    if (activeIndex >= 0) {
+      nextIndex = direction === "left"
+        ? (activeIndex - 1 + allTabsWithPanel.length) % allTabsWithPanel.length
+        : (activeIndex + 1) % allTabsWithPanel.length;
+    }
+
+    const target = allTabsWithPanel[nextIndex];
+    setFloatingPanels((prev) => {
+      const cur = prev[target.panel.id];
+      if (cur && cur.isMinimized) {
+        return {
+          ...prev,
+          [target.panel.id]: { ...cur, isMinimized: false }
+        };
+      }
+      return prev;
+    });
+    handleActiveTab(target.panel.id, target.tab.id);
+    focusFloatingPanel(target.panel.id);
+    return true;
+  }
+
+  function insertNewPanel(newPanel: TerminalPanel) {
+    setLayoutTree((prev) => {
+      if (!prev) return newPanel;
+      const currentPanels = collectAllPanels(prev);
+      const targetId = focusedId || currentPanels[0]?.id || "";
+      if (!targetId) return newPanel;
+      return performSplit(prev, targetId, "right", newPanel);
+    });
+    setFocusedId(newPanel.id);
+    setLayoutVersion((value) => value + 1);
+  }
+
+  function handleCreateNewPanel(kind: TerminalKind, tabProjectId?: string, filePath?: string) {
+    const newTab = createTerminalTab(kind, tabProjectId, filePath);
+    const panelId = makeId("panel");
+    insertNewPanel({
+      type: "panel",
+      id: panelId,
+      tabs: [newTab],
+      activeTabId: newTab.id,
+      focus: true,
+    });
+    setNewTerminalType(kind);
+  }
+
+  function handleCreateNewFileExplorer(tabProjectId?: string, filePath?: string) {
+    const newTab = createFileExplorerTab(tabProjectId, filePath);
+    const panelId = makeId("panel");
+    insertNewPanel({
+      type: "panel",
+      id: panelId,
+      tabs: [newTab],
+      activeTabId: newTab.id,
+      focus: true,
+    });
+  }
+
+  function handleCreateNewAgentChat(agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "acpx", tabProjectId?: string, filePath?: string) {
+    const newTab = createAgentChatTab(agentKind, undefined, undefined, agentRuntime, tabProjectId, filePath);
+    const panelId = makeId("panel");
+    insertNewPanel({
+      type: "panel",
+      id: panelId,
+      tabs: [newTab],
+      activeTabId: newTab.id,
+      focus: true,
+    });
   }
 
   return {
@@ -808,5 +986,14 @@ export function useWorkspaceLayout({
     handleTerminalTitle,
     handleCreateInitialPanel,
     handleCreateInitialFileExplorer,
+    handleCreateNewPanel,
+    handleCreateNewFileExplorer,
+    handleCreateNewAgentChat,
+    layoutMode,
+    setLayoutMode,
+    floatingPanels,
+    setFloatingPanels,
+    focusFloatingPanel,
+    panels,
   };
 }

@@ -1592,6 +1592,9 @@ func (d *Daemon) scanOutput(r io.Reader, stream string, emitter *taskEmitter, on
 				historyUserPrompts++
 			}
 		}
+		if historyUserPrompts > 0 {
+			historyUserPrompts--
+		}
 	}
 
 	scanner := bufio.NewScanner(r)
@@ -2543,16 +2546,13 @@ func (d *Daemon) resolveWorkspaceFile(workspaceID string, workspacePath string, 
 		return protocol.Workspace{}, "", "", err
 	}
 	relToRoot, err := filepath.Rel(workspace.Path, absTarget)
-	if err != nil {
-		return protocol.Workspace{}, "", "", err
+	if err == nil && relToRoot != ".." && !strings.HasPrefix(relToRoot, ".."+string(filepath.Separator)) && !filepath.IsAbs(relToRoot) {
+		if relToRoot == "." {
+			return workspace, absTarget, ".", nil
+		}
+		return workspace, absTarget, filepath.ToSlash(relToRoot), nil
 	}
-	if relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(filepath.Separator)) || filepath.IsAbs(relToRoot) {
-		return protocol.Workspace{}, "", "", fmt.Errorf("path is outside workspace")
-	}
-	if relToRoot == "." {
-		return workspace, absTarget, ".", nil
-	}
-	return workspace, absTarget, filepath.ToSlash(relToRoot), nil
+	return workspace, absTarget, filepath.ToSlash(absTarget), nil
 }
 
 func (d *Daemon) listWorkspace(request protocol.WorkspaceListRequest) {

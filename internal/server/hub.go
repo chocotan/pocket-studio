@@ -2267,6 +2267,9 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	workspacePath := proj.WorkspacePath
+	if customPath := strings.TrimSpace(r.URL.Query().Get("path")); customPath != "" {
+		workspacePath = customPath
+	}
 	deviceID := proj.DeviceID
 
 	conn, err := upgrader.Upgrade(w, r, nil)
