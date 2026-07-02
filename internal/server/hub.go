@@ -74,18 +74,19 @@ func protocolProjectFromProject(project Project) protocol.Project {
 }
 
 type Hub struct {
-	auth          *auth.Manager
-	mu            sync.RWMutex
-	daemons       map[string]*daemonConn
-	webs          map[*webConn]struct{}
-	taskDevices   map[string]string
-	taskEvents    map[string][]protocol.Envelope
-	taskRecords   map[string]protocol.TaskRecord
-	pending       map[string]chan protocol.Envelope
-	projects      map[string]Project
-	termMu        sync.RWMutex
-	terminalConns map[string]map[*terminalConn]struct{}
-	acpxConns     map[string]map[*acpxConn]struct{}
+	auth           *auth.Manager
+	mu             sync.RWMutex
+	daemons        map[string]*daemonConn
+	webs           map[*webConn]struct{}
+	taskDevices    map[string]string
+	taskEvents     map[string][]protocol.Envelope
+	taskRecords    map[string]protocol.TaskRecord
+	pending        map[string]chan protocol.Envelope
+	projects       map[string]Project
+	termMu         sync.RWMutex
+	terminalConns  map[string]map[*terminalConn]struct{}
+	acpxConns      map[string]map[*acpxConn]struct{}
+	acpxHistoryReq map[string]*acpxConn
 }
 
 type daemonConn struct {
@@ -141,16 +142,17 @@ type StateView struct {
 
 func NewHub(authManager *auth.Manager) *Hub {
 	h := &Hub{
-		auth:          authManager,
-		daemons:       make(map[string]*daemonConn),
-		webs:          make(map[*webConn]struct{}),
-		taskDevices:   make(map[string]string),
-		taskEvents:    make(map[string][]protocol.Envelope),
-		taskRecords:   make(map[string]protocol.TaskRecord),
-		pending:       make(map[string]chan protocol.Envelope),
-		projects:      make(map[string]Project),
-		terminalConns: make(map[string]map[*terminalConn]struct{}),
-		acpxConns:     make(map[string]map[*acpxConn]struct{}),
+		auth:           authManager,
+		daemons:        make(map[string]*daemonConn),
+		webs:           make(map[*webConn]struct{}),
+		taskDevices:    make(map[string]string),
+		taskEvents:     make(map[string][]protocol.Envelope),
+		taskRecords:    make(map[string]protocol.TaskRecord),
+		pending:        make(map[string]chan protocol.Envelope),
+		projects:       make(map[string]Project),
+		terminalConns:  make(map[string]map[*terminalConn]struct{}),
+		acpxConns:      make(map[string]map[*acpxConn]struct{}),
+		acpxHistoryReq: make(map[string]*acpxConn),
 	}
 	return h
 }
@@ -1014,6 +1016,11 @@ func (h *Hub) readACPXLoop(ac *acpxConn) {
 				delete(h.acpxConns, key)
 			}
 		}
+		for requestID, requester := range h.acpxHistoryReq {
+			if requester == ac {
+				delete(h.acpxHistoryReq, requestID)
+			}
+		}
 		h.mu.Unlock()
 		close(ac.send)
 		_ = ac.conn.Close()
@@ -1063,6 +1070,9 @@ func (h *Hub) requestTaskHistoryForACPX(ac *acpxConn) {
 	}
 
 	requestID := protocol.NewID("req")
+	h.mu.Lock()
+	h.acpxHistoryReq[requestID] = ac
+	h.mu.Unlock()
 	env := protocol.NewEnvelope(protocol.TypeTaskHistoryGet, "server", protocol.TaskHistoryGet{
 		RequestID: requestID,
 		TaskID:    ac.taskID,
@@ -1302,10 +1312,21 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 				h.taskRecords[taskKey] = record
 				h.mu.Unlock()
 			}
+			h.mu.Lock()
+			requester := h.acpxHistoryReq[result.RequestID]
+			delete(h.acpxHistoryReq, result.RequestID)
+			h.mu.Unlock()
 			for _, event := range result.Events {
 				forward := taskEventEnvelope(event)
 				forward.From = "server"
-				h.broadcastToTask(dc.userID, result.TaskID, forward)
+				if requester != nil {
+					select {
+					case requester.send <- forward:
+					default:
+					}
+				} else {
+					h.broadcastToTask(dc.userID, result.TaskID, forward)
+				}
 			}
 		}
 	case protocol.TypeTerminalStreamData:

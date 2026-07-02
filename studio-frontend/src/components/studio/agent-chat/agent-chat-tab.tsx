@@ -389,7 +389,13 @@ export function AgentChatTab({
     return () => {
       socketHandle.close();
     };
-  }, [openAgentSocket, sessionId, sessionName]);
+    // sessionName is intentionally excluded: the backend re-emits "acpx.session"
+    // (updating tab.agentSessionName) on every turn's session ensure, not just the
+    // first. Reconnecting the socket each time drops in-flight events for the
+    // turn that's currently streaming, which is what left the tab stuck on
+    // "Working" and made replayed history interleave with live events.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openAgentSocket, sessionId]);
 
   // Auto scroll to bottom
   useEffect(() => {

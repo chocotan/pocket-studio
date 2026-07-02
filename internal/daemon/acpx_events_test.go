@@ -16,7 +16,7 @@ import (
 func TestACPXToolUpdatesAreForwardedIndividuallyWithRawPayload(t *testing.T) {
 	d := New(Config{})
 	emitter := &taskEmitter{daemon: d, taskID: "task-1"}
-	adapter := newAgentOutputAdapter(emitter)
+	adapter := newAgentOutputAdapter(emitter, 0)
 
 	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"bash","status":"pending","rawInput":{"cwd":"/tmp"}}}}`))
 	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","title":"bash","status":"pending","rawInput":{"cwd":"/tmp","command":"df -h"}}}}`))

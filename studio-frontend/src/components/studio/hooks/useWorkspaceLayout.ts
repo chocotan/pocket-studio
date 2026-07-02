@@ -79,7 +79,6 @@ export function useWorkspaceLayout({
   const [loadedProjectId, setLoadedProjectId] = useState("");
 
   const skipSaveRef = useRef(true);
-  const prevDeviceRef = useRef<string | null>(null);
 
   function deleteAgentSession(tab: StudioTab) {
     if (tab.kind !== "agent_chat" || !tab.agentSessionId) return;
@@ -165,13 +164,6 @@ export function useWorkspaceLayout({
   useEffect(() => {
     let cancelled = false;
 
-    if (prevDeviceRef.current === project.device_id && layoutTree) {
-      setLoadedProjectId(projectId);
-      setStateLoaded(true);
-      return;
-    }
-
-    prevDeviceRef.current = project.device_id;
     skipSaveRef.current = true;
     setStateLoaded(false);
     setLoadedProjectId("");

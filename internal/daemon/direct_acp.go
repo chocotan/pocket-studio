@@ -675,7 +675,7 @@ func shellSupportsLogin(shell string) bool {
 func (c *directACPClient) readStdout(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	adapter := newAgentOutputAdapter(c.emitter)
+	adapter := newAgentOutputAdapter(c.emitter, 0)
 	defer adapter.flush()
 	for scanner.Scan() {
 		line := scanner.Bytes()

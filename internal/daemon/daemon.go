@@ -22,8 +22,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -53,6 +53,7 @@ type Daemon struct {
 	directACP           map[string]*directACPSession
 	directACPStarts     map[string]*directACPStart
 	startingTasks       map[string]struct{}
+	taskDispatchMu      map[string]*sync.Mutex
 }
 
 const (
@@ -107,6 +108,7 @@ func New(cfg Config) *Daemon {
 		directACP:           make(map[string]*directACPSession),
 		directACPStarts:     make(map[string]*directACPStart),
 		startingTasks:       make(map[string]struct{}),
+		taskDispatchMu:      make(map[string]*sync.Mutex),
 	}
 }
 
@@ -898,6 +900,26 @@ func (d *Daemon) sendTaskHistory(request protocol.TaskHistoryGet) {
 	d.send <- protocol.NewEnvelope(protocol.TypeTaskHistoryResult, "daemon", result)
 }
 
+// lockTaskDispatch serializes startTask calls for the same task ID. The
+// underlying ACPX CLI process handles one turn at a time; if a dispatch for
+// a task that's already running arrives (e.g. the browser looked idle after
+// a dropped connection but the previous turn's process never stopped),
+// racing a second process against the same session interleaves both
+// processes' output into one event stream. Waiting here instead makes the
+// daemon serialize turns regardless of what the client believes about the
+// task's state.
+func (d *Daemon) lockTaskDispatch(taskID string) func() {
+	d.mu.Lock()
+	mu, ok := d.taskDispatchMu[taskID]
+	if !ok {
+		mu = &sync.Mutex{}
+		d.taskDispatchMu[taskID] = mu
+	}
+	d.mu.Unlock()
+	mu.Lock()
+	return mu.Unlock
+}
+
 func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	if task.TaskID == "" {
 		task.TaskID = protocol.NewID("tsk")
@@ -916,6 +938,9 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 		d.startDirectACPTask(parent, task, workspace)
 		return
 	}
+
+	unlock := d.lockTaskDispatch(task.TaskID)
+	defer unlock()
 
 	ctx, cancel := context.WithCancel(parent)
 	command, args, source := d.buildAgentCommand(task, workspace.Path)
@@ -1557,9 +1582,21 @@ func (e *taskEmitter) errorText() string {
 }
 
 func (d *Daemon) scanOutput(r io.Reader, stream string, emitter *taskEmitter, onActivity func()) {
+	historyUserPrompts := 0
+	if emitter != nil && emitter.taskID != "" {
+		d.mu.Lock()
+		record := d.history[emitter.taskID]
+		d.mu.Unlock()
+		for _, ev := range record.Events {
+			if ev.EventType == "user.prompt" {
+				historyUserPrompts++
+			}
+		}
+	}
+
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	adapter := newAgentOutputAdapter(emitter)
+	adapter := newAgentOutputAdapter(emitter, historyUserPrompts)
 	defer adapter.flush()
 	for scanner.Scan() {
 		if onActivity != nil {
@@ -1820,12 +1857,16 @@ type agentOutputAdapter struct {
 	thinkingStreaming  bool
 	thinkingStreamID   string
 	streamCounter      int64
+	historyUserPrompts int
+	seenUserPrompts    int
+	userStreaming      bool
 }
 
-func newAgentOutputAdapter(emitter *taskEmitter) *agentOutputAdapter {
+func newAgentOutputAdapter(emitter *taskEmitter, historyUserPrompts int) *agentOutputAdapter {
 	return &agentOutputAdapter{
-		emitter:      emitter,
-		streamPrefix: protocol.NewID("stream"),
+		emitter:            emitter,
+		streamPrefix:       protocol.NewID("stream"),
+		historyUserPrompts: historyUserPrompts,
 	}
 }
 
@@ -1834,6 +1875,9 @@ func (a *agentOutputAdapter) handle(raw json.RawMessage) {
 		return
 	}
 	a.flush()
+	if a.historyUserPrompts > 0 && a.seenUserPrompts <= a.historyUserPrompts {
+		return
+	}
 	eventType := classifyClaudeEvent(raw)
 	if eventType == "tool.call" || eventType == "tool.output" {
 		if data := claudeToolEventData(raw); data != nil {
@@ -1847,6 +1891,7 @@ func (a *agentOutputAdapter) handle(raw json.RawMessage) {
 func (a *agentOutputAdapter) flush() {
 	a.flushThinking()
 	a.flushAssistant()
+	a.userStreaming = false
 }
 
 func (a *agentOutputAdapter) flushAssistant() {
@@ -1894,6 +1939,26 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 		return false
 	}
 	method, _ := msg["method"].(string)
+	if method == "session/update" {
+		params, _ := msg["params"].(map[string]any)
+		update, _ := params["update"].(map[string]any)
+		updateType, _ := update["sessionUpdate"].(string)
+		if updateType == "user_message_chunk" {
+			if !a.userStreaming {
+				a.userStreaming = true
+				a.seenUserPrompts++
+			}
+		} else if updateType != "" {
+			a.userStreaming = false
+		}
+	} else {
+		a.userStreaming = false
+	}
+
+	if a.historyUserPrompts > 0 && a.seenUserPrompts <= a.historyUserPrompts {
+		return true
+	}
+
 	if method != "session/update" {
 		if text := extractACPXErrorText(string(raw)); text != "" {
 			a.flush()
