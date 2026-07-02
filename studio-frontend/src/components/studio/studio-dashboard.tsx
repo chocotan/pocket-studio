@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Plus,
   FolderGit2,
@@ -126,28 +126,35 @@ export function StudioDashboard({
     (proj) => activeDevice && proj.device_id === activeDevice.id
   );
 
-  // Initialize directory browsing path when dialog opens
-  useEffect(() => {
-    if (createOpen && activeDevice) {
-      const workspacePaths = activeDevice.workspaces?.map((w) => w.path) || [];
-      const defaultParent = workspacePaths.length > 0 ? workspacePaths[0] : "~";
-      setNewProjName("");
-      setNewProjPath(defaultParent);
-      setError("");
-      setDialogDeviceId(activeDevice.id);
-    }
-  }, [createOpen, activeDevice]);
+  const lastOpenRef = useRef(false);
+  const lastDeviceIdRef = useRef("");
 
-  // Sync browsing path when dialog target device changes
+  // Initialize and sync directory browsing path
   useEffect(() => {
-    if (createOpen && dialogDeviceId) {
-      const dev = devices.find((d) => d.id === dialogDeviceId);
-      if (dev) {
+    if (createOpen) {
+      if (!lastOpenRef.current) {
+        lastOpenRef.current = true;
+        const initialDevId = selectedDeviceId || (devices[0]?.id || "");
+        setDialogDeviceId(initialDevId);
+        setNewProjName("");
+        setError("");
+
+        const dev = devices.find((d) => d.id === initialDevId);
+        const initialPath = dev?.workspaces?.[0]?.path || "~";
+        setNewProjPath(initialPath);
+
+        lastDeviceIdRef.current = initialDevId;
+      } else if (dialogDeviceId && dialogDeviceId !== lastDeviceIdRef.current) {
+        lastDeviceIdRef.current = dialogDeviceId;
+        const dev = devices.find((d) => d.id === dialogDeviceId);
         const initialPath = dev?.workspaces?.[0]?.path || "~";
         setNewProjPath(initialPath);
       }
+    } else {
+      lastOpenRef.current = false;
+      lastDeviceIdRef.current = "";
     }
-  }, [dialogDeviceId, createOpen, devices]);
+  }, [createOpen, dialogDeviceId, devices, selectedDeviceId]);
 
 
 

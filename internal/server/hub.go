@@ -1405,6 +1405,7 @@ func (h *Hub) stateView(userID string) StateView {
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
+		record.Events = nil // Omit events in state view to prevent massive bandwidth usage (since stateView is broadcast on every heartbeat)
 		tasks = append(tasks, record)
 	}
 	sort.Slice(tasks, func(i, j int) bool {
