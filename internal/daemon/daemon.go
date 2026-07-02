@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"sync"
 	"time"
 
@@ -765,6 +767,13 @@ func (d *Daemon) handleEnvelope(ctx context.Context, env protocol.Envelope) {
 			return
 		}
 		go d.createProject(request)
+	case protocol.TypeProjectDelete:
+		request, err := protocol.DecodePayload[protocol.ProjectDeleteRequest](env)
+		if err != nil {
+			d.sendProjectError("", err.Error())
+			return
+		}
+		go d.deleteProject(request)
 	case protocol.TypeProjectStateGet:
 		request, err := protocol.DecodePayload[protocol.ProjectStateGetRequest](env)
 		if err != nil {
@@ -2560,7 +2569,32 @@ func (d *Daemon) writeWorkspaceFile(request protocol.WorkspaceWriteRequest) {
 		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: err.Error()})
 		return
 	}
-	if err := os.WriteFile(target, []byte(request.Content), 0o644); err != nil {
+
+	var data []byte
+	if strings.HasPrefix(request.Content, "data:") && strings.Contains(request.Content, ";base64,") {
+		parts := strings.SplitN(request.Content, ";base64,", 2)
+		if len(parts) == 2 {
+			decoded, err := base64.StdEncoding.DecodeString(parts[1])
+			if err == nil {
+				data = decoded
+			} else {
+				data = []byte(request.Content)
+			}
+		} else {
+			data = []byte(request.Content)
+		}
+	} else if strings.HasPrefix(request.Content, "base64:") {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(request.Content, "base64:"))
+		if err == nil {
+			data = decoded
+		} else {
+			data = []byte(request.Content)
+		}
+	} else {
+		data = []byte(request.Content)
+	}
+
+	if err := os.WriteFile(target, data, 0o644); err != nil {
 		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: err.Error()})
 		return
 	}
@@ -2595,6 +2629,84 @@ func (d *Daemon) createProject(request protocol.ProjectCreateRequest) {
 		return
 	}
 	d.sendProjectResult(protocol.ProjectResult{RequestID: request.RequestID, Project: &project})
+	d.sendHello()
+}
+
+func (d *Daemon) deleteProject(request protocol.ProjectDeleteRequest) {
+	d.mu.Lock()
+	var targetWorkspacePath string
+	targetProj, exists := d.projects[request.ProjectID]
+	if exists {
+		targetWorkspacePath = targetProj.WorkspacePath
+	}
+	d.mu.Unlock()
+
+	if targetWorkspacePath == "" {
+		if ids, err := loadWorkspaceProjectIDs(); err == nil {
+			for path, id := range ids {
+				if id == request.ProjectID {
+					targetWorkspacePath = path
+					break
+				}
+			}
+		}
+	}
+
+	d.mu.Lock()
+	idsToDelete := map[string]bool{request.ProjectID: true}
+	for id, proj := range d.projects {
+		if targetWorkspacePath != "" && proj.WorkspacePath == targetWorkspacePath {
+			idsToDelete[id] = true
+		}
+	}
+
+	deletedAny := false
+	for id := range idsToDelete {
+		if _, ok := d.projects[id]; ok {
+			delete(d.projects, id)
+			delete(d.projectStates, id)
+			deletedAny = true
+		}
+	}
+
+	if deletedAny {
+		_ = d.saveProjectStoreLocked()
+		_ = d.saveProjectStatesLocked()
+	}
+	d.mu.Unlock()
+
+	if ids, err := loadWorkspaceProjectIDs(); err == nil {
+		modified := false
+		for path, id := range ids {
+			if idsToDelete[id] || (targetWorkspacePath != "" && path == targetWorkspacePath) {
+				delete(ids, path)
+				modified = true
+			}
+		}
+		if modified {
+			_ = saveWorkspaceProjectIDs(ids)
+		}
+	}
+
+	// Find and exit all terminal streams and tmux sessions associated with these project IDs.
+	d.termMu.Lock()
+	var ptysToExit []*runningPTY
+	for _, rPty := range d.terminalPTYs {
+		if idsToDelete[rPty.projectID] {
+			ptysToExit = append(ptysToExit, rPty)
+		}
+	}
+	d.termMu.Unlock()
+
+	for _, rPty := range ptysToExit {
+		d.exitTerminalStream(protocol.TerminalStreamExit{
+			ProjectID:    rPty.projectID,
+			TerminalID:   rPty.terminalID,
+			CloseSession: true,
+		})
+	}
+
+	d.sendProjectResult(protocol.ProjectResult{RequestID: request.RequestID, Project: nil})
 	d.sendHello()
 }
 
@@ -4250,10 +4362,13 @@ func (d *Daemon) terminalHookAlert(event terminalHookEvent) *protocol.TerminalSt
 
 func (d *Daemon) sendTerminalSnapshot(projectID string, terminalID string, sessionName string) {
 	if data := tmuxCapturePane(sessionName); len(data) > 0 {
+		// Include mouse tracking enablement sequences so that reconnected clients
+		// restore mouse reporting state in xterm.
+		dataWithMouse := append(data, []byte("\x1b[?1000h\x1b[?1002h\x1b[?1006h")...)
 		d.sendTerminalStreamData(protocol.TerminalStreamData{
 			ProjectID:  projectID,
 			TerminalID: terminalID,
-			Data:       data,
+			Data:       dataWithMouse,
 		})
 	}
 	title, fullTitle, command := tmuxTerminalInfo(sessionName)
@@ -4474,6 +4589,14 @@ func tmuxNewSessionCommand(sessionName string, initialTitle string, workspacePat
 			continue
 		}
 		args = append(args, "-e", item)
+	}
+	if runtime.GOOS != "windows" {
+		shell := userShell()
+		if command == "" {
+			command = "env -u TMUX TERM=xterm-256color " + shellQuote(shell)
+		} else {
+			command = "env -u TMUX TERM=xterm-256color " + command
+		}
 	}
 	if command != "" {
 		args = append(args, command)
@@ -5452,7 +5575,79 @@ func (d *Daemon) exitTerminalStream(req protocol.TerminalStreamExit) {
 			_ = rPty.cmd.Process.Kill()
 		}
 		if req.CloseSession && rPty.usesTmux {
+			// Find all pane PIDs inside this tmux session
+			listCmd := tmuxCommand("list-panes", "-t", rPty.sessionName, "-F", "#{pane_pid}")
+			if output, err := listCmd.Output(); err == nil {
+				lines := strings.Split(string(output), "\n")
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+					if pid, err := strconv.Atoi(line); err == nil && pid > 0 {
+						killProcessesRecursively(pid)
+					}
+				}
+			}
 			_ = killTmuxSession(rPty.sessionName)
 		}
 	}
+}
+
+func killProcessesRecursively(parentPID int) {
+	parentToChildren := make(map[int][]int)
+	files, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	for _, f := range files {
+		if !f.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(f.Name())
+		if err != nil {
+			continue
+		}
+		ppid := getParentPID(pid)
+		if ppid > 0 {
+			parentToChildren[ppid] = append(parentToChildren[ppid], pid)
+		}
+	}
+
+	var descendants []int
+	var collect func(pid int)
+	collect = func(pid int) {
+		for _, child := range parentToChildren[pid] {
+			descendants = append(descendants, child)
+			collect(child)
+		}
+	}
+	collect(parentPID)
+
+	// Kill descendants first (depth-first: leaf to root)
+	for i := len(descendants) - 1; i >= 0; i-- {
+		pid := descendants[i]
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+
+	// Kill parent process group and process itself
+	_ = syscall.Kill(-parentPID, syscall.SIGKILL)
+	_ = syscall.Kill(parentPID, syscall.SIGKILL)
+}
+
+func getParentPID(pid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0
+	}
+	parts := strings.SplitAfter(string(data), ")")
+	if len(parts) < 2 {
+		return 0
+	}
+	fields := strings.Fields(parts[1])
+	if len(fields) < 2 {
+		return 0
+	}
+	ppid, _ := strconv.Atoi(fields[1])
+	return ppid
 }

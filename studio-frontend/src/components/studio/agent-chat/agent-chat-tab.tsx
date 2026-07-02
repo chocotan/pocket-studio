@@ -200,6 +200,8 @@ export function AgentChatTab({
       sessionName: activeSessionName,
     });
 
+    let pingInterval: number | null = null;
+
     socket.onopen = () => {
       if (closed) return;
       pushAgentChatDebug({
@@ -220,11 +222,19 @@ export function AgentChatTab({
         });
       }
       flushPendingEnvelopes(socket, activeSessionId);
+
+      if (pingInterval !== null) window.clearInterval(pingInterval);
+      pingInterval = window.setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "ping" }));
+        }
+      }, 10000);
     };
 
     socket.onmessage = (message) => {
       try {
         const envelope = JSON.parse(String(message.data));
+        if (envelope?.type === "pong") return;
         if (envelope?.type === "task.event") {
           const taskEvent = envelope.payload as TaskEvent;
           if (!taskEvent || taskEvent.task_id !== activeSessionId) return;
@@ -305,6 +315,10 @@ export function AgentChatTab({
       if (!closed) showError("Agent WebSocket 连接失败");
     };
     socket.onclose = (event) => {
+      if (pingInterval !== null) {
+        window.clearInterval(pingInterval);
+        pingInterval = null;
+      }
       pushAgentChatDebug({
         phase: "ws.close",
         taskId: activeSessionId,
@@ -320,6 +334,10 @@ export function AgentChatTab({
       socket,
       close: () => {
         closed = true;
+        if (pingInterval !== null) {
+          window.clearInterval(pingInterval);
+          pingInterval = null;
+        }
         if (socketRef.current === socket) {
           socketRef.current = null;
         }

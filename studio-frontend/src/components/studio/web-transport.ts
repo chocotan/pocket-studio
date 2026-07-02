@@ -26,6 +26,7 @@ export function createStudioWebTransport({ onEnvelope }: StudioWebTransportOptio
   let closed = false;
   let socket: WebSocket | null = null;
   let reconnectTimer: number | null = null;
+  let pingTimer: number | null = null;
 
   const scheduleReconnect = () => {
     if (closed || reconnectTimer !== null) return;
@@ -45,15 +46,30 @@ export function createStudioWebTransport({ onEnvelope }: StudioWebTransportOptio
       scheduleReconnect();
       return;
     }
+    socket.onopen = () => {
+      if (pingTimer !== null) window.clearInterval(pingTimer);
+      pingTimer = window.setInterval(() => {
+        if (socket?.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "ping" }));
+        }
+      }, 10000);
+    };
     socket.onmessage = (event) => {
       const envelope = parseEnvelope(event.data);
-      if (envelope) onEnvelope(envelope);
+      if (envelope) {
+        if (envelope.type === "pong") return;
+        onEnvelope(envelope);
+      }
     };
     socket.onerror = () => {
       // Let onclose drive reconnect. Some WebView builds emit onerror without a
       // useful Error object, so keep this side-effect free.
     };
     socket.onclose = () => {
+      if (pingTimer !== null) {
+        window.clearInterval(pingTimer);
+        pingTimer = null;
+      }
       if (closed) return;
       scheduleReconnect();
     };
@@ -65,6 +81,7 @@ export function createStudioWebTransport({ onEnvelope }: StudioWebTransportOptio
     close: () => {
       closed = true;
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (pingTimer !== null) window.clearInterval(pingTimer);
       socket?.close();
     },
   };

@@ -480,6 +480,38 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if r.URL.Path == "/api/project/delete" && r.Method == http.MethodPost {
+		var req struct {
+			ProjectID string `json:"project_id"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if req.ProjectID == "" {
+			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "project_id is required"})
+			return
+		}
+		project, ok := h.projectByID(userID, req.ProjectID)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
+			return
+		}
+		requestID := protocol.NewID("req")
+		env, err := h.requestDaemonForDevice(r, project.DeviceID, protocol.TypeProjectDelete, project.WorkspacePath, requestID, protocol.ProjectDeleteRequest{
+			RequestID: requestID,
+			ProjectID: req.ProjectID,
+		})
+		writeProjectResult(w, env, err, false, nil)
+		if err == nil {
+			if result, decodeErr := protocol.DecodePayload[protocol.ProjectResult](env); decodeErr == nil && result.Error == "" {
+				h.mu.Lock()
+				delete(h.projects, scopedKey(userID, req.ProjectID))
+				h.mu.Unlock()
+				h.broadcastToUser(userID, protocol.NewEnvelope("server.state", "server", h.stateView(userID)))
+			}
+		}
+		return
+	}
 	if r.URL.Path == "/api/project/direct-mode" && r.Method == http.MethodPost {
 		var req struct {
 			ProjectID  string `json:"project_id"`
@@ -943,6 +975,8 @@ func (h *Hub) readWebLoop(wc *webConn) {
 			return
 		}
 		switch env.Type {
+		case "ping":
+			wc.send <- protocol.NewEnvelope("pong", "server", nil)
 		case protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeSessionDelete:
 			wc.send <- serverError("unsupported_type", "agent chat commands require /ws/acpx")
 		case protocol.TypeWorkspaceList, protocol.TypeWorkspaceRead, protocol.TypeWorkspaceWrite, protocol.TypeTerminalRun:
@@ -992,6 +1026,10 @@ func (h *Hub) readACPXLoop(ac *acpxConn) {
 		}
 		if env.From == "" {
 			env.From = "web"
+		}
+		if env.Type == "ping" {
+			ac.send <- protocol.NewEnvelope("pong", "server", nil)
+			continue
 		}
 		if !isACPXCommandType(env.Type) {
 			ac.send <- serverError("unsupported_type", "unsupported ACPX websocket message type")
@@ -1056,8 +1094,9 @@ func (h *Hub) closeTerminal(userID string, projectID string, terminalID string) 
 
 	if dc != nil {
 		dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", protocol.TerminalStreamExit{
-			ProjectID:  projectID,
-			TerminalID: terminalID,
+			ProjectID:    projectID,
+			TerminalID:   terminalID,
+			CloseSession: true,
 		})
 		return
 	}
@@ -2281,6 +2320,9 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := json.Unmarshal(payload, &controlMsg); err == nil {
 				switch controlMsg.Type {
+				case "ping":
+					// Heartbeat, keep connection alive without forwarding to shell
+					continue
 				case "resize":
 					resizePayload := protocol.TerminalStreamResize{
 						ProjectID:  projID,

@@ -122,6 +122,9 @@ func (d *Daemon) handleDirectTerminalWebSocket(w http.ResponseWriter, r *http.Re
 		}
 		if err := json.Unmarshal(payload, &control); err == nil {
 			switch control.Type {
+			case "ping":
+				// Heartbeat to keep connection alive
+				continue
 			case "resize":
 				d.resizeTerminalStream(protocol.TerminalStreamResize{ProjectID: projectID, TerminalID: terminalID, Cols: control.Cols, Rows: control.Rows})
 				continue

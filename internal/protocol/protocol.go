@@ -29,6 +29,7 @@ const (
 	TypeWorkspaceWrite       = "workspace.write"
 	TypeWorkspaceResult      = "workspace.result"
 	TypeProjectCreate        = "project.create"
+	TypeProjectDelete        = "project.delete"
 	TypeProjectStateGet      = "project.state.get"
 	TypeProjectStateSet      = "project.state.set"
 	TypeProjectResult        = "project.result"
@@ -266,6 +267,11 @@ type ProjectCreateRequest struct {
 	DeviceID      string `json:"device_id,omitempty"`
 	WorkspacePath string `json:"workspace_path"`
 	DirectMode    bool   `json:"direct_mode,omitempty"`
+}
+
+type ProjectDeleteRequest struct {
+	RequestID string `json:"request_id"`
+	ProjectID string `json:"project_id"`
 }
 
 type ProjectStateGetRequest struct {

@@ -3,7 +3,7 @@ import { Terminal as XTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import type { StudioTheme } from "./terminal-types";
-import { directWebsocketURL, getJSON, websocketURL } from "@/lib/api";
+import { directWebsocketURL, getJSON, postJSON, websocketURL } from "@/lib/api";
 import { pocketElectronAPI } from "@/lib/electron-api";
 
 export function getXtermTheme(theme: StudioTheme) {
@@ -322,6 +322,7 @@ export function XtermInstance({
   const resizeDebounceTimerRef = useRef<number | null>(null);
   const terminalReadyRef = useRef(false);
   const isActiveRef = useRef(isActive);
+  const currentCommandRef = useRef(command || "");
   const onActiveFocusRef = useRef(onActiveFocus);
   const scaleRef = useRef(scale);
   const incomingBuf = useRef<Array<string | Uint8Array>>([]);
@@ -511,7 +512,7 @@ export function XtermInstance({
         fontSize:      BASE_FONT_SIZE * scaleRef.current,
         fontFamily:    "JetBrains Mono, Menlo, Monaco, Consolas, monospace",
         lineHeight:    1.2,
-        scrollback:    0,
+        scrollback:    5000,
         scrollSensitivity: 1,
         scrollOnUserInput: true,
         allowProposedApi: true,
@@ -520,6 +521,7 @@ export function XtermInstance({
           background: resolvePanelBackground(container, terminalTheme.background),
         }
       });
+      term.write('\x1b[?1007l');
 
       xtermRef.current = term;
       fitAddon = new FitAddon();
@@ -545,6 +547,14 @@ export function XtermInstance({
       /* Mount terminal into the container div */
       term.open(container);
 
+      const getPasteTextForFilename = (filename: string): string => {
+        const cmd = (currentCommandRef.current || "").toLowerCase();
+        if (cmd.includes("claude") || cmd.includes("agy") || cmd.includes("kilo")) {
+          return `/image ./${filename}`;
+        }
+        return `./${filename}`;
+      };
+
       const handleCopyPasteShortcut = (event: KeyboardEvent) => {
         if (!isActiveRef.current) return;
         if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
@@ -557,24 +567,118 @@ export function XtermInstance({
           if (!selection) return;
           void writeClipboardText(selection);
         } else if (key === "v") {
-          if (!navigator.clipboard?.readText || !window.isSecureContext) {
-            return;
-          }
           event.preventDefault();
           event.stopPropagation();
           event.stopImmediatePropagation();
-          void navigator.clipboard.readText().then((text) => {
-            if (text) term?.paste(text);
-          }).catch(() => {});
+          if (navigator.clipboard?.read) {
+            void navigator.clipboard.read().then((items) => {
+              for (const item of items) {
+                const imageType = item.types.find((t) => t.startsWith("image/"));
+                if (imageType) {
+                  const cmd = (currentCommandRef.current || "").toLowerCase();
+                  if (cmd.includes("agy") || cmd.includes("antigravity")) {
+                    continue;
+                  }
+                  void item.getType(imageType).then((blob) => {
+                    const ext = imageType === "image/jpeg" ? "jpg" : "png";
+                    const filename = `pasted_image_${Date.now()}.${ext}`;
+                    const file = new File([blob], filename, { type: imageType });
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                      const dataUrl = e.target?.result as string;
+                      if (dataUrl) {
+                        postJSON<{ error?: string }>("/api/project/file/write", {
+                          project_id: projectId,
+                          path: filename,
+                          content: dataUrl,
+                        })
+                          .then((result) => {
+                            if (result.error) {
+                              alert(`Failed to save image to workspace: ${result.error}`);
+                            } else {
+                              term?.paste(getPasteTextForFilename(filename));
+                            }
+                          })
+                          .catch((err) => {
+                            alert(`Failed to upload image: ${err instanceof Error ? err.message : String(err)}`);
+                          });
+                      }
+                    };
+                    reader.readAsDataURL(file);
+                  });
+                  return;
+                }
+              }
+              if (navigator.clipboard.readText) {
+                void navigator.clipboard.readText().then((text) => {
+                  if (text) term?.paste(text);
+                }).catch(() => {});
+              }
+            }).catch(() => {
+              if (navigator.clipboard.readText) {
+                void navigator.clipboard.readText().then((text) => {
+                  if (text) term?.paste(text);
+                }).catch(() => {});
+              }
+            });
+          } else if (navigator.clipboard?.readText) {
+            void navigator.clipboard.readText().then((text) => {
+              if (text) term?.paste(text);
+            }).catch(() => {});
+          }
         }
       };
       const handlePaste = (event: ClipboardEvent) => {
         if (!isActiveRef.current) return;
         const text = event.clipboardData?.getData("text/plain");
-        if (!text) return;
-        event.preventDefault();
-        event.stopPropagation();
-        term?.paste(text);
+        if (text) {
+          event.preventDefault();
+          event.stopPropagation();
+          term?.paste(text);
+          return;
+        }
+        const items = event.clipboardData?.items;
+        if (items) {
+          for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            if (item.type.startsWith("image/")) {
+              const cmd = (currentCommandRef.current || "").toLowerCase();
+              if (cmd.includes("agy") || cmd.includes("antigravity")) {
+                continue;
+              }
+              const file = item.getAsFile();
+              if (file) {
+                event.preventDefault();
+                event.stopPropagation();
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                  const dataUrl = e.target?.result as string;
+                  if (dataUrl) {
+                    const ext = file.type === "image/jpeg" ? "jpg" : "png";
+                    const filename = `pasted_image_${Date.now()}.${ext}`;
+                    postJSON<{ error?: string }>("/api/project/file/write", {
+                      project_id: projectId,
+                      path: filename,
+                      content: dataUrl,
+                        })
+                          .then((result) => {
+                            if (result.error) {
+                              alert(`Failed to save image to workspace: ${result.error}`);
+                            } else {
+                              term?.paste(getPasteTextForFilename(filename));
+                            }
+                          })
+                          .catch((err) => {
+                            alert(`Failed to upload image: ${err instanceof Error ? err.message : String(err)}`);
+                          });
+                  }
+                };
+                reader.readAsDataURL(file);
+                return;
+              }
+            }
+          }
+        }
       };
       window.addEventListener("keydown", handleCopyPasteShortcut, { capture: true });
       container.addEventListener("keydown", handleCopyPasteShortcut, { capture: true });
@@ -675,6 +779,8 @@ export function XtermInstance({
         }, { once: true });
         socket.binaryType = "arraybuffer";
 
+        let pingInterval: number | null = null;
+
         socket.onopen = () => {
           if (!isCurrentEffect() || socketGeneration !== connectionGenerationRef.current || wsRef.current !== socket) {
             socket.close();
@@ -694,6 +800,13 @@ export function XtermInstance({
               fitAndResize(true);
             }, delay));
           });
+
+          if (pingInterval !== null) window.clearInterval(pingInterval);
+          pingInterval = window.setInterval(() => {
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: "ping" }));
+            }
+          }, 10000);
         };
 
         socket.onmessage = (event) => {
@@ -704,6 +817,7 @@ export function XtermInstance({
             try {
               const message = JSON.parse(event.data) as { type?: string; title?: string; full_title?: string; command?: string };
               if (message.type === "title" && typeof message.title === "string") {
+                currentCommandRef.current = message.command || "";
                 onTitleChangeRef.current?.(message.title, message.command, message.full_title);
                 return;
               }
@@ -728,6 +842,10 @@ export function XtermInstance({
         };
 
         socket.onclose = () => {
+          if (pingInterval !== null) {
+            window.clearInterval(pingInterval);
+            pingInterval = null;
+          }
           if (!isCurrentEffect() || socketGeneration !== connectionGenerationRef.current || wsRef.current !== socket) return;
           if (normalExitRef.current || kickedRef.current) {
             return;

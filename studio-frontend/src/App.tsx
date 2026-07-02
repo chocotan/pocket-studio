@@ -3,7 +3,7 @@ import { StudioDashboard, type Project } from "./components/studio/studio-dashbo
 import { StudioWorkspace } from "./components/studio/studio-workspace";
 import type { NotificationJumpTarget, TerminalAlertEvent, TerminalNotification } from "./components/studio/terminal-notifications";
 import type { Device } from "./lib/types";
-import { getJSON, loadClientConfig } from "./lib/api";
+import { getJSON, postJSON, loadClientConfig } from "./lib/api";
 import { pocketElectronAPI } from "./lib/electron-api";
 import { loadZoom, saveZoom, type PageZoom } from "./lib/zoom";
 import { isTerminalKind, terminalType, type TerminalKind } from "./components/studio/terminal-types";
@@ -88,7 +88,13 @@ export default function App() {
         return;
       }
       if (envelope.type === "server.state") {
-        refreshProjectsRef.current();
+        const stateData = envelope.payload;
+        if (stateData && typeof stateData === "object") {
+          const typedState = stateData as { devices?: unknown[] };
+          if (Array.isArray(typedState.devices)) {
+            setDevices(typedState.devices.filter(isDevice));
+          }
+        }
       }
     };
   }, []);
@@ -113,6 +119,14 @@ export default function App() {
       if (webTransportRef.current === transport) webTransportRef.current = null;
       transport.close();
     };
+  }, [clientConfigLoaded]);
+
+  useEffect(() => {
+    if (!clientConfigLoaded) return;
+    const interval = window.setInterval(() => {
+      void refreshProjects();
+    }, 60000);
+    return () => window.clearInterval(interval);
   }, [clientConfigLoaded]);
 
   useEffect(() => {
@@ -169,6 +183,20 @@ export default function App() {
     setSelectedProjectId(projectId);
     setView("studio_workspace");
     pushPath(studioPath(`/projects/${encodeURIComponent(projectId)}`));
+  }
+
+  async function handleDeleteProject(projectId: string) {
+    try {
+      const response = await postJSON<unknown>("/api/project/delete", {
+        project_id: projectId,
+      });
+      if (isObject(response) && response.success === true) {
+        setProjects((current) => current.filter((p) => p.id !== projectId));
+      }
+    } catch (err) {
+      console.error("failed to delete project:", err);
+      alert("删除项目失败，请重试");
+    }
   }
 
   function addTerminalNotification(event: TerminalAlertEvent & { projectId: string }) {
@@ -282,6 +310,7 @@ export default function App() {
           onToggleFavorite={handleToggleFavorite}
           onMoveFavorite={handleMoveFavorite}
           onSelectProject={handleSelectProject}
+          onDeleteProject={handleDeleteProject}
           onRefreshProjects={refreshAll}
           pageZoom={pageZoom}
           onPageZoomChange={setPageZoom}

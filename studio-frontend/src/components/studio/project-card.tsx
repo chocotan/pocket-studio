@@ -1,4 +1,4 @@
-import { ArrowRight, Folder, FolderGit2, TerminalSquare } from "lucide-react";
+import { ArrowRight, Folder, FolderGit2, TerminalSquare, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import type { Project } from "./studio-dashboard";
 
@@ -7,6 +7,7 @@ interface ProjectCardProps {
   deviceLabel: string;
   index: number;
   onClick: () => void;
+  onDelete?: () => void;
 }
 
 export function ProjectCard({
@@ -14,6 +15,7 @@ export function ProjectCard({
   deviceLabel,
   index,
   onClick,
+  onDelete,
 }: ProjectCardProps) {
   return (
     <button
@@ -49,10 +51,27 @@ export function ProjectCard({
         <span>{proj.tmux_ids?.length || 0}</span>
       </div>
 
-      <span className="flex items-center gap-1.5 text-[11px] font-bold text-indigo-600">
-        <span className="hidden sm:inline">打开</span>
-        <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
-      </span>
+      <div className="flex items-center gap-3 shrink-0">
+        <span className="flex items-center gap-1.5 text-[11px] font-bold text-indigo-600">
+          <span className="hidden sm:inline">打开</span>
+          <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+        </span>
+        {onDelete && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (window.confirm(`确定要删除项目 "${proj.name}" 吗？这将会销毁其所有关联的终端和后台 tmux 进程。`)) {
+                onDelete();
+              }
+            }}
+            className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-400 hover:border-red-200 hover:bg-red-50 hover:text-red-600 transition-colors cursor-pointer"
+            title="删除项目"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
     </button>
   );
 }

@@ -11,3 +11,4 @@ user-frontend/tsconfig.tsbuildinfo
 *.log
 .omo
 .tmp
+pasted*
