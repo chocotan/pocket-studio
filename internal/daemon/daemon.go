@@ -1587,12 +1587,27 @@ func (d *Daemon) scanOutput(r io.Reader, stream string, emitter *taskEmitter, on
 		d.mu.Lock()
 		record := d.history[emitter.taskID]
 		d.mu.Unlock()
-		for _, ev := range record.Events {
+		lastPromptIdx := -1
+		for i, ev := range record.Events {
 			if ev.EventType == "user.prompt" {
 				historyUserPrompts++
+				lastPromptIdx = i
 			}
 		}
-		if historyUserPrompts > 0 {
+		hasResponse := false
+		if lastPromptIdx >= 0 {
+			for j := lastPromptIdx + 1; j < len(record.Events); j++ {
+				evType := record.Events[j].EventType
+				if evType == "assistant.message" || evType == "assistant.thinking" ||
+					evType == "tool.call" || evType == "tool.output" ||
+					evType == "turn.completed" || evType == "task.completed" ||
+					evType == "task.failed" || evType == "task.killed" {
+					hasResponse = true
+					break
+				}
+			}
+		}
+		if historyUserPrompts > 0 && !hasResponse {
 			historyUserPrompts--
 		}
 	}
