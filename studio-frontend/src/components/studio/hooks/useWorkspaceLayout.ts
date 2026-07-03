@@ -78,6 +78,7 @@ export function useWorkspaceLayout({
   const [tabDragTarget, setTabDragTarget] = useState<{ panelId: string; insertIndex: number } | null>(null);
   const [isDraggingTab, setIsDraggingTab] = useState(false);
   const [terminalTitles, setTerminalTitles] = useState<Record<string, TerminalTitleState>>({});
+  const [workspaceSwitchToken, setWorkspaceSwitchToken] = useState(0);
   const terminalTitlesRef = useRef<Record<string, TerminalTitleState>>({});
   const [stateLoaded, setStateLoaded] = useState(false);
   const [loadedProjectId, setLoadedProjectId] = useState("");
@@ -95,6 +96,27 @@ export function useWorkspaceLayout({
   const [floatingPanels, setFloatingPanels] = useState<Record<string, FloatingPanelState>>({});
 
   const skipSaveRef = useRef(true);
+
+  function raiseFloatingPanel(
+    panels: Record<string, FloatingPanelState>,
+    panelId: string
+  ): Record<string, FloatingPanelState> {
+    const current = panels[panelId];
+    if (!current) return panels;
+    const maxZ = Object.values(panels).reduce((max, panel) => Math.max(max, panel.zIndex), 1);
+    const alreadyTop = Object.entries(panels).every(([id, panel]) => {
+      return id === panelId || panel.zIndex < current.zIndex;
+    });
+    if (alreadyTop && !current.isMinimized) return panels;
+    return {
+      ...panels,
+      [panelId]: {
+        ...current,
+        zIndex: maxZ + 1,
+        isMinimized: false,
+      },
+    };
+  }
 
   function deleteAgentSession(tab: StudioTab) {
     if (tab.kind !== "agent_chat" || !tab.agentSessionId) return;
@@ -318,38 +340,12 @@ export function useWorkspaceLayout({
   // Sync focused panel to top of floating z-index stack
   useEffect(() => {
     if (layoutMode === "floating" && focusedId) {
-      setFloatingPanels((prev) => {
-        const current = prev[focusedId];
-        if (!current) return prev;
-        const maxZ = Object.values(prev).reduce((max, p) => Math.max(max, p.zIndex), 1);
-        if (current.zIndex === maxZ && maxZ > 1) return prev;
-        return {
-          ...prev,
-          [focusedId]: {
-            ...current,
-            zIndex: maxZ + 1,
-            isMinimized: false
-          }
-        };
-      });
+      setFloatingPanels((prev) => raiseFloatingPanel(prev, focusedId));
     }
   }, [focusedId, layoutMode]);
 
   const focusFloatingPanel = (panelId: string) => {
-    setFloatingPanels((prev) => {
-      const current = prev[panelId];
-      if (!current) return prev;
-      const maxZ = Object.values(prev).reduce((max, p) => Math.max(max, p.zIndex), 1);
-      if (current.zIndex === maxZ && maxZ > 1) return prev;
-      return {
-        ...prev,
-        [panelId]: {
-          ...current,
-          zIndex: maxZ + 1,
-          isMinimized: false,
-        }
-      };
-    });
+    setFloatingPanels((prev) => raiseFloatingPanel(prev, panelId));
     handleFocus(panelId);
   };
 
@@ -578,20 +574,7 @@ export function useWorkspaceLayout({
   function handleFocus(panelId: string) {
     setFocusedId(panelId);
     if (layoutMode === "floating" && panelId) {
-      setFloatingPanels((prev) => {
-        const current = prev[panelId];
-        if (!current) return prev;
-        const maxZ = Object.values(prev).reduce((max, p) => Math.max(max, p.zIndex), 1);
-        if (current.zIndex === maxZ && maxZ > 1) return prev;
-        return {
-          ...prev,
-          [panelId]: {
-            ...current,
-            zIndex: maxZ + 1,
-            isMinimized: false,
-          }
-        };
-      });
+      setFloatingPanels((prev) => raiseFloatingPanel(prev, panelId));
     }
   }
 
@@ -742,7 +725,7 @@ export function useWorkspaceLayout({
       setLayoutTree((prev) => {
         if (!prev) return null;
         const cleaned = removeTabForMove(prev, fromPanelId, tabId);
-        if (!cleaned) return null;
+        if (!cleaned) return prev;
         return addTabToPanel(cleaned, toPanelId, tab, insertIndex);
       });
       setLayoutVersion((value) => value + 1);
@@ -778,13 +761,17 @@ export function useWorkspaceLayout({
         }
         return { panelId, index: children.length };
       }
-      return { panelId, index: -1 };
+      return layoutMode === "floating" ? null : { panelId, index: -1 };
     }
     return { panelId: fallbackPanelId, index: fallbackIndex };
   }
 
   function handleTabDragMove(clientX: number, clientY: number, fallbackPanelId: string, fallbackIndex: number) {
     const target = resolveTabDrop(clientX, clientY, fallbackPanelId, fallbackIndex);
+    if (!target) {
+      if (tabDragTarget) setTabDragTarget(null);
+      return;
+    }
     if (!tabDragTarget || tabDragTarget.panelId !== target.panelId || tabDragTarget.insertIndex !== target.index) {
       setTabDragTarget({ panelId: target.panelId, insertIndex: target.index });
     }
@@ -794,6 +781,7 @@ export function useWorkspaceLayout({
     const target = resolveTabDrop(clientX, clientY, fromPanelId, fallbackIndex);
     setTabDragTarget(null);
     setIsDraggingTab(false);
+    if (!target) return;
     const dropIndex = target.index === -1 ? 9999 : target.index;
     handleMoveTab(fromPanelId, target.panelId, tabId, dropIndex);
   }
@@ -895,6 +883,7 @@ export function useWorkspaceLayout({
     });
     handleActiveTab(target.panel.id, target.tab.id);
     focusFloatingPanel(target.panel.id);
+    setWorkspaceSwitchToken((value) => value + 1);
     return true;
   }
 
@@ -964,6 +953,7 @@ export function useWorkspaceLayout({
     setIsDraggingTab,
     terminalTitles,
     setTerminalTitles,
+    workspaceSwitchToken,
     stateLoaded,
     loadedProjectId,
     applyPresetLayout,

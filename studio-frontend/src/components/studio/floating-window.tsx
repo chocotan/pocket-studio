@@ -1,4 +1,5 @@
-import React, { useRef } from "react";
+/* eslint-disable react-hooks/refs */
+import React, { useEffect, useRef, useState } from "react";
 
 interface FloatingWindowProps {
   id: string;
@@ -37,6 +38,67 @@ interface DragState {
   pointerId: number;
 }
 
+interface WindowFrame {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+const MIN_WIDTH = 320;
+const MIN_HEIGHT = 240;
+
+function frameFromDrag(drag: DragState, clientX: number, clientY: number): WindowFrame {
+  const dx = clientX - drag.startX;
+  const dy = clientY - drag.startY;
+
+  if (drag.type === "drag") {
+    return {
+      x: drag.startLeft + dx,
+      y: drag.startTop + dy,
+      width: drag.startWidth,
+      height: drag.startHeight,
+    };
+  }
+
+  let nextLeft = drag.startLeft;
+  let nextTop = drag.startTop;
+  let nextWidth = drag.startWidth;
+  let nextHeight = drag.startHeight;
+
+  if (drag.direction?.includes("e")) {
+    nextWidth = Math.max(MIN_WIDTH, drag.startWidth + dx);
+  } else if (drag.direction?.includes("w")) {
+    nextWidth = Math.max(MIN_WIDTH, drag.startWidth - dx);
+    nextLeft = drag.startLeft + (drag.startWidth - nextWidth);
+  }
+
+  if (drag.direction?.includes("s")) {
+    nextHeight = Math.max(MIN_HEIGHT, drag.startHeight + dy);
+  } else if (drag.direction?.includes("n")) {
+    nextHeight = Math.max(MIN_HEIGHT, drag.startHeight - dy);
+    nextTop = drag.startTop + (drag.startHeight - nextHeight);
+  }
+
+  return {
+    x: nextLeft,
+    y: nextTop,
+    width: nextWidth,
+    height: nextHeight,
+  };
+}
+
+function resizeDirectionFromPoint(
+  container: HTMLDivElement,
+  clientX: number,
+  clientY: number
+): NonNullable<DragState["direction"]> {
+  const rect = container.getBoundingClientRect();
+  const horizontal = clientX < rect.left + rect.width / 2 ? "w" : "e";
+  const vertical = clientY < rect.top + rect.height / 2 ? "n" : "s";
+  return `${vertical}${horizontal}` as NonNullable<DragState["direction"]>;
+}
+
 export function FloatingWindow({
   x,
   y,
@@ -55,16 +117,41 @@ export function FloatingWindow({
 }: FloatingWindowProps) {
   const dragStateRef = useRef<DragState | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const [dragFrame, setDragFrame] = useState<WindowFrame | null>(null);
+  const pendingFrameRef = useRef<WindowFrame | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (animationFrameRef.current !== null) {
+        window.cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, []);
 
   if (isMinimized) return null;
+
+  const commitFrame = (frame: WindowFrame) => {
+    setDragFrame(frame);
+  };
+
+  const scheduleFrame = (frame: WindowFrame) => {
+    pendingFrameRef.current = frame;
+    if (animationFrameRef.current !== null) return;
+    animationFrameRef.current = window.requestAnimationFrame(() => {
+      animationFrameRef.current = null;
+      const pending = pendingFrameRef.current;
+      pendingFrameRef.current = null;
+      if (pending) commitFrame(pending);
+    });
+  };
 
   const handlePointerDown = (
     e: React.PointerEvent,
     actionType: "drag" | "resize",
     dir?: DragState["direction"]
   ) => {
-    if (e.button !== 0) return;
-    
+    e.preventDefault();
     e.stopPropagation();
     onFocus();
 
@@ -88,58 +175,38 @@ export function FloatingWindow({
       startHeight: height,
       pointerId: e.pointerId,
     };
+    const startFrame = { x, y, width, height };
+    pendingFrameRef.current = null;
+    setDragFrame(startFrame);
+  };
+
+  const handleContainerPointerDownCapture = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.button !== 2) return;
+    if (e.button === 2 && e.metaKey && !isMaximized) {
+      const container = containerRef.current;
+      if (!container) return;
+      handlePointerDown(e, "resize", resizeDirectionFromPoint(container, e.clientX, e.clientY));
+      return;
+    }
+    if (e.button !== 0) return;
+    if (!e.metaKey || isMaximized) {
+      onFocus();
+      return;
+    }
+    handlePointerDown(e, "drag");
+  };
+
+  const handleContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!e.metaKey) return;
+    e.preventDefault();
+    e.stopPropagation();
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
     const drag = dragStateRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
-
-    const dx = e.clientX - drag.startX;
-    const dy = e.clientY - drag.startY;
-
-    if (drag.type === "drag") {
-      const nextX = drag.startLeft + dx;
-      const nextY = drag.startTop + dy;
-      if (containerRef.current) {
-        containerRef.current.style.left = `${nextX}px`;
-        containerRef.current.style.top = `${nextY}px`;
-      }
-    } else if (drag.type === "resize" && drag.direction) {
-      let nextLeft = drag.startLeft;
-      let nextTop = drag.startTop;
-      let nextWidth = drag.startWidth;
-      let nextHeight = drag.startHeight;
-
-      const minWidth = 320;
-      const minHeight = 240;
-
-      if (drag.direction.includes("e")) {
-        nextWidth = Math.max(minWidth, drag.startWidth + dx);
-      } else if (drag.direction.includes("w")) {
-        const computedWidth = drag.startWidth - dx;
-        if (computedWidth >= minWidth) {
-          nextWidth = computedWidth;
-          nextLeft = drag.startLeft + dx;
-        }
-      }
-
-      if (drag.direction.includes("s")) {
-        nextHeight = Math.max(minHeight, drag.startHeight + dy);
-      } else if (drag.direction.includes("n")) {
-        const computedHeight = drag.startHeight - dy;
-        if (computedHeight >= minHeight) {
-          nextHeight = computedHeight;
-          nextTop = drag.startTop + dy;
-        }
-      }
-
-      if (containerRef.current) {
-        containerRef.current.style.left = `${nextLeft}px`;
-        containerRef.current.style.top = `${nextTop}px`;
-        containerRef.current.style.width = `${nextWidth}px`;
-        containerRef.current.style.height = `${nextHeight}px`;
-      }
-    }
+    e.preventDefault();
+    scheduleFrame(frameFromDrag(drag, e.clientX, e.clientY));
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
@@ -148,48 +215,29 @@ export function FloatingWindow({
 
     try {
       e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch {}
+    } catch {
+      // Pointer capture may already be released if the pointer left the window.
+    }
     dragStateRef.current = null;
 
-    const dx = e.clientX - drag.startX;
-    const dy = e.clientY - drag.startY;
+    if (animationFrameRef.current !== null) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
+    const nextFrame = frameFromDrag(drag, e.clientX, e.clientY);
+    pendingFrameRef.current = null;
+    setDragFrame(null);
 
     if (drag.type === "drag") {
-      onUpdatePosition(drag.startLeft + dx, drag.startTop + dy);
+      onUpdatePosition(nextFrame.x, nextFrame.y);
     } else if (drag.type === "resize" && drag.direction) {
-      let nextLeft = drag.startLeft;
-      let nextTop = drag.startTop;
-      let nextWidth = drag.startWidth;
-      let nextHeight = drag.startHeight;
-
-      const minWidth = 320;
-      const minHeight = 240;
-
-      if (drag.direction.includes("e")) {
-        nextWidth = Math.max(minWidth, drag.startWidth + dx);
-      } else if (drag.direction.includes("w")) {
-        const computedWidth = drag.startWidth - dx;
-        if (computedWidth >= minWidth) {
-          nextWidth = computedWidth;
-          nextLeft = drag.startLeft + dx;
-        }
-      }
-
-      if (drag.direction.includes("s")) {
-        nextHeight = Math.max(minHeight, drag.startHeight + dy);
-      } else if (drag.direction.includes("n")) {
-        const computedHeight = drag.startHeight - dy;
-        if (computedHeight >= minHeight) {
-          nextHeight = computedHeight;
-          nextTop = drag.startTop + dy;
-        }
-      }
-
-      onUpdateSize(nextLeft, nextTop, nextWidth, nextHeight);
+      onUpdateSize(nextFrame.x, nextFrame.y, nextFrame.width, nextFrame.height);
     }
   };
 
   const handleHeaderPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
     const target = e.target as HTMLElement;
     if (target.closest("button, [role='tab'], input, select, textarea, svg")) {
       return;
@@ -205,6 +253,9 @@ export function FloatingWindow({
     onToggleMaximize();
   };
 
+  const frame = dragFrame || { x, y, width, height };
+  const isInteracting = Boolean(dragFrame);
+
   const windowStyle: React.CSSProperties = isMaximized
     ? {
         position: "absolute",
@@ -217,12 +268,14 @@ export function FloatingWindow({
       }
     : {
         position: "absolute",
-        left: x,
-        top: y,
-        width,
-        height,
+        left: frame.x,
+        top: frame.y,
+        width: frame.width,
+        height: frame.height,
         zIndex,
-        transition: dragStateRef.current ? "none" : "transform 0.15s ease, width 0.15s ease, height 0.15s ease",
+        transition: isInteracting ? "none" : "transform 0.15s ease, width 0.15s ease, height 0.15s ease",
+        willChange: isInteracting ? "left, top, width, height" : undefined,
+        userSelect: isInteracting ? "none" : undefined,
       };
 
   const resizeZones: Array<{ dir: DragState["direction"]; className: string }> = [
@@ -242,14 +295,13 @@ export function FloatingWindow({
       style={windowStyle}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      className={`group/window flex flex-col overflow-hidden bg-card rounded-lg border-2 shadow-xl ${
+      onContextMenu={handleContextMenu}
+      className={`group/window flex flex-col overflow-hidden bg-card rounded-lg shadow-xl ${
         focused
-          ? "border-primary/95 ring-2 ring-primary/20"
-          : "border-border/80 hover:border-border-muted shadow-md"
+          ? "ring-1 ring-primary/25"
+          : "shadow-md"
       }`}
-      onPointerDownCapture={() => {
-        onFocus();
-      }}
+      onPointerDownCapture={handleContainerPointerDownCapture}
       onPointerDown={() => {
         onFocus();
       }}
@@ -259,7 +311,10 @@ export function FloatingWindow({
           <div
             key={dir}
             className={className}
-            onPointerDown={(e) => handlePointerDown(e, "resize", dir)}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              handlePointerDown(e, "resize", dir);
+            }}
           />
         ))}
 

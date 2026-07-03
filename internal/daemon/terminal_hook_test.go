@@ -463,6 +463,42 @@ func TestTmuxNewSessionCommandInjectsHookEnv(t *testing.T) {
 	}
 }
 
+func TestPocketStudioTmuxConfigDoesNotRewriteHomeEnd(t *testing.T) {
+	config := pocketStudioTmuxConfig("/bin/zsh")
+	for _, want := range []string{
+		`set-option -g default-terminal "tmux-256color"`,
+		"set-option -g xterm-keys on",
+		"unbind-key -n Home",
+		"unbind-key -n End",
+	} {
+		if !strings.Contains(config, want) {
+			t.Fatalf("pocketStudioTmuxConfig() missing %q in:\n%s", want, config)
+		}
+	}
+	for _, wrong := range []string{
+		"bind-key -n Home send-keys C-a",
+		"bind-key -n End send-keys C-e",
+	} {
+		if strings.Contains(config, wrong) {
+			t.Fatalf("pocketStudioTmuxConfig() still has unconditional binding %q in:\n%s", wrong, config)
+		}
+	}
+}
+
+func TestTmuxNewSessionCommandDoesNotOverridePaneTerm(t *testing.T) {
+	cmd, err := tmuxNewSessionCommand("session", "Shell", t.TempDir(), "", nil)
+	if err != nil {
+		t.Fatalf("tmuxNewSessionCommand() error = %v", err)
+	}
+	args := strings.Join(cmd.Args, "\x00")
+	if strings.Contains(args, "TERM=xterm-256color") {
+		t.Fatalf("tmuxNewSessionCommand() should not override pane TERM in %#v", cmd.Args)
+	}
+	if !strings.Contains(args, "env -u TMUX ") {
+		t.Fatalf("tmuxNewSessionCommand() should still clear nested TMUX in %#v", cmd.Args)
+	}
+}
+
 func TestTerminalAgentCommandWithHooksAddsPiExtension(t *testing.T) {
 	command := terminalAgentCommandWithHooks("pi", "pi", []string{
 		"POCKET_STUDIO_PI_EXTENSION=/tmp/pocket-studio.ts",

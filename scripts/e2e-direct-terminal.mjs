@@ -41,6 +41,10 @@ async function waitFor(fn, label, timeoutMs = 20_000) {
   throw new Error(`${label} timed out${lastErr ? `: ${lastErr.message}` : ''}`);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function getJSON(path) {
   const res = await fetch(`http://127.0.0.1:${serverPort}${path}`);
   if (!res.ok) throw new Error(`${path} -> ${res.status} ${await res.text()}`);
@@ -220,7 +224,32 @@ try {
   await cdp.send('Input.dispatchKeyEvent', { type: 'char', text: 'q', unmodifiedText: 'q' });
   const inputResult = await evalExpr(cdp, `new Promise((resolve) => setTimeout(() => { const events = window.__wsEvents || []; resolve({ qSends: events.filter((event) => event.type === 'send' && event.data === 'q'), terminalEvents: events.filter((event) => event.url && event.url.includes('/ws/terminal')) }); }, 300))`);
   if (inputResult.qSends.length !== 1) throw new Error(`one keypress should be sent exactly once over direct WS: ${JSON.stringify({ result, inputResult })}`);
-  console.log(JSON.stringify({ ...result, inputResult }, null, 2));
+  await evalExpr(cdp, `window.__wsEvents = []; document.querySelector('.xterm-helper-textarea')?.focus(); true`);
+  await cdp.send('Input.dispatchKeyEvent', { type: 'char', text: '\u0003', unmodifiedText: '\u0003' });
+  await sleep(200);
+  await cdp.send('Input.dispatchKeyEvent', { type: 'char', text: 'a', unmodifiedText: 'a' });
+  await sleep(80);
+  await cdp.send('Input.dispatchKeyEvent', { type: 'char', text: 'b', unmodifiedText: 'b' });
+  await sleep(80);
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Home', code: 'Home', windowsVirtualKeyCode: 36, nativeVirtualKeyCode: 36 });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Home', code: 'Home', windowsVirtualKeyCode: 36, nativeVirtualKeyCode: 36 });
+  await sleep(80);
+  await cdp.send('Input.dispatchKeyEvent', { type: 'char', text: 'X', unmodifiedText: 'X' });
+  await sleep(80);
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'End', code: 'End', windowsVirtualKeyCode: 35, nativeVirtualKeyCode: 35 });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'End', code: 'End', windowsVirtualKeyCode: 35, nativeVirtualKeyCode: 35 });
+  await sleep(80);
+  await cdp.send('Input.dispatchKeyEvent', { type: 'char', text: 'Y', unmodifiedText: 'Y' });
+  await sleep(80);
+  await cdp.send('Input.dispatchKeyEvent', { type: 'char', text: '\r', unmodifiedText: '\r' });
+  const homeEndResult = await evalExpr(cdp, `new Promise((resolve) => setTimeout(() => {
+    const events = (window.__wsEvents || []).filter((event) => event.type === 'send' && event.url && event.url.includes('/ws/terminal'));
+    resolve({ sends: events.map((event) => event.data), terminalEvents: events, bodyText: document.body.innerText.slice(-500) });
+  }, 700))`);
+  if (!homeEndResult.sends.includes('\u001bOH') || !homeEndResult.sends.includes('\u001bOF') || !homeEndResult.bodyText.includes('command not found: XabY')) {
+    throw new Error(`Home/End should edit the current terminal line correctly: ${JSON.stringify({ result, homeEndResult })}`);
+  }
+  console.log(JSON.stringify({ ...result, inputResult, homeEndResult }, null, 2));
 } catch (err) {
   if (cdp) {
     try {

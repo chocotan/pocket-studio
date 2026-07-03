@@ -244,6 +244,11 @@ function writeClipboardText(text: string) {
   return Promise.resolve();
 }
 
+function terminalHomeEndSequence(key: string) {
+  if (key === "Home") return "\x1bOH";
+  if (key === "End") return "\x1bOF";
+  return "";
+}
 
 interface XtermInstanceProps {
   projectId: string;
@@ -327,6 +332,7 @@ export function XtermInstance({
   const currentCommandRef = useRef(command || "");
   const onActiveFocusRef = useRef(onActiveFocus);
   const scaleRef = useRef(scale);
+  const directEndpointRef = useRef(directEndpoint);
   const incomingBuf = useRef<Array<string | Uint8Array>>([]);
   // Buffer keystrokes that arrive before WS is OPEN
   const inputBuf    = useRef<string[]>([]);
@@ -338,6 +344,10 @@ export function XtermInstance({
   useEffect(() => {
     onActiveFocusRef.current = onActiveFocus;
   }, [onActiveFocus]);
+
+  useEffect(() => {
+    directEndpointRef.current = directEndpoint;
+  }, [directEndpoint]);
 
   useEffect(() => {
     isActiveRef.current = isActive;
@@ -459,6 +469,23 @@ export function XtermInstance({
     };
   }
 
+  function sendInputData(data: string) {
+    const current = wsRef.current;
+    if (current?.readyState === WebSocket.OPEN) {
+      current.send(data);
+    } else {
+      inputBuf.current.push(data);
+    }
+  }
+
+  function sendHomeEndKey(event: Pick<KeyboardEvent, "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey">) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
+    const sequence = terminalHomeEndSequence(event.key);
+    if (!sequence) return false;
+    sendInputData(sequence);
+    return true;
+  }
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -473,6 +500,11 @@ export function XtermInstance({
     let cancelFocusHandler: (() => void) | null = null;
     let osc52Disposable: { dispose: () => void } | null = null;
     let dataDisposable: { dispose: () => void } | null = null;
+    const handleTerminalKeyDownCapture = (event: KeyboardEvent) => {
+      if (!sendHomeEndKey(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
     const postOpenResizeTimers: number[] = [];
     const ownedSockets = new Set<WebSocket>();
     const generation = connectionGenerationRef.current + 1;
@@ -524,6 +556,22 @@ export function XtermInstance({
         }
       });
       term.write('\x1b[?1007l');
+      container.addEventListener("keydown", handleTerminalKeyDownCapture, true);
+
+      term.attachCustomKeyEventHandler((event) => {
+        if (
+          event.type === "keydown" &&
+          !event.altKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.shiftKey &&
+          (event.key === "Home" || event.key === "End")
+        ) {
+          event.preventDefault();
+          return false;
+        }
+        return true;
+      });
 
       xtermRef.current = term;
       fitAddon = new FitAddon();
@@ -736,7 +784,7 @@ export function XtermInstance({
         wsParams.set("rows", String(initialSize.rows));
       }
       const relayWsUrl = directMode ? "" : websocketURL("/ws/terminal", wsParams);
-      let currentDirectEndpoint = directEndpoint;
+      let currentDirectEndpoint = directEndpointRef.current;
       if (directMode && !currentDirectEndpoint?.terminal_ws_url) {
         const refreshedEndpoint = await refreshDirectEndpoint(projectId);
         if (!isCurrentEffect()) return;
@@ -875,12 +923,7 @@ export function XtermInstance({
       /* ── 3. User input → WS ── */
       dataDisposable = term.onData((data) => {
         if (!isCurrentEffect()) return;
-        const current = wsRef.current;
-        if (current?.readyState === WebSocket.OPEN) {
-          current.send(data);
-        } else {
-          inputBuf.current.push(data);
-        }
+        sendInputData(data);
       });
     };
 
@@ -929,6 +972,7 @@ export function XtermInstance({
       if (cancelInitialFit) cancelInitialFit();
       if (cancelFontFit) cancelFontFit();
       window.removeEventListener("resize", handleWinResize);
+      container.removeEventListener("keydown", handleTerminalKeyDownCapture, true);
       if (reconnectTimerRef.current !== null) {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
@@ -952,7 +996,7 @@ export function XtermInstance({
       inputBuf.current = [];
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, terminalId, command, directMode, directEndpoint?.terminal_ws_url, directEndpoint?.token]);
+  }, [projectId, terminalId, command, directMode, directEndpoint?.terminal_ws_url]);
 
   /* Dynamic xterm theme switching */
   useEffect(() => {
@@ -1019,6 +1063,9 @@ export function XtermInstance({
   return (
     <div
       ref={containerRef}
+      onContextMenu={(event) => {
+        event.preventDefault();
+      }}
       className="absolute inset-0 box-border overflow-hidden px-0.5 py-0.5"
       style={
         scale !== 1

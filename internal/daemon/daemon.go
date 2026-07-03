@@ -4673,9 +4673,9 @@ func tmuxNewSessionCommand(sessionName string, initialTitle string, workspacePat
 	if runtime.GOOS != "windows" {
 		shell := userShell()
 		if command == "" {
-			command = "env -u TMUX TERM=xterm-256color " + shellQuote(shell)
+			command = "env -u TMUX " + shellQuote(shell)
 		} else {
-			command = "env -u TMUX TERM=xterm-256color " + command
+			command = "env -u TMUX " + command
 		}
 	}
 	if command != "" {
@@ -4718,6 +4718,7 @@ set-option -g set-titles on
 set-option -g default-terminal "tmux-256color"
 set-option -g terminal-overrides ",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB"
 set-option -ga terminal-features ",xterm-256color:RGB:clipboard,tmux-256color:RGB:clipboard,*-256color:RGB:clipboard"
+set-option -g xterm-keys on
 set-option -g history-limit 50000
 set-option -g mouse on
 set-option -g set-clipboard external
@@ -4725,6 +4726,8 @@ set-option -sg escape-time 10
 set-option -g prefix C-a
 unbind-key C-b
 bind-key C-a send-prefix
+unbind-key -n Home
+unbind-key -n End
 set-environment -gu NO_COLOR
 set-environment -g COLORTERM truecolor
 set-environment -g CLICOLOR 1

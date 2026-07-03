@@ -1,17 +1,19 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Palette, Check, Cable, Layers, FolderTree, FileText, Plus } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Palette, Check, Cable, Layers, FolderTree, FileText, Plus, Lock, Unlock, Monitor, Folder } from "lucide-react";
 import type { Device } from "@/lib/types";
-import { type StudioTheme, terminalType, terminalTypeFromCommand, cleanTerminalTitle, type TerminalKind } from "./terminal-types";
+import { type StudioTheme, terminalType, terminalTypeFromCommand, cleanTerminalTitle, type TerminalKind, type TerminalTitleState } from "./terminal-types";
 import type { Project } from "./studio-dashboard";
 import { EmptyWorkspace } from "./empty-workspace";
-import { ProjectNavMenu, ProjectSwitcher } from "./project-switcher";
+import { ProjectNavMenu, ProjectSwitcher, deviceDisplayName } from "./project-switcher";
 import {
   normalizeSizes,
   sizesFromLayoutMap,
   splitLayoutMap,
   type LayoutNode,
   type SplitGroup,
+  type StudioTab,
+  type TerminalPanel,
 } from "./studio-layout";
 import { TerminalPanelView, TerminalTypeMenu } from "./terminal-panel-view";
 import { FloatingWindow } from "./floating-window";
@@ -50,6 +52,7 @@ interface StudioWorkspaceProps {
 }
 
 const STUDIO_NAV_HIDDEN_KEY = "pocket-studio-nav-hidden";
+const FLOATING_DOCK_AUTO_HIDE_KEY = "pocket-studio-floating-dock-auto-hide";
 
 export function StudioWorkspace({
   projectId,
@@ -92,6 +95,22 @@ export function StudioWorkspace({
   });
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const [dockMenuOpen, setDockMenuOpen] = useState(false);
+  const [dockAutoHide, setDockAutoHide] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem(FLOATING_DOCK_AUTO_HIDE_KEY) === "true";
+  });
+  const [dockGrouping, setDockGrouping] = useState<"none" | "project" | "machine">((() => {
+    if (typeof window === "undefined") return "project";
+    const saved = localStorage.getItem("pocket-studio-dock-grouping");
+    if (saved === "false" || saved === "none") return "none";
+    if (saved === "machine") return "machine";
+    return "project";
+  }));
+  const [dockHovering, setDockHovering] = useState(false);
+  const [dockRevealed, setDockRevealed] = useState(false);
+  const dockRevealTimerRef = useRef<number | null>(null);
+  const previousFocusedIdRef = useRef("");
+  const previousTopFloatingPanelIdRef = useRef("");
   const [directModeSaving, setDirectModeSaving] = useState(false);
   const [directModeError, setDirectModeError] = useState("");
   const [navHidden, setNavHidden] = useState(() => {
@@ -109,6 +128,7 @@ export function StudioWorkspace({
     isDraggingTab,
     setIsDraggingTab,
     terminalTitles,
+    workspaceSwitchToken,
     layoutVersion,
     setLayoutVersion,
     addMenuPanelId,
@@ -156,6 +176,67 @@ export function StudioWorkspace({
     if (navHidden) setThemeMenuOpen(false);
   }, [navHidden]);
 
+  useEffect(() => {
+    localStorage.setItem(FLOATING_DOCK_AUTO_HIDE_KEY, String(dockAutoHide));
+    if (!dockAutoHide) {
+      setDockHovering(false);
+      setDockRevealed(false);
+    }
+  }, [dockAutoHide]);
+
+  useEffect(() => {
+    localStorage.setItem("pocket-studio-dock-grouping", dockGrouping);
+  }, [dockGrouping]);
+
+  useEffect(() => {
+    return () => {
+      if (dockRevealTimerRef.current !== null) {
+        window.clearTimeout(dockRevealTimerRef.current);
+      }
+    };
+  }, []);
+
+  function revealDockBriefly() {
+    if (!dockAutoHide) return;
+    setDockRevealed(true);
+    if (dockRevealTimerRef.current !== null) {
+      window.clearTimeout(dockRevealTimerRef.current);
+    }
+    dockRevealTimerRef.current = window.setTimeout(() => {
+      dockRevealTimerRef.current = null;
+      setDockRevealed(false);
+    }, 1400);
+  }
+
+  function focusFloatingPanelAndRevealDock(panelId: string) {
+    focusFloatingPanel(panelId);
+    revealDockBriefly();
+  }
+
+  useEffect(() => {
+    const previousFocusedId = previousFocusedIdRef.current;
+    previousFocusedIdRef.current = focusedId;
+    if (!previousFocusedId || previousFocusedId === focusedId) return;
+    if (layoutMode === "floating") revealDockBriefly();
+  }, [focusedId, layoutMode, dockAutoHide]);
+
+  useEffect(() => {
+    if (layoutMode === "floating" && workspaceSwitchToken > 0) revealDockBriefly();
+  }, [workspaceSwitchToken, layoutMode, dockAutoHide]);
+
+  useEffect(() => {
+    if (layoutMode !== "floating") {
+      previousTopFloatingPanelIdRef.current = "";
+      return;
+    }
+    const topPanelId = Object.entries(floatingPanels)
+      .filter(([, panel]) => !panel.isMinimized)
+      .sort(([, a], [, b]) => b.zIndex - a.zIndex)[0]?.[0] || "";
+    const previousTopPanelId = previousTopFloatingPanelIdRef.current;
+    previousTopFloatingPanelIdRef.current = topPanelId;
+    if (!previousTopPanelId || previousTopPanelId === topPanelId) return;
+    revealDockBriefly();
+  }, [floatingPanels, layoutMode, dockAutoHide]);
 
   useEffect(() => {
     setDirectModeError("");
@@ -274,6 +355,131 @@ export function StudioWorkspace({
       </Group>
     );
   }
+
+  const renderTabButton = (tab: StudioTab, panel: TerminalPanel) => {
+    const float = floatingPanels[panel.id];
+    const isMinimized = float?.isMinimized;
+    const isPanelFocused = focusedId === panel.id && !isMinimized;
+    const isActive = isPanelFocused && panel.activeTabId === tab.id;
+
+    const isFileExplorer = tab.kind === "file_explorer";
+    const isFileViewer = tab.kind === "file_viewer";
+    const liveTitle = tab.kind === "terminal" ? terminalTitles[tab.id] : undefined;
+    const activeCommand = liveTitle?.command || tab.activeCommand || "";
+    const displayType = terminalType(
+      tab.kind === "agent_chat"
+        ? (tab.agentKind as TerminalKind || "opencode")
+        : terminalTypeFromCommand(activeCommand, tab.termType)
+    );
+
+    const isCrossProject = (tab.projectId || projectId) !== projectId;
+    const tabProject = projects.find((proj) => proj.id === (tab.projectId || projectId));
+
+    return (
+      <button
+        key={tab.id}
+        type="button"
+        onClick={() => {
+          if (isMinimized) {
+            setFloatingPanels((prev) => ({
+              ...prev,
+              [panel.id]: { ...prev[panel.id], isMinimized: false }
+            }));
+            handleActiveTab(panel.id, tab.id);
+            focusFloatingPanelAndRevealDock(panel.id);
+          } else if (isActive) {
+            setFloatingPanels((prev) => ({
+              ...prev,
+              [panel.id]: { ...prev[panel.id], isMinimized: true }
+            }));
+            revealDockBriefly();
+          } else {
+            handleActiveTab(panel.id, tab.id);
+            focusFloatingPanelAndRevealDock(panel.id);
+          }
+        }}
+        className={`relative flex h-5 items-center gap-1.5 px-2 text-[10px] font-semibold border rounded-md transition-all duration-200 active:scale-95 ${
+          isActive
+            ? "bg-indigo-600 border-indigo-600 text-white shadow-sm shadow-indigo-500/25"
+            : (panel.activeTabId === tab.id && isMinimized)
+              ? "bg-muted/40 border-border/40 text-muted-foreground opacity-60 hover:opacity-100"
+              : "bg-card border-border text-foreground hover:bg-accent"
+        }`}
+        title={tab.title}
+      >
+        <span className="flex h-3.5 w-3.5 items-center justify-center rounded">
+          {isFileExplorer ? (
+            <FolderTree className="h-3 w-3 text-sky-500" />
+          ) : isFileViewer ? (
+            <FileText className="h-3 w-3 text-emerald-500" />
+          ) : (
+            displayType.logo
+          )}
+        </span>
+        <span className="w-[120px] truncate text-[10px] pr-1.5 flex-shrink-0">
+          {tab.kind === "file_explorer"
+            ? "文件"
+            : tab.kind === "file_viewer"
+              ? tab.title
+              : tab.kind === "agent_chat"
+                ? tab.title
+                : cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType)
+          }
+        </span>
+        
+        {isCrossProject && tabProject && (
+          <span className="absolute -top-1.5 -right-1.5 text-[7px] bg-amber-500 text-white rounded px-0.5 border border-amber-600 font-bold scale-90">
+            P
+          </span>
+        )}
+      </button>
+    );
+  };
+
+  const handleCycleGrouping = () => {
+    setDockGrouping((prev) => {
+      if (prev === "none") return "project";
+      if (prev === "project") return "machine";
+      return "none";
+    });
+  };
+
+  // Grouping logic for the dock
+  const allTabs = panels.flatMap((p) => p.tabs.map((t) => ({ tab: t, panel: p })));
+  const groupsMap = new Map<string, {
+    machineName: string;
+    directory: string;
+    tabs: Array<{ tab: StudioTab; panel: TerminalPanel }>;
+  }>();
+
+  allTabs.forEach(({ tab, panel }) => {
+    const tabProjectId = tab.projectId || projectId;
+    const tabProject = projects.find((p) => p.id === tabProjectId) || project;
+    const tabDevice = devices.find((d) => d.id === tabProject?.device_id);
+    const machineName = deviceDisplayName(tabDevice, tabProject?.device_id || "未知机器");
+    const directory = getTabDirectory(tab, tab.kind === "terminal" ? terminalTitles[tab.id] : undefined, tabProject?.workspace_path);
+    
+    const groupKey = dockGrouping === "machine" ? machineName : `${machineName}::${directory}`;
+    if (!groupsMap.has(groupKey)) {
+      groupsMap.set(groupKey, {
+        machineName,
+        directory,
+        tabs: []
+      });
+    }
+    groupsMap.get(groupKey)!.tabs.push({ tab, panel });
+  });
+
+  const groupedList = Array.from(groupsMap.values());
+  groupedList.sort((a, b) => {
+    if (a.machineName !== b.machineName) {
+      return a.machineName.localeCompare(b.machineName);
+    }
+    return a.directory.localeCompare(b.directory);
+  });
+
+  const uniqueMachines = Array.from(new Set(groupedList.map((g) => g.machineName)));
+  const hasMultipleMachines = uniqueMachines.length > 1;
 
   return (
     <div
@@ -528,7 +734,7 @@ export function StudioWorkspace({
                         isMaximized={floatState.isMaximized}
                         isMinimized={floatState.isMinimized}
                         focused={focusedId === p.id && !floatState.isMinimized}
-                        onFocus={() => focusFloatingPanel(p.id)}
+                        onFocus={() => focusFloatingPanelAndRevealDock(p.id)}
                         onUpdatePosition={(newX, newY) => {
                           setFloatingPanels((prev) => ({
                             ...prev,
@@ -576,7 +782,10 @@ export function StudioWorkspace({
                             projects={projects}
                             devices={devices}
                             workspacePath={project.workspace_path}
-                            onFocus={handleFocus}
+                            onFocus={(panelId) => {
+                              handleFocus(panelId);
+                              revealDockBriefly();
+                            }}
                             onAddMenu={(panelId) => setAddMenuPanelId((prev) => prev === panelId ? null : panelId)}
                             onSplitSelect={handleSplit}
                             onAddTab={handleAddTab}
@@ -619,137 +828,198 @@ export function StudioWorkspace({
 
         {/* Dock Taskbar for Floating Mode */}
         {layoutMode === "floating" && (
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-1.5 backdrop-blur-md bg-white/70 dark:bg-slate-900/70 border border-border/80 shadow-lg rounded-xl px-3 py-1.5 animate-in fade-in slide-in-from-bottom-4 duration-300">
-            {panels.flatMap((p) => p.tabs.map((t) => ({ tab: t, panel: p }))).map(({ tab, panel }) => {
-              const float = floatingPanels[panel.id];
-              const isMinimized = float?.isMinimized;
-              const isPanelFocused = focusedId === panel.id && !isMinimized;
-              const isActive = isPanelFocused && panel.activeTabId === tab.id;
-              
-              const isFileExplorer = tab.kind === "file_explorer";
-              const isFileViewer = tab.kind === "file_viewer";
-              const liveTitle = tab.kind === "terminal" ? terminalTitles[tab.id] : undefined;
-              const activeCommand = liveTitle?.command || tab.activeCommand || "";
-              const displayType = terminalType(
-                tab.kind === "agent_chat"
-                  ? (tab.agentKind as TerminalKind || "opencode")
-                  : terminalTypeFromCommand(activeCommand, tab.termType)
-              );
-              
-              const isCrossProject = (tab.projectId || projectId) !== projectId;
-              const tabProject = projects.find((proj) => proj.id === (tab.projectId || projectId));
-              
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => {
-                    if (isMinimized) {
-                      setFloatingPanels((prev) => ({
-                        ...prev,
-                        [panel.id]: { ...prev[panel.id], isMinimized: false }
-                      }));
-                      handleActiveTab(panel.id, tab.id);
-                      focusFloatingPanel(panel.id);
-                    } else if (isActive) {
-                      setFloatingPanels((prev) => ({
-                        ...prev,
-                        [panel.id]: { ...prev[panel.id], isMinimized: true }
-                      }));
-                    } else {
-                      handleActiveTab(panel.id, tab.id);
-                      focusFloatingPanel(panel.id);
-                    }
-                  }}
-                  className={`relative flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold border rounded-lg transition-all duration-200 hover:scale-105 active:scale-95 ${
-                    isActive
-                      ? "bg-indigo-600 border-indigo-600 text-white shadow-sm shadow-indigo-500/25"
-                      : (panel.activeTabId === tab.id && isMinimized)
-                        ? "bg-muted/40 border-border/40 text-muted-foreground opacity-60 hover:opacity-100"
-                        : "bg-card border-border text-foreground hover:bg-accent"
-                  }`}
-                  title={tab.title}
-                >
-                  <span className="flex h-4 w-4 items-center justify-center rounded">
-                    {isFileExplorer ? (
-                      <FolderTree className="h-3.5 w-3.5 text-sky-500" />
-                    ) : isFileViewer ? (
-                      <FileText className="h-3.5 w-3.5 text-emerald-500" />
-                    ) : (
-                      displayType.logo
-                    )}
-                  </span>
-                  <span className="max-w-[100px] truncate text-[10px] pr-1.5">
-                    {tab.kind === "file_explorer"
-                      ? "文件"
-                      : tab.kind === "file_viewer"
-                        ? tab.title
-                        : tab.kind === "agent_chat"
-                          ? tab.title
-                          : cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType)
-                    }
-                  </span>
-                  
-                  {isCrossProject && tabProject && (
-                    <span className="absolute -top-1.5 -right-1.5 text-[7px] bg-amber-500 text-white rounded px-0.5 border border-amber-600 font-bold scale-90">
-                      P
-                    </span>
-                  )}
-                  
-                  {/* Status dot: only show for active tab of the panel */}
-                  {panel.activeTabId === tab.id && (
-                    <span className={`absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-0.5 rounded-full ${
-                      isActive ? "bg-white" : isMinimized ? "bg-amber-500" : "bg-indigo-500"
-                    }`} />
-                  )}
-                </button>
-              );
-            })}
-
-            {/* Separator between items and New Window button */}
-            {panels.length > 0 && (
-              <div className="h-5 w-px bg-border/80 mx-1.5" />
+          <>
+            {dockAutoHide && (
+              <div
+                className="absolute bottom-0 left-0 right-0 z-[99] h-3"
+                onPointerEnter={() => setDockHovering(true)}
+              />
             )}
-
-            {/* New Window Button with Dropdown Menu */}
-            <div className="relative">
+            <div
+              className={`absolute left-1/2 z-[100] flex items-center gap-1.5 backdrop-blur-md bg-white/70 dark:bg-slate-900/70 border border-border/80 shadow-lg rounded-xl px-3 py-0.5 transition-[transform,opacity] duration-200 ease-out ${
+                dockAutoHide && !dockHovering && !dockMenuOpen && !dockRevealed
+                  ? "bottom-0 translate-y-[calc(100%-4px)] -translate-x-1/2 opacity-35"
+                  : "bottom-0.5 -translate-x-1/2 translate-y-0 opacity-100"
+              }`}
+              onPointerEnter={() => setDockHovering(true)}
+              onPointerLeave={() => setDockHovering(false)}
+            >
               <button
                 type="button"
-                onClick={() => setDockMenuOpen((prev) => !prev)}
-                className="flex items-center justify-center h-7 w-7 rounded-lg border border-border bg-card text-foreground hover:bg-accent hover:text-accent-foreground transition-all duration-250 hover:scale-105 active:scale-95 shadow-sm cursor-pointer"
-                title="新建终端、文件浏览器或 AI 助手窗口"
+                onClick={() => setDockAutoHide((prev) => !prev)}
+                className={`flex h-5 w-5 items-center justify-center rounded-md border transition-all duration-200 hover:scale-105 active:scale-95 shadow-sm cursor-pointer ${
+                  dockAutoHide
+                    ? "bg-muted/40 border-border/40 text-muted-foreground hover:bg-accent hover:text-foreground"
+                    : "bg-indigo-600 border-indigo-600 text-white"
+                }`}
+                title={dockAutoHide ? "Dock 自动隐藏已开启" : "Dock 固定显示"}
               >
-                <Plus className="h-4 w-4 text-indigo-500 shrink-0" />
+                {dockAutoHide ? <Unlock className="h-3 w-3 shrink-0" /> : <Lock className="h-3 w-3 shrink-0" />}
               </button>
 
-              {dockMenuOpen && (
-                <>
-                  <div className="fixed inset-0 z-40 cursor-default" onClick={() => setDockMenuOpen(false)} />
-                  <TerminalTypeMenu
-                    align="right"
-                    style={{ bottom: "34px", top: "auto", position: "absolute" }}
-                    projects={projects}
-                    devices={devices}
-                    projectId={projectId}
-                    onSelect={(kind, tabProjectId) => {
-                      handleCreateNewPanel(kind, tabProjectId);
-                      setDockMenuOpen(false);
-                    }}
-                    onFileExplorer={(tabProjectId) => {
-                      handleCreateNewFileExplorer(tabProjectId);
-                      setDockMenuOpen(false);
-                    }}
-                    onAddAgentChat={(agentKind, agentRuntime, tabProjectId) => {
-                      handleCreateNewAgentChat(agentKind, agentRuntime, tabProjectId);
-                      setDockMenuOpen(false);
-                    }}
-                  />
-                </>
+              <button
+                type="button"
+                onClick={handleCycleGrouping}
+                className={`flex h-5 w-5 items-center justify-center rounded-md border transition-all duration-200 hover:scale-105 active:scale-95 shadow-sm cursor-pointer ${
+                  dockGrouping !== "none"
+                    ? "bg-indigo-600 border-indigo-600 text-white"
+                    : "bg-muted/40 border-border/40 text-muted-foreground hover:bg-accent hover:text-foreground"
+                }`}
+                title={
+                  dockGrouping === "none"
+                    ? "Dock 自动分组：已关闭 (点击切换为按项目分组)"
+                    : dockGrouping === "project"
+                      ? "Dock 自动分组：按项目分组 (点击切换为按机器分组)"
+                      : "Dock 自动分组：按机器分组 (点击切换为关闭分组)"
+                }
+              >
+                {dockGrouping === "machine" ? (
+                  <Monitor className="h-3 w-3 shrink-0" />
+                ) : (
+                  <FolderTree className="h-3 w-3 shrink-0" />
+                )}
+              </button>
+
+              <div className="h-4 w-px bg-border/80 mx-1.5" />
+
+              {dockGrouping !== "none" ? (
+                groupedList.map((group, groupIdx) => {
+                  const shortDir = getShortDirectoryName(group.directory, project.workspace_path);
+                  return (
+                    <div
+                      key={groupIdx}
+                      className="flex h-6 items-center gap-1 bg-black/5 dark:bg-white/5 border border-border/40 rounded-lg px-1 transition-all duration-200 hover:border-indigo-500/30 flex-shrink-0"
+                    >
+                      {/* Group Header Badge */}
+                      <div
+                        className="flex h-5 items-center gap-1 text-[9px] font-semibold text-muted-foreground bg-muted/50 dark:bg-slate-800/60 hover:bg-muted/80 dark:hover:bg-slate-800/80 px-1.5 rounded border border-border/30 select-none cursor-help flex-shrink-0 transition-colors"
+                        title={`机器: ${group.machineName}\n目录: ${group.directory}`}
+                      >
+                        {dockGrouping === "machine" ? (
+                          <Monitor className={`h-3 w-3 shrink-0 ${getMachineColorClass(group.machineName)}`} />
+                        ) : hasMultipleMachines ? (
+                          <Monitor className={`h-3 w-3 shrink-0 ${getMachineColorClass(group.machineName)}`} />
+                        ) : (
+                          <Folder className="h-3 w-3 text-amber-500/80 shrink-0" />
+                        )}
+                        <span className="truncate w-[60px] text-[10px] flex-shrink-0">
+                          {dockGrouping === "machine" ? group.machineName : shortDir}
+                        </span>
+                      </div>
+                      
+                      {/* Tabs in this group */}
+                      <div className="flex items-center gap-1">
+                        {group.tabs.map(({ tab, panel }) => renderTabButton(tab, panel))}
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                panels.flatMap((p) => p.tabs.map((t) => ({ tab: t, panel: p }))).map(({ tab, panel }) => renderTabButton(tab, panel))
               )}
+
+              {panels.length > 0 && (
+                <div className="h-4 w-px bg-border/80 mx-1.5" />
+              )}
+
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setDockMenuOpen((prev) => !prev)}
+                  className="flex h-5 w-5 items-center justify-center rounded-md border border-border bg-card text-foreground hover:bg-accent hover:text-accent-foreground transition-all duration-250 hover:scale-105 active:scale-95 shadow-sm cursor-pointer"
+                  title="新建终端、文件浏览器或 AI 助手窗口"
+                >
+                  <Plus className="h-3 w-3 text-indigo-500 shrink-0" />
+                </button>
+
+                {dockMenuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40 cursor-default" onClick={() => setDockMenuOpen(false)} />
+                    <TerminalTypeMenu
+                      align="right"
+                      style={{ bottom: "32px", top: "auto", position: "absolute" }}
+                      projects={projects}
+                      devices={devices}
+                      projectId={projectId}
+                      onSelect={(kind, tabProjectId) => {
+                        handleCreateNewPanel(kind, tabProjectId);
+                        setDockMenuOpen(false);
+                      }}
+                      onFileExplorer={(tabProjectId) => {
+                        handleCreateNewFileExplorer(tabProjectId);
+                        setDockMenuOpen(false);
+                      }}
+                      onAddAgentChat={(agentKind, agentRuntime, tabProjectId) => {
+                        handleCreateNewAgentChat(agentKind, agentRuntime, tabProjectId);
+                        setDockMenuOpen(false);
+                      }}
+                    />
+                  </>
+                )}
+              </div>
             </div>
-          </div>
+          </>
         )}
       </main>
     </div>
   );
+}
+
+function getTabDirectory(
+  tab: StudioTab,
+  liveTitle?: TerminalTitleState,
+  projectWorkspacePath?: string
+): string {
+  if (tab.kind === "file_explorer") {
+    return tab.filePath || projectWorkspacePath || "未知目录";
+  }
+  if (tab.kind === "file_viewer") {
+    if (tab.filePath) {
+      const lastSlash = tab.filePath.lastIndexOf("/");
+      if (lastSlash !== -1) {
+        return tab.filePath.substring(0, lastSlash) || "/";
+      }
+      return tab.filePath;
+    }
+    return projectWorkspacePath || "未知目录";
+  }
+  if (tab.kind === "agent_chat") {
+    return projectWorkspacePath || "未知目录";
+  }
+  // For terminal
+  const fullTitle = liveTitle?.fullTitle || "";
+  if (fullTitle.startsWith("/") || fullTitle.startsWith("~")) {
+    return fullTitle;
+  }
+  return projectWorkspacePath || "未知目录";
+}
+
+function getShortDirectoryName(path: string, projectWorkspacePath?: string): string {
+  if (!path || path === "未知目录") return "未知目录";
+  if (path === projectWorkspacePath) {
+    const lastSlash = path.lastIndexOf("/");
+    const name = lastSlash !== -1 ? path.substring(lastSlash + 1) : path;
+    return name || "/";
+  }
+  const lastSlash = path.lastIndexOf("/");
+  const name = lastSlash !== -1 ? path.substring(lastSlash + 1) : path;
+  return name || "/";
+}
+
+const MACHINE_COLORS = [
+  "text-indigo-500 dark:text-indigo-400",
+  "text-emerald-500 dark:text-emerald-400",
+  "text-sky-500 dark:text-sky-400",
+  "text-rose-500 dark:text-rose-400",
+  "text-amber-500 dark:text-amber-400",
+  "text-violet-500 dark:text-violet-400",
+];
+
+function getMachineColorClass(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const index = Math.abs(hash) % MACHINE_COLORS.length;
+  return MACHINE_COLORS[index];
 }
