@@ -37,7 +37,7 @@ flowchart TD
   agent["本地 AI Agent / 终端<br/>Claude Code / Codex / OpenCode / Kilo / acpx"]
 
   user <-->|HTTP / WebSocket 中转| server
-  user <-->|WebSocket 直连 (低延迟)| daemon
+  user <-->|"WebSocket 直连（低延迟）"| daemon
   daemon <-->|WebSocket 连接| server
   daemon -->|控制 & 状态监听| project
   daemon -->|进程生命周期管理| agent
