@@ -534,7 +534,7 @@ export function StudioDashboard({
                 required
                 value={newProjPath}
                 onChange={(e) => setNewProjPath(e.target.value)}
-                placeholder="例如 /home/choco/Downloads/my-pocket-studio"
+                placeholder="例如 /home/user/projects/my-project"
                 className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 font-mono h-9"
               />
             </div>

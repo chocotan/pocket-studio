@@ -41,7 +41,7 @@ mkdir -p "$LOG_DIR" "$RUN_DIR"
 
 # Workspaces exposed by the daemon. Add more lines as needed.
 WORKSPACES=( "$HOME/Agent" )
-[ -d "/home/choco/Downloads/pocket-studio" ] && WORKSPACES+=( "/home/choco/Downloads/pocket-studio" )
+[ -d "$ROOT" ] && WORKSPACES+=( "$ROOT" )
 
 # ── colors ──────────────────────────────────────────────────────────
 if [ -t 1 ]; then

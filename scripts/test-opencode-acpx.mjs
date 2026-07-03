@@ -3,7 +3,7 @@ import fs from "fs";
 
 const env = {
   ...process.env,
-  AGENT_BROWSER_INIT_SCRIPTS: "/home/choco/Downloads/pocket-studio/scripts/hook-ws.js"
+  AGENT_BROWSER_INIT_SCRIPTS: new URL("./hook-ws.js", import.meta.url).pathname
 };
 
 function run(cmd, capture = true) {

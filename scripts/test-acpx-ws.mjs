@@ -5,6 +5,8 @@ console.log("Connecting to:", wsUrl);
 
 const ws = new globalThis.WebSocket(wsUrl);
 
+const projectRoot = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+
 ws.onopen = () => {
   console.log("WebSocket connected!");
 
@@ -17,7 +19,7 @@ ws.onopen = () => {
     to: { device_id: "dev_local" },
     payload: {
       task_id: "mytest",
-      workspace_path: "/home/choco/Downloads/pocket-studio",
+      workspace_path: projectRoot,
       agent: "opencode",
       agent_runtime: "acpx",
       session_name: "mytest"
@@ -37,7 +39,7 @@ ws.onopen = () => {
       to: { device_id: "dev_local" },
       payload: {
         task_id: "mytest",
-        workspace_path: "/home/choco/Downloads/pocket-studio",
+        workspace_path: projectRoot,
         agent: "opencode",
         agent_runtime: "acpx",
         prompt: "hello",

@@ -4,6 +4,8 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#)
 
+![Pocket Studio Demo](demo.jpg)
+
 Pocket Studio 是一个专为开发者打造的**远程 AI 编程工作台**。它将运行于浏览器或桌面端的 Studio UI、部署于中继站的 Server，以及运行在真实开发机上的 Daemon（守护进程）有机连接。旨在让你通过统一而精致的界面，轻松管理分布在多台机器上的多个项目目录，并调用本地已安装的高性能 AI 编程工具与命令行 Agent。
 
 核心思路很简单：
@@ -78,11 +80,11 @@ flowchart TD
 
 | 组件 | 对应源码目录 | 说明 |
 | --- | --- | --- |
-| Server | [cmd/server](file:///home/choco/Downloads/remote-agent/cmd/server/main.go) | HTTP 服务、用户注册与登录、Token 认证、WebSocket Hub、SPA 静态资源托管 |
-| Daemon | [cmd/daemon](file:///home/choco/Downloads/remote-agent/cmd/daemon/main.go) | 连接 Server，启动 Direct Terminal 与 Hook 监听，执行 ACP/ACPX/Claude Code 进程，管理文件系统 |
-| Studio 前端 | [studio-frontend](file:///home/choco/Downloads/remote-agent/studio-frontend) | 基于 React + TS + Vite 的主工作台 UI，包含 Electron 桌面端外壳 |
-| 用户前端 | [user-frontend](file:///home/choco/Downloads/remote-agent/user-frontend) | 基于 React 的登录、注册和 API 令牌（Tokens）管理后台 |
-| 协议定义 | [internal/protocol](file:///home/choco/Downloads/remote-agent/internal/protocol) | 统一的消息结构、Envelope 定义以及直连 Token 签名算法 |
+| Server | [cmd/server](cmd/server/main.go) | HTTP 服务、用户注册与登录、Token 认证、WebSocket Hub、SPA 静态资源托管 |
+| Daemon | [cmd/daemon](cmd/daemon/main.go) | 连接 Server，启动 Direct Terminal 与 Hook 监听，执行 ACP/ACPX/Claude Code 进程，管理文件系统 |
+| Studio 前端 | [studio-frontend](studio-frontend) | 基于 React + TS + Vite 的主工作台 UI，包含 Electron 桌面端外壳 |
+| 用户前端 | [user-frontend](user-frontend) | 基于 React 的登录、注册和 API 令牌（Tokens）管理后台 |
+| 协议定义 | [internal/protocol](internal/protocol) | 统一的消息结构、Envelope 定义以及直连 Token 签名算法 |
 
 ---
 
@@ -142,7 +144,7 @@ flowchart TD
 ## 从源码开发与构建
 
 ### 1. 环境准备
-- **Go**: 1.26.3+ (详见 [go.mod](file:///home/choco/Downloads/remote-agent/go.mod))
+- **Go**: 1.26.3+ (详见 [go.mod](go.mod))
 - **Node.js**: 24+ & **npm**
 - 开发机上已全局安装需要调用的 Agent CLI（如 `claude`、`acpx` 或相关的 npm 模块）
 
@@ -188,7 +190,7 @@ go build -trimpath -ldflags="-s -w" -o ./daemon ./cmd/daemon
 ```
 
 > [!TIP]
-> 您也可以使用 [scripts/build-packages.sh](file:///home/choco/Downloads/remote-agent/scripts/build-packages.sh) 自动化脚本快速打包特定平台（如 `linux`、`mac`、`win`）的发布介质：
+> 您也可以使用 [scripts/build-packages.sh](scripts/build-packages.sh) 自动化脚本快速打包特定平台（如 `linux`、`mac`、`win`）的发布介质：
 > ```bash
 > bash scripts/build-packages.sh linux
 > ```
@@ -209,7 +211,7 @@ go build -trimpath -ldflags="-s -w" -o ./daemon ./cmd/daemon
 
 ### Daemon 参数
 
-详细配置结构及类型定义可以参考 [internal/daemon/config.go](file:///home/choco/Downloads/remote-agent/internal/daemon/config.go)。
+详细配置结构及类型定义可以参考 [internal/daemon/config.go](internal/daemon/config.go)。
 
 | 参数命令行 Flag | 默认值 / 机制 | 说明 |
 | --- | --- | --- |
@@ -236,9 +238,9 @@ go build -trimpath -ldflags="-s -w" -o ./daemon ./cmd/daemon
 
 ## 配置文件示例 `agentbridge.daemon.json`
 
-除了在启动命令行传入参数外，您也可以在 [internal/daemon/daemon.go](file:///home/choco/Downloads/remote-agent/internal/daemon/daemon.go) 的配置目录下创建并维护 JSON 配置文件（默认路径在 `~/.config/pocket-studio/`，支持通过 `POCKET_STUDIO_DAEMON_CONFIG_DIR` 环境变量自定义）。
+除了在启动命令行传入参数外，您也可以在 Daemon 的配置目录下创建并维护 JSON 配置文件（默认路径在 `~/.config/pocket-studio/`，支持通过 `POCKET_STUDIO_DAEMON_CONFIG_DIR` 环境变量自定义，代码逻辑参考 [internal/daemon/daemon.go](internal/daemon/daemon.go) 中的 `daemonConfigDir` 函数）。
 
-以下是包含所有高级特性配置字段的完整示例（参考本地的 [agentbridge.daemon.json](file:///home/choco/Downloads/remote-agent/agentbridge.daemon.json)）：
+以下是包含所有高级特性配置字段的完整示例（参考本地的 [agentbridge.daemon.json](agentbridge.daemon.json)）：
 
 ```json
 {
@@ -316,7 +318,7 @@ go build -trimpath -ldflags="-s -w" -o ./daemon ./cmd/daemon
 ### 1. 直连终端 (Direct Terminal Mode) 认证流程
 1. **握手与上报**：Daemon 启动后，向 Server 上报自己的直连配置（包含 `PublicHost` 和 `ListenAddr`，以及生成的 Direct Token）。
 2. **分发**：当 Studio UI 选择连接此设备的项目时，从 Server 获取项目详情，并在详情中获取该直连端点（Direct Endpoint）的地址与临时 Token。
-3. **连接验证**：Studio UI 开启 WebSocket 直连此端点。Daemon 在 `/ws/terminal` 握手阶段，提取 URL 查询参数中的 `token`，通过 [VerifyDirectTerminalToken](file:///home/choco/Downloads/remote-agent/internal/protocol/direct_token.go#L29) 进行校验。
+3. **连接验证**：Studio UI 开启 WebSocket 直连此端点。Daemon 在 `/ws/terminal` 握手阶段，提取 URL 查询参数中的 `token`，通过 [VerifyDirectTerminalToken](internal/protocol/direct_token.go#L29) 进行校验。
 4. **安全特性**：直连 Token 基于 HMAC-SHA256 签名，且包含 Unix 时间戳过期机制（基于安全密钥与当前时间动态校验），即使在局域网内广播也无须担心 Token 泄漏被滥用。
 
 ### 2. 终端 Agent 自动化 Hook (Hook Server)

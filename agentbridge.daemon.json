@@ -45,7 +45,7 @@
     {
       "id": "pocket-studio",
       "name": "pocket-studio",
-      "path": "/home/choco/Downloads/pocket-studio"
+      "path": "/path/to/pocket-studio"
     }
   ]
 }
