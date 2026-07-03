@@ -605,6 +605,22 @@ export function XtermInstance({
         return `./${filename}`;
       };
 
+      const safePaste = (text: string) => {
+        if (!term) return;
+        if (text.includes("\n") || text.includes("\r")) {
+          const isBracketedPaste = term.modes?.bracketedPasteMode || false;
+          if (!isBracketedPaste) {
+            const confirmPaste = window.confirm(
+              "检测到您粘贴的内容包含多行，直接粘贴可能会导致命令立即执行。\n\n是否确认继续粘贴？"
+            );
+            if (!confirmPaste) {
+              return;
+            }
+          }
+        }
+        term.paste(text);
+      };
+
       const handleCopyPasteShortcut = (event: KeyboardEvent) => {
         if (!isActiveRef.current) return;
         if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
@@ -661,19 +677,19 @@ export function XtermInstance({
               }
               if (navigator.clipboard.readText) {
                 void navigator.clipboard.readText().then((text) => {
-                  if (text) term?.paste(text);
+                  if (text) safePaste(text);
                 }).catch(() => {});
               }
             }).catch(() => {
               if (navigator.clipboard.readText) {
                 void navigator.clipboard.readText().then((text) => {
-                  if (text) term?.paste(text);
+                  if (text) safePaste(text);
                 }).catch(() => {});
               }
             });
           } else if (navigator.clipboard?.readText) {
             void navigator.clipboard.readText().then((text) => {
-              if (text) term?.paste(text);
+              if (text) safePaste(text);
             }).catch(() => {});
           }
         }
@@ -684,7 +700,7 @@ export function XtermInstance({
         if (text) {
           event.preventDefault();
           event.stopPropagation();
-          term?.paste(text);
+          safePaste(text);
           return;
         }
         const items = event.clipboardData?.items;
