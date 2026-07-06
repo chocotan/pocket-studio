@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Brain,
   CheckCircle2,
@@ -67,6 +67,15 @@ export function WorkingStatus({ elapsedMs }: { elapsedMs: number }) {
         ))}
       </span>
       <span className="ml-1.5 text-primary/80">{formatElapsedMs(elapsedMs)}</span>
+    </div>
+  );
+}
+
+export function RunDurationStatus({ elapsedMs }: { elapsedMs: number }) {
+  return (
+    <div className="px-1 py-1 text-[11px] font-semibold text-muted-foreground select-none">
+      <span>Worked for</span>
+      <span className="ml-1.5 text-muted-foreground/80">{formatElapsedMs(elapsedMs)}</span>
     </div>
   );
 }
@@ -180,6 +189,33 @@ function describeToolCall(item: AgentToolCallItem) {
     action = "tool";
   }
   return { icon: Wrench, accent: "slate", action, target: target || item.title || "查看详情" };
+}
+
+function readableToolOutput(output: AgentToolCallItem["output"]) {
+  if (!output) return "";
+  if (typeof output === "string") {
+    const trimmed = output.trim();
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (parsed && typeof parsed === "object") {
+          const text = parsed.text ?? parsed.output ?? parsed.result;
+          if (typeof text === "string") return text;
+          if (parsed.content) {
+            return stringifyValue(parsed.content);
+          }
+        }
+      } catch {
+        return output;
+      }
+    }
+    return output;
+  }
+  try {
+    return JSON.stringify(output, null, 2);
+  } catch {
+    return String(output);
+  }
 }
 
 export function ToolCallGroup({ items, nowMs }: { items: ChatMessage[]; nowMs: number }) {
@@ -308,22 +344,18 @@ export function extractSubagent(item: AgentToolCallItem) {
 }
 
 export function SubagentEntry({ item, nowMs }: { item: { description: string; subagentType: string; output: unknown; status?: string; createdAt: string }; nowMs: number }) {
-  const [open, setOpen] = useState(false);
   const isDone = item.status === "completed" || item.status === "success";
   const isFailed = item.status === "failed" || item.status === "error";
+  const isRunning = !isDone && !isFailed;
+  const [open, setOpen] = useState(isRunning);
 
   const resultText = useMemo(() => {
-    if (!item.output) return "";
-    if (typeof item.output === "string") return item.output;
-    const rec = getRecord(item.output);
-    if (rec && typeof rec.text === "string") return rec.text;
-    if (rec && typeof rec.content === "string") return rec.content;
-    try {
-      return JSON.stringify(item.output, null, 2);
-    } catch {
-      return String(item.output);
-    }
+    return readableToolOutput(item.output);
   }, [item.output]);
+
+  useEffect(() => {
+    if (isRunning) setOpen(true);
+  }, [isRunning, resultText]);
 
   const elapsed = useMemo(() => {
     const start = new Date(item.createdAt).getTime();
@@ -343,12 +375,18 @@ export function SubagentEntry({ item, nowMs }: { item: { description: string; su
         <span className="shrink-0 font-medium">{item.subagentType || "子代理"}</span>
         <span className="min-w-0 truncate text-muted-foreground/60">{item.description}</span>
         {elapsed && <span className="shrink-0 text-muted-foreground/50">{elapsed}</span>}
-        {resultText && <ChevronDown className={`h-3 w-3 shrink-0 text-muted-foreground/45 transition-transform ml-auto ${open ? "" : "-rotate-90"}`} />}
+        {isRunning && (
+          <span className="relative flex h-2 w-2 shrink-0">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/70 opacity-75" />
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-primary" />
+          </span>
+        )}
+        <ChevronDown className={`h-3 w-3 shrink-0 text-muted-foreground/45 transition-transform ml-auto ${open ? "" : "-rotate-90"}`} />
       </button>
-      {open && resultText && (
+      {open && (
         <div className="ml-5 mt-0.5 border-l border-border/60 pl-2.5">
           <div className="max-h-48 overflow-y-auto rounded-md bg-muted/35 p-2 text-[10.5px] text-muted-foreground whitespace-pre-wrap select-text">
-            {resultText}
+            {resultText || (isRunning ? "等待子代理输出..." : "无输出")}
           </div>
         </div>
       )}
@@ -426,15 +464,7 @@ export function ToolCallCard({ item, nowMs }: { item: AgentToolCallItem; nowMs: 
     }
   }, [item.input]);
 
-  const readableOutput = useMemo(() => {
-    if (!item.output) return "";
-    if (typeof item.output === "string") return item.output;
-    try {
-      return JSON.stringify(item.output, null, 2);
-    } catch {
-      return String(item.output);
-    }
-  }, [item.output]);
+  const readableOutput = readableToolOutput(item.output);
 
   const description = useMemo(() => describeToolCall(item), [item]);
   const accent = toolAccentClasses[description.accent as keyof typeof toolAccentClasses];

@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Settings,
   Keyboard,
+  Pencil,
 } from "lucide-react";
 import type { Device } from "../../lib/types";
 import { clearClientConfig, loadClientConfig, postJSON, saveClientConfig, type ClientConfig } from "../../lib/api";
@@ -105,6 +106,10 @@ export function StudioDashboard({
   const [savingSettings, setSavingSettings] = useState(false);
   const [validatingSettings, setValidatingSettings] = useState(false);
   const [switchingLocalMode, setSwitchingLocalMode] = useState(false);
+  const [aliasDevice, setAliasDevice] = useState<Device | null>(null);
+  const [aliasValue, setAliasValue] = useState("");
+  const [savingAlias, setSavingAlias] = useState(false);
+  const [aliasError, setAliasError] = useState("");
 
   const [dialogDeviceId, setDialogDeviceId] = useState("");
 
@@ -195,6 +200,32 @@ export function StudioDashboard({
     setCreateOpen(true);
   }
 
+  function openAliasDialog(device: Device) {
+    setAliasDevice(device);
+    setAliasValue(deviceDisplayName(device, device.id));
+    setAliasError("");
+  }
+
+  async function handleSaveAlias(e: React.FormEvent) {
+    e.preventDefault();
+    if (!aliasDevice) return;
+    setSavingAlias(true);
+    setAliasError("");
+    try {
+      await postJSON<{ success: boolean; device_name: string }>("/api/device/alias", {
+        device_id: aliasDevice.id,
+        alias: aliasValue.trim(),
+      });
+      setAliasDevice(null);
+      setAliasValue("");
+      onRefreshProjects();
+    } catch (err) {
+      setAliasError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingAlias(false);
+    }
+  }
+
   async function handleSaveSettings(e: React.FormEvent) {
     e.preventDefault();
     setSavingSettings(true);
@@ -260,15 +291,15 @@ export function StudioDashboard({
       className="studio-square theme-light flex h-dvh w-dvw flex-col overflow-hidden bg-background text-foreground font-sans"
       style={{ fontFamily: "var(--font-sans)" }}
     >
-      <header className="shrink-0 h-11 bg-white/95 border-b border-slate-200/70 flex items-center justify-between px-4 z-50 shadow-sm">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="h-6 w-6 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-500/25 flex-shrink-0">
-            <span className="text-white font-black text-[10px] leading-none">P</span>
+      <header className="shrink-0 h-9 bg-white/95 border-b border-slate-200/70 flex items-center justify-between px-3 z-50 shadow-sm">
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="h-5 w-5 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-500/25 flex-shrink-0">
+            <span className="text-white font-black text-[9px] leading-none">P</span>
           </div>
           <span className="font-bold text-slate-800 text-xs tracking-tight">Pocket Studio</span>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <NotificationCenter
             notifications={notifications}
             open={notificationCenterOpen}
@@ -290,26 +321,26 @@ export function StudioDashboard({
           <button
             type="button"
             onClick={onRefreshProjects}
-            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            className="p-1 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
             title="刷新设备和项目"
           >
-            <RefreshCw className="h-4 w-4" />
+            <RefreshCw className="h-3.5 w-3.5" />
           </button>
           <button
             type="button"
             onClick={() => setShortcutSettingsOpen(true)}
-            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            className="p-1 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
             title="快捷键设置"
           >
-            <Keyboard className="h-4 w-4" />
+            <Keyboard className="h-3.5 w-3.5" />
           </button>
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
-            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            className="p-1 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
             title="配置服务端地址"
           >
-            <Settings className="h-4 w-4" />
+            <Settings className="h-3.5 w-3.5" />
           </button>
         </div>
       </header>
@@ -351,32 +382,45 @@ export function StudioDashboard({
                     const online = device.workspaces !== undefined;
                     const projectCount = projects.filter((project) => project.device_id === device.id).length;
                     return (
-                      <button
+                      <div
                         key={device.id}
-                        type="button"
-                        onClick={() => setSelectedDeviceId(device.id)}
                         className={`group grid w-full grid-cols-[1.75rem_1fr_auto] items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors cursor-pointer ${
                           isSelected
                             ? "border-indigo-200 bg-indigo-50 text-slate-900"
                             : "border-transparent text-slate-600 hover:border-slate-200 hover:bg-slate-50"
                         }`}
                       >
-                        <span className={`flex h-7 w-7 items-center justify-center rounded-md ${
-                          isSelected ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 group-hover:bg-white"
-                        }`}>
-                          <Server className="h-3.5 w-3.5" />
-                        </span>
-                        <span className="min-w-0">
-                          <span className="block truncate text-xs font-bold">{device.name || device.id}</span>
-                          <span className="mt-0.5 block truncate text-[9px] text-slate-400">
-                            {device.workspaces?.length || 0} 个工作区
+                        <button
+                          type="button"
+                          onClick={() => setSelectedDeviceId(device.id)}
+                          className="contents text-left"
+                        >
+                          <span className={`flex h-7 w-7 items-center justify-center rounded-md ${
+                            isSelected ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 group-hover:bg-white"
+                          }`}>
+                            <Server className="h-3.5 w-3.5" />
                           </span>
-                        </span>
-                        <span className="flex flex-col items-end gap-1">
+                          <span className="min-w-0">
+                            <span className="block truncate text-xs font-bold">{deviceDisplayName(device, device.id)}</span>
+                            <span className="mt-0.5 block truncate text-[9px] text-slate-400">
+                              {device.workspaces?.length || 0} 个工作区
+                            </span>
+                          </span>
+                        </button>
+                        <span className="flex items-center gap-1">
                           <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-emerald-500" : "bg-slate-300"}`} />
                           <span className="font-mono text-[9px] font-bold text-slate-400">{projectCount}</span>
+                          <button
+                            type="button"
+                            onClick={() => openAliasDialog(device)}
+                            className="flex h-5 w-5 items-center justify-center rounded text-slate-400 opacity-0 transition-opacity hover:bg-white hover:text-slate-700 group-hover:opacity-100 focus:opacity-100"
+                            title="编辑设备别名"
+                            aria-label="编辑设备别名"
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </button>
                         </span>
-                      </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -677,6 +721,62 @@ export function StudioDashboard({
                 className="text-xs h-9 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow shadow-indigo-500/20 font-semibold cursor-pointer"
               >
                 {savingSettings ? "保存中..." : "保存"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(aliasDevice)} onOpenChange={(open) => {
+        if (!open) {
+          setAliasDevice(null);
+          setAliasError("");
+        }
+      }}>
+        <DialogContent className="max-w-sm p-0 overflow-hidden border-slate-200/80 shadow-2xl rounded-2xl animate-scale-in">
+          <DialogHeader className="px-6 py-4 bg-slate-50 border-b border-slate-100">
+            <DialogTitle className="text-sm font-bold text-slate-800 flex items-center gap-2">
+              <div className="h-6.5 w-6.5 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center">
+                <Server className="h-3.5 w-3.5 text-indigo-600" />
+              </div>
+              编辑设备别名
+            </DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSaveAlias} className="p-6 space-y-4">
+            {aliasError && (
+              <div className="bg-rose-50 text-rose-600 rounded-xl p-3.5 border border-rose-100 text-xs font-semibold">
+                {aliasError}
+              </div>
+            )}
+            <div className="space-y-1.5">
+              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                设备别名
+              </Label>
+              <Input
+                value={aliasValue}
+                onChange={(e) => setAliasValue(e.target.value)}
+                placeholder={aliasDevice?.id || "设备别名"}
+                className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 h-9"
+                autoFocus
+              />
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                留空会恢复为 Daemon 自动上报的设备名称。
+              </p>
+            </div>
+            <DialogFooter className="pt-3 flex justify-end gap-2 border-t border-slate-100">
+              <DialogClose
+                type="button"
+                className="inline-flex items-center justify-center text-xs rounded-xl border border-slate-250 text-slate-600 hover:text-slate-800 hover:bg-slate-50 px-4 h-9 font-semibold transition-colors cursor-pointer"
+              >
+                取消
+              </DialogClose>
+              <Button
+                type="submit"
+                size="sm"
+                disabled={savingAlias}
+                className="text-xs h-9 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow shadow-indigo-500/20 font-semibold cursor-pointer"
+              >
+                {savingAlias ? "保存中..." : "保存"}
               </Button>
             </DialogFooter>
           </form>

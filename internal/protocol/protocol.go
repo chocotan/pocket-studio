@@ -30,6 +30,7 @@ const (
 	TypeWorkspaceResult      = "workspace.result"
 	TypeProjectCreate        = "project.create"
 	TypeProjectDelete        = "project.delete"
+	TypeDeviceAliasSet       = "device.alias.set"
 	TypeProjectStateGet      = "project.state.get"
 	TypeProjectStateSet      = "project.state.set"
 	TypeProjectResult        = "project.result"
@@ -82,7 +83,7 @@ type DaemonHello struct {
 	DaemonVersion  string            `json:"daemon_version"`
 	Agent          string            `json:"agent,omitempty"`
 	AgentLabel     string            `json:"agent_label,omitempty"`
-	Agents         []AgentCapability `json:"agents,omitempty"`
+	Agents         []AgentCapability `json:"agents"`
 	Workspaces     []Workspace       `json:"workspaces"`
 	Features       []string          `json:"features,omitempty"`
 	DirectEndpoint *DirectEndpoint   `json:"direct_endpoint,omitempty"`
@@ -112,6 +113,7 @@ type DaemonHeartbeat struct {
 type TaskDispatch struct {
 	RequestID       string      `json:"request_id,omitempty"`
 	TaskID          string      `json:"task_id"`
+	TurnID          string      `json:"turn_id,omitempty"`
 	WorkspaceID     string      `json:"workspace_id,omitempty"`
 	WorkspacePath   string      `json:"workspace_path"`
 	Agent           string      `json:"agent"`
@@ -292,6 +294,20 @@ type ProjectResult struct {
 	Project   *Project        `json:"project,omitempty"`
 	State     json.RawMessage `json:"state,omitempty"`
 	Error     string          `json:"error,omitempty"`
+}
+
+type DeviceAliasSetRequest struct {
+	RequestID string `json:"request_id"`
+	DeviceID  string `json:"device_id"`
+	Alias     string `json:"alias"`
+}
+
+type DeviceAliasResult struct {
+	RequestID  string `json:"request_id"`
+	DeviceID   string `json:"device_id,omitempty"`
+	DeviceName string `json:"device_name,omitempty"`
+	Alias      string `json:"alias,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 type FileEntry struct {

@@ -19,6 +19,7 @@ export interface ChatMessage {
   createdAt: string;
   durationMs?: number;
   streamId?: string;
+  turnId?: string;
   toolCall?: AgentToolCallItem;
 }
 

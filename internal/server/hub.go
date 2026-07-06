@@ -129,7 +129,7 @@ type DeviceView struct {
 	Status     string                     `json:"status"`
 	Agent      string                     `json:"agent,omitempty"`
 	AgentLabel string                     `json:"agent_label,omitempty"`
-	Agents     []protocol.AgentCapability `json:"agents,omitempty"`
+	Agents     []protocol.AgentCapability `json:"agents"`
 	LastSeenAt int64                      `json:"last_seen_at"`
 	Workspaces []protocol.Workspace       `json:"workspaces"`
 	Features   []string                   `json:"features,omitempty"`
@@ -514,6 +514,36 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if r.URL.Path == "/api/device/alias" && r.Method == http.MethodPost {
+		var req struct {
+			DeviceID string `json:"device_id"`
+			Alias    string `json:"alias"`
+		}
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		if strings.TrimSpace(req.DeviceID) == "" {
+			writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "device_id is required"})
+			return
+		}
+		requestID := protocol.NewID("req")
+		env, err := h.requestDaemonForDevice(r, req.DeviceID, protocol.TypeDeviceAliasSet, "", requestID, protocol.DeviceAliasSetRequest{
+			RequestID: requestID,
+			DeviceID:  req.DeviceID,
+			Alias:     req.Alias,
+		})
+		if writeDeviceAliasResult(w, env, err, func(result protocol.DeviceAliasResult) {
+			h.mu.Lock()
+			if dc := h.daemons[daemonKey(userID, req.DeviceID)]; dc != nil {
+				dc.deviceName = result.DeviceName
+				dc.lastSeen = time.Now()
+			}
+			h.mu.Unlock()
+		}) {
+			h.broadcastToUser(userID, protocol.NewEnvelope("server.state", "server", h.stateView(userID)))
+		}
+		return
+	}
 	if r.URL.Path == "/api/project/direct-mode" && r.Method == http.MethodPost {
 		var req struct {
 			ProjectID  string `json:"project_id"`
@@ -819,6 +849,9 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 		if err != nil {
 			return serverErrorForEnvelope(env, "bad_payload", err.Error()), false
 		}
+		if task.TurnID == "" {
+			task.TurnID = protocol.NewID("turn")
+		}
 		deviceID := env.To.DeviceID
 		if deviceID == "" {
 			return serverErrorForTaskDispatch(task, "missing_device", "task.dispatch requires to.device_id"), false
@@ -839,6 +872,7 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 			h.broadcastToTask(userID, task.TaskID, forwardEvent)
 		}
 		forward := env
+		forward.Payload = MarshalPayload(task)
 		forward.From = "server"
 		if forward.ID == "" {
 			forward.ID = protocol.NewID("msg")
@@ -953,9 +987,9 @@ func (h *Hub) prepareTaskDispatchRecordLocked(userID string, deviceID string, ta
 		EventID:   protocol.NewID("evt"),
 		EventType: "user.prompt",
 		Source:    "web",
-		Sequence:  int64(len(record.Events) + 1),
+		Sequence:  nextTaskEventSequence(record.Events, 0),
 		Timestamp: now,
-		Data:      MarshalPayload(map[string]string{"prompt": task.Prompt}),
+		Data:      MarshalPayload(map[string]string{"prompt": task.Prompt, "turn_id": task.TurnID}),
 	}
 	record.Events = append(record.Events, userEvent)
 	h.taskRecords[scopedKey(userID, task.TaskID)] = record
@@ -1369,7 +1403,7 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 				_ = wc.conn.Close()
 			}
 		}
-	case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult, protocol.TypeProjectResult:
+	case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult, protocol.TypeProjectResult, protocol.TypeDeviceAliasSet:
 		if h.resolvePending(dc.userID, env) {
 			return
 		}
@@ -1697,6 +1731,9 @@ func (h *Hub) requestDaemonForDevice(r *http.Request, deviceID string, messageTy
 			typed.RequestID = requestID
 			payload = typed
 		case protocol.ProjectCreateRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.DeviceAliasSetRequest:
 			typed.RequestID = requestID
 			payload = typed
 		case protocol.ProjectStateGetRequest:
@@ -2063,6 +2100,32 @@ func writeProjectResult(w http.ResponseWriter, env protocol.Envelope, err error,
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
+func writeDeviceAliasResult(w http.ResponseWriter, env protocol.Envelope, err error, onResult func(protocol.DeviceAliasResult)) bool {
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "daemon_request_failed", Message: err.Error()})
+		return false
+	}
+	result, decodeErr := protocol.DecodePayload[protocol.DeviceAliasResult](env)
+	if decodeErr != nil {
+		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "bad_daemon_payload", Message: decodeErr.Error()})
+		return false
+	}
+	if result.Error != "" {
+		writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "device_alias_failed", Message: result.Error})
+		return false
+	}
+	if onResult != nil {
+		onResult(result)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":     true,
+		"device_id":   result.DeviceID,
+		"device_name": result.DeviceName,
+		"alias":       result.Alias,
+	})
+	return true
+}
+
 func writeProjectStateResult(w http.ResponseWriter, env protocol.Envelope, err error) {
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "daemon_request_failed", Message: err.Error()})
@@ -2151,6 +2214,14 @@ func mergeTaskRecordEvents(base []protocol.TaskEvent, extra []protocol.TaskEvent
 }
 
 func hasTaskEventSignature(events []protocol.TaskEvent, event protocol.TaskEvent) bool {
+	if !isContentEvent(event.EventType) {
+		for _, existing := range events {
+			if existing.EventType == event.EventType && existing.Sequence == event.Sequence {
+				return true
+			}
+		}
+		return false
+	}
 	signature := taskEventSignature(event)
 	for _, existing := range events {
 		if taskEventSignature(existing) == signature {
@@ -2160,7 +2231,23 @@ func hasTaskEventSignature(events []protocol.TaskEvent, event protocol.TaskEvent
 	return false
 }
 
+func isContentEvent(eventType string) bool {
+	return eventType == "user.prompt" ||
+		eventType == "assistant.message" ||
+		eventType == "assistant.thinking" ||
+		eventType == "tool.call" ||
+		eventType == "tool.output"
+}
+
 func taskEventSignature(event protocol.TaskEvent) string {
+	if event.EventType == "user.prompt" {
+		if turnID := taskEventTurnID(event); turnID != "" {
+			return event.EventType + ":turn:" + turnID
+		}
+		if event.EventID != "" {
+			return event.EventType + ":id:" + event.EventID
+		}
+	}
 	if len(event.Data) > 0 {
 		return event.EventType + ":" + string(event.Data)
 	}
@@ -2168,6 +2255,31 @@ func taskEventSignature(event protocol.TaskEvent) string {
 		return event.EventType + ":" + string(event.Raw)
 	}
 	return fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID)
+}
+
+func taskEventTurnID(event protocol.TaskEvent) string {
+	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
+		if len(raw) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(raw, &data); err != nil {
+			continue
+		}
+		if turnID := stringFromMap(data, "turn_id", "turnId"); turnID != "" {
+			return turnID
+		}
+	}
+	return ""
+}
+
+func stringFromMap(source map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := source[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func statusFromEvent(eventType, fallback string) string {
@@ -2412,6 +2524,16 @@ func initialTerminalTitle(command string) string {
 		return "Claude Code"
 	case strings.Contains(command, "codex"):
 		return "Codex"
+	case command == "qwen" || strings.HasPrefix(command, "qwen "):
+		return "Qwen Code"
+	case command == "kimi" || strings.HasPrefix(command, "kimi "):
+		return "Kimi"
+	case command == "copilot" || strings.HasPrefix(command, "copilot "):
+		return "GitHub Copilot"
+	case command == "cursor-agent" || strings.HasPrefix(command, "cursor-agent ") || command == "cursor" || strings.HasPrefix(command, "cursor "):
+		return "Cursor Agent"
+	case strings.Contains(command, "openclaw"):
+		return "OpenClaw"
 	case strings.Contains(command, "opencode"):
 		return "OpenCode"
 	case strings.Contains(command, "kilo"):

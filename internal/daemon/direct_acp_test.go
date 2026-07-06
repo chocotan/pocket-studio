@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -197,6 +198,80 @@ rl.on("line", (line) => {
 	}
 	if got, want := string(raw), "resume:old-session\n"; got != want {
 		t.Fatalf("direct ACP restore calls = %q, want %q", got, want)
+	}
+}
+
+func TestDirectACPIgnoresTaskIDResumeSessionIDWhenRestoring(t *testing.T) {
+	dir := t.TempDir()
+	orderPath := filepath.Join(dir, "restore-order")
+	scriptPath := filepath.Join(dir, "fake-direct-acp-resume-task-id")
+	script := `#!/bin/sh
+node -e '
+const fs = require("fs");
+const readline = require("readline");
+const orderPath = process.env.ACP_ORDER_PATH;
+const rl = readline.createInterface({ input: process.stdin });
+function record(value) { fs.appendFileSync(orderPath, value + "\n"); }
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { sessionCapabilities: { resume: true } }
+    } }));
+  } else if (msg.method === "session/resume") {
+    record("resume:" + msg.params.sessionId);
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { sessionId: msg.params.sessionId } }));
+  } else if (msg.method === "session/new") {
+    record("new");
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "new-session" } }));
+  } else if (msg.method === "session/prompt") {
+    record("prompt:" + msg.params.sessionId);
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } }));
+  }
+});
+'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake direct acp: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.DirectACP.Enabled = true
+	cfg.DirectACP.Agents = map[string]DirectACPAgentConfig{
+		"opencode": {Command: scriptPath, Env: map[string]string{"ACP_ORDER_PATH": orderPath}},
+	}
+	d := New(cfg)
+	d.history["task-1"] = protocol.TaskRecord{
+		TaskID:        "task-1",
+		WorkspacePath: dir,
+		Agent:         "opencode",
+		AgentRuntime:  "direct_acp",
+		SessionName:   "task-1",
+		SessionID:     "old-session",
+	}
+
+	task := protocol.TaskDispatch{
+		TaskID:          "task-1",
+		WorkspacePath:   dir,
+		Agent:           "opencode",
+		AgentRuntime:    "direct_acp",
+		SessionName:     "task-1",
+		ResumeSessionID: "task-1",
+		Prompt:          "continue",
+	}
+	d.startDirectACPTask(context.Background(), task, protocol.Workspace{ID: "w", Path: dir})
+	defer d.deleteDirectACPSession("task-1")
+
+	raw, err := os.ReadFile(orderPath)
+	if err != nil {
+		t.Fatalf("read restore order: %v", err)
+	}
+	if got, want := string(raw), "resume:old-session\nprompt:old-session\n"; got != want {
+		t.Fatalf("direct ACP restore calls = %q, want %q", got, want)
+	}
+	if got := d.history["task-1"].SessionID; got != "old-session" {
+		t.Fatalf("record SessionID = %q, want provider session id", got)
 	}
 }
 
@@ -594,6 +669,149 @@ rl.on("line", (line) => {
 	}
 }
 
+func TestDirectACPStopThenDispatchResumesWithoutStaleTerminal(t *testing.T) {
+	dir := t.TempDir()
+	orderPath := filepath.Join(dir, "prompt-order")
+	scriptPath := filepath.Join(dir, "fake-direct-acp-stop-resume")
+	script := `#!/bin/sh
+node -e '
+const fs = require("fs");
+const readline = require("readline");
+const orderPath = process.env.ACP_ORDER_PATH;
+const rl = readline.createInterface({ input: process.stdin });
+function promptText(msg) {
+  return (((msg.params || {}).prompt || [])[0] || {}).text || "";
+}
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { sessionCapabilities: { resume: true } }
+    } }));
+  } else if (msg.method === "session/new") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "provider-session" } }));
+  } else if (msg.method === "session/resume") {
+    fs.appendFileSync(orderPath, "resume:" + msg.params.sessionId + "\n");
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { sessionId: msg.params.sessionId } }));
+  } else if (msg.method === "session/prompt") {
+    const text = promptText(msg);
+    fs.appendFileSync(orderPath, "prompt:" + msg.params.sessionId + ":" + text + "\n");
+    if (text === "first") {
+      return;
+    }
+    console.log(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: text + " done" } } } }));
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } }));
+  } else if (msg.method === "session/cancel") {
+    fs.appendFileSync(orderPath, "cancel:" + msg.params.sessionId + "\n");
+  }
+});
+'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake direct acp: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.DirectACP.Enabled = true
+	cfg.DirectACP.Agents = map[string]DirectACPAgentConfig{
+		"opencode": {Command: scriptPath, Env: map[string]string{"ACP_ORDER_PATH": orderPath}},
+	}
+	d := New(cfg)
+
+	baseTask := protocol.TaskDispatch{
+		TaskID:        "task-1",
+		WorkspacePath: dir,
+		Agent:         "opencode",
+		AgentRuntime:  "direct_acp",
+		SessionName:   "task-1",
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		task := baseTask
+		task.Prompt = "first"
+		d.startDirectACPTask(context.Background(), task, protocol.Workspace{ID: "w", Path: dir})
+	}()
+	waitForFileContains(t, orderPath, "prompt:provider-session:first", time.Second)
+	d.stopDirectACPTask("task-1")
+	d.mu.Lock()
+	activeAfterStop := d.directACP["task-1"]
+	runningAfterStop := d.tasks["task-1"]
+	d.mu.Unlock()
+	if activeAfterStop != nil || runningAfterStop != nil {
+		t.Fatalf("direct ACP stop left active session/task: session=%#v task=%#v", activeAfterStop, runningAfterStop)
+	}
+
+	task := baseTask
+	task.ResumeSessionID = "task-1"
+	task.Prompt = "second"
+	d.startDirectACPTask(context.Background(), task, protocol.Workspace{ID: "w", Path: dir})
+	defer d.deleteDirectACPSession("task-1")
+
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatalf("first direct ACP dispatch did not exit after stop")
+	}
+
+	raw, err := os.ReadFile(orderPath)
+	if err != nil {
+		t.Fatalf("read prompt order: %v", err)
+	}
+	logText := string(raw)
+	for _, want := range []string{
+		"prompt:provider-session:first\n",
+		"resume:provider-session\n",
+		"prompt:provider-session:second\n",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("direct ACP log = %q, missing %q", logText, want)
+		}
+	}
+
+	events := drainTaskEvents(d.send)
+	if !hasTaskEvent(events, "task.completed") {
+		t.Fatalf("direct ACP events missing second task.completed: %#v", events)
+	}
+	completedIndex := -1
+	staleTerminalAfterCompleted := false
+	for idx, event := range events {
+		if event.EventType == "task.completed" {
+			completedIndex = idx
+			continue
+		}
+		if completedIndex >= 0 && (event.EventType == "task.killed" || event.EventType == "task.failed") {
+			staleTerminalAfterCompleted = true
+		}
+	}
+	if staleTerminalAfterCompleted {
+		t.Fatalf("stale terminal event arrived after resumed completion: %#v", events)
+	}
+	if got := d.history["task-1"].SessionID; got != "provider-session" {
+		t.Fatalf("record SessionID = %q, want provider session id", got)
+	}
+}
+
+func TestProviderResumeSessionIDIgnoresTaskIDFromStoredHistory(t *testing.T) {
+	task := protocol.TaskDispatch{
+		TaskID:      "task-1",
+		SessionName: "task-1",
+	}
+	if got := providerResumeSessionID(task, "task-1"); got != "" {
+		t.Fatalf("providerResumeSessionID() = %q, want empty for task-id history value", got)
+	}
+	task.ResumeSessionID = "task-1"
+	if got := providerResumeSessionID(task, "provider-session"); got != "provider-session" {
+		t.Fatalf("providerResumeSessionID() = %q, want restored provider session", got)
+	}
+	task.ResumeSessionID = "explicit-provider-session"
+	if got := providerResumeSessionID(task, "provider-session"); got != "explicit-provider-session" {
+		t.Fatalf("providerResumeSessionID() = %q, want explicit provider session", got)
+	}
+}
+
 func TestDirectACPRespondsToAgentSessionUpdateRequest(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "fake-direct-acp-request")
@@ -742,6 +960,20 @@ func hasTaskEvent(events []protocol.TaskEvent, eventType string) bool {
 		}
 	}
 	return false
+}
+
+func waitForFileContains(t *testing.T, path string, text string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(raw), text) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	raw, _ := os.ReadFile(path)
+	t.Fatalf("%s did not contain %q before timeout; got %q", path, text, string(raw))
 }
 
 func stringSliceContains(values []string, target string) bool {

@@ -1,7 +1,8 @@
 {
   "device": {
     "id": "dev_local",
-    "name": ""
+    "name": "",
+    "alias": "My Workstation"
   },
   "server": {},
   "claude": {

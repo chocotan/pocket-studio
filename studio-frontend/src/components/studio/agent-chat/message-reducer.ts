@@ -31,9 +31,14 @@ type MessageState = {
   lastActivityStartedMs: number;
 };
 
-function userPromptTimestampMs(message: ChatMessage) {
-  const value = new Date(message.createdAt).getTime();
-  return Number.isFinite(value) ? value : 0;
+function isLocalUserPromptMessage(message: ChatMessage) {
+  return message.kind === "user_prompt" && message.id.startsWith("local-user.prompt-");
+}
+
+function userPromptTurnID(evt: TaskEvent, dataPayload: EventRecord | undefined) {
+  if (typeof dataPayload?.turn_id === "string") return dataPayload.turn_id;
+  const raw = getMetadata(evt.raw);
+  return typeof raw?.turn_id === "string" ? raw.turn_id : "";
 }
 
 function cloneState(prev: MessageState): MessageState {
@@ -136,26 +141,25 @@ function finalizeOpenMessages(state: MessageState, evt: TaskEvent) {
 function applyUserPrompt(state: MessageState, evt: TaskEvent, dataPayload: EventRecord | undefined) {
   const prompt = String(dataPayload?.prompt || "");
   if (!prompt) return;
+  const turnID = userPromptTurnID(evt, dataPayload);
   const message: ChatMessage = {
     id: evt.event_id,
     seq: Number(evt.sequence),
     kind: "user_prompt",
     content: prompt,
     createdAt: new Date(evt.timestamp * 1000).toISOString(),
+    ...(turnID ? { turnId: turnID } : {}),
   };
   if (!evt.event_id.startsWith("local-user.prompt-")) {
-    const eventMs = evt.timestamp * 1000;
     const duplicateIndex = state.messages.findIndex((item) =>
-      item.kind === "user_prompt" &&
-      item.content === prompt &&
-      Math.abs(userPromptTimestampMs(item) - eventMs) < 10_000
+      isLocalUserPromptMessage(item) &&
+      turnID !== "" &&
+      item.turnId === turnID
     );
     if (duplicateIndex >= 0) {
       const previous = state.messages[duplicateIndex];
       state.byId.delete(state.messages[duplicateIndex].id);
-      state.messages[duplicateIndex] = previous.id.startsWith("local-user.prompt-")
-        ? { ...message, seq: previous.seq, createdAt: previous.createdAt }
-        : message;
+      state.messages[duplicateIndex] = { ...message, seq: previous.seq, createdAt: previous.createdAt };
       rebuildMessageIndex(state);
     } else {
       appendMessage(state, message);

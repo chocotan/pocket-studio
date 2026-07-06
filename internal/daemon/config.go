@@ -25,8 +25,9 @@ type Config struct {
 }
 
 type DeviceConfig struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Alias string `json:"alias,omitempty"`
 }
 
 type ServerConfig struct {
@@ -67,14 +68,18 @@ type DirectWebConfig struct {
 	Token      string `json:"token,omitempty"`
 }
 
+const ConfigFileName = "agentbridge.daemon.json"
+
 func NormalizeConfig(cfg Config) (Config, error) {
 	if strings.TrimSpace(cfg.Device.ID) == "" {
 		device, err := loadOrCreateDeviceConfig(cfg.Device.Name)
 		if err != nil {
 			return cfg, err
 		}
+		device.Alias = cfg.Device.Alias
 		cfg.Device = device
 	}
+	cfg.Device.Alias = strings.TrimSpace(cfg.Device.Alias)
 	cfg.Device.Name = hostinfo.ResolveDeviceName(cfg.Device.Name)
 	if strings.TrimSpace(cfg.Server.URL) == "" {
 		return cfg, fmt.Errorf("daemon.server.url is required")
@@ -135,6 +140,13 @@ func NormalizeConfig(cfg Config) (Config, error) {
 		cfg.Workspaces[i].Path = real
 	}
 	return cfg, nil
+}
+
+func (cfg Config) DisplayDeviceName() string {
+	if alias := strings.TrimSpace(cfg.Device.Alias); alias != "" {
+		return alias
+	}
+	return hostinfo.ResolveDeviceName(cfg.Device.Name)
 }
 
 func DefaultConfig() Config {
@@ -265,6 +277,38 @@ func saveDeviceConfig(device DeviceConfig) error {
 		return err
 	}
 	return nil
+}
+
+func ConfigFilePath() string {
+	return filepath.Join(daemonConfigDir(), ConfigFileName)
+}
+
+func LoadConfigFile() (Config, error) {
+	cfg := DefaultConfig()
+	path := ConfigFilePath()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return cfg, err
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return cfg, fmt.Errorf("%s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func SaveConfigFile(cfg Config) error {
+	path := ConfigFilePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(raw, '\n'), 0o600)
 }
 
 func randomDeviceID() string {

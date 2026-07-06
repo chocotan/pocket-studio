@@ -168,7 +168,7 @@ export function ProjectSwitcher({
           setOpen(true);
         }}
         className={cn(
-          "flex min-w-0 items-center gap-1.5 rounded-full border border-slate-200/60 bg-slate-100/80 px-2.5 py-0.5 text-[11px] text-slate-500 transition-colors hover:border-indigo-200 hover:bg-indigo-50/70 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 dark:border-slate-700/60 dark:bg-slate-800/50 dark:text-slate-400 dark:hover:border-indigo-800 dark:hover:bg-slate-800",
+          "flex h-6 min-w-0 items-center gap-1.5 rounded-full border border-slate-200/60 bg-slate-100/80 px-2 text-[11px] text-slate-500 transition-colors hover:border-indigo-200 hover:bg-indigo-50/70 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 dark:border-slate-700/60 dark:bg-slate-800/50 dark:text-slate-400 dark:hover:border-indigo-800 dark:hover:bg-slate-800",
           triggerClassName
         )}
         aria-label={triggerLabel}
@@ -277,7 +277,7 @@ export function ProjectNavMenu({
     >
       <div className="flex min-w-0 items-center gap-1 overflow-x-auto overscroll-x-contain">
         {projects.length === 0 ? (
-          <div className="flex h-7 items-center gap-1.5 rounded-md border border-dashed border-slate-200 px-2 text-[11px] font-semibold text-slate-400 dark:border-slate-800 dark:text-slate-500">
+          <div className="flex h-6 items-center gap-1.5 rounded-md border border-dashed border-slate-200 px-2 text-[11px] font-semibold text-slate-400 dark:border-slate-800 dark:text-slate-500">
             <Star className="h-3.5 w-3.5" />
             还没有收藏，点右上角「我的收藏」添加
           </div>
@@ -296,7 +296,7 @@ export function ProjectNavMenu({
                   onClick={() => onSelectProject(project.id)}
                   data-alert={alerting ? "true" : "false"}
                   className={cn(
-                    "studio-project-nav-item relative flex h-7 min-w-0 items-center gap-1.5 overflow-hidden rounded-md border px-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400",
+                    "studio-project-nav-item relative flex h-6 min-w-0 items-center gap-1.5 overflow-hidden rounded-md border px-1.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400",
                     selected
                       ? "border-indigo-200 bg-indigo-50 text-indigo-700 shadow-sm shadow-indigo-500/5 dark:border-indigo-900/70 dark:bg-indigo-950/35 dark:text-indigo-300"
                       : "border-transparent bg-slate-50/70 text-slate-600 hover:border-slate-200 hover:bg-white dark:bg-slate-900/45 dark:text-slate-400 dark:hover:border-slate-800 dark:hover:bg-slate-800/70"
@@ -305,7 +305,7 @@ export function ProjectNavMenu({
                   aria-current={selected ? "page" : undefined}
                 >
                   <span className={cn("relative z-10 h-1.5 w-1.5 shrink-0 rounded-full", online ? "bg-emerald-500" : "bg-slate-300 dark:bg-slate-600")} />
-                  <span className="relative z-10 flex min-w-0 max-w-[240px] items-center gap-1 text-[11px] leading-none">
+                  <span className="relative z-10 flex min-w-0 max-w-[220px] items-center gap-1 text-[11px] leading-none">
                     <span className="truncate font-semibold text-slate-500 dark:text-slate-400">
                       {deviceName}
                     </span>

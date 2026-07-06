@@ -51,6 +51,21 @@ func TestServerErrorForEnvelopeExtractsCorrelationFromBadPayload(t *testing.T) {
 	}
 }
 
+func TestInitialTerminalTitleDetectsAdditionalAgents(t *testing.T) {
+	tests := map[string]string{
+		"qwen --acp":            "Qwen Code",
+		"kimi acp":              "Kimi",
+		"copilot --acp --stdio": "GitHub Copilot",
+		"cursor-agent acp":      "Cursor Agent",
+		"openclaw acp":          "OpenClaw",
+	}
+	for command, want := range tests {
+		if got := initialTerminalTitle(command); got != want {
+			t.Fatalf("initialTerminalTitle(%q) = %q, want %q", command, got, want)
+		}
+	}
+}
+
 func TestTaskHistoryIsScopedByUserTask(t *testing.T) {
 	h := NewHub(auth.NewOpen(""))
 	now := int64(100)
@@ -169,6 +184,35 @@ func TestPrepareTaskDispatchRecordAddsUserPromptEvent(t *testing.T) {
 	}
 }
 
+func TestPrepareTaskDispatchRecordUsesNextAvailableSequence(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")] = protocol.TaskRecord{
+		TaskID: "task-1",
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "evt-user-1", EventType: "user.prompt", Sequence: 1},
+			{TaskID: "task-1", EventID: "evt-assistant-1", EventType: "assistant.message", Sequence: 42},
+		},
+	}
+	task := protocol.TaskDispatch{
+		TaskID:        "task-1",
+		WorkspaceID:   "project-1",
+		WorkspacePath: "/workspace",
+		Agent:         "codex",
+		SessionName:   "agent-task-1",
+		Prompt:        "follow up",
+	}
+
+	userEvent := h.prepareTaskDispatchRecordLocked(auth.OwnerAdmin, "device-1", task)
+
+	if userEvent.Sequence != 43 {
+		t.Fatalf("user prompt sequence = %d, want 43", userEvent.Sequence)
+	}
+	record := h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")]
+	if got := record.Events[len(record.Events)-1]; got.EventID != userEvent.EventID || got.Sequence != 43 {
+		t.Fatalf("last record event = %#v, want returned prompt with sequence 43", got)
+	}
+}
+
 func TestNextTaskEventSequenceAvoidsDuplicateAndZeroSequences(t *testing.T) {
 	events := []protocol.TaskEvent{
 		{TaskID: "task-1", EventID: "evt-user", Sequence: 1},
@@ -216,6 +260,35 @@ func TestMergeTaskRecordEventsDeduplicatesSameEventDataWithDifferentRaw(t *testi
 	}
 }
 
+func TestMergeTaskRecordEventsKeepsRepeatedUserPromptsWithoutTurnID(t *testing.T) {
+	data := json.RawMessage(`{"prompt":"again"}`)
+	base := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-user-1", EventType: "user.prompt", Sequence: 1, Data: data},
+	}
+	extra := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-user-2", EventType: "user.prompt", Sequence: 2, Data: data},
+	}
+
+	merged := mergeTaskRecordEvents(base, extra)
+	if len(merged) != 2 {
+		t.Fatalf("merged events = %#v, want both repeated user prompts", merged)
+	}
+}
+
+func TestMergeTaskRecordEventsDeduplicatesSameTurnUserPromptEcho(t *testing.T) {
+	base := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-server", EventType: "user.prompt", Sequence: 1, Data: json.RawMessage(`{"prompt":"again","turn_id":"turn-1"}`)},
+	}
+	extra := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-daemon", EventType: "user.prompt", Sequence: 2, Data: json.RawMessage(`{"prompt":"again","turn_id":"turn-1"}`)},
+	}
+
+	merged := mergeTaskRecordEvents(base, extra)
+	if len(merged) != 1 || merged[0].EventID != "evt-server" {
+		t.Fatalf("merged events = %#v, want one same-turn user prompt", merged)
+	}
+}
+
 func TestTaskEventEnvelopeCarriesNormalizedSequenceAndRawPayload(t *testing.T) {
 	raw := json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","rawInput":{"command":"df -h"}}}}`)
 	event := protocol.TaskEvent{
@@ -249,7 +322,7 @@ func TestHandleDaemonMessageDoesNotBroadcastDuplicateTaskEvent(t *testing.T) {
 		Source:    "web",
 		Sequence:  1,
 		Timestamp: 100,
-		Data:      []byte(`{"prompt":"debug duplicate prompt 1781804971820"}`),
+		Data:      []byte(`{"prompt":"debug duplicate prompt 1781804971820","turn_id":"turn-1"}`),
 	}
 	h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")] = protocol.TaskRecord{
 		TaskID: "task-1",
@@ -394,5 +467,64 @@ func TestProjectDirectModeAPIUpdatesVirtualDaemonWorkspaceProject(t *testing.T) 
 	}
 	if got.DirectEndpoint.Token == "secret" || !protocol.VerifyDirectTerminalToken("secret", "project-1", got.DirectEndpoint.Token, time.Now()) {
 		t.Fatalf("direct-mode API token is not scoped: %#v", got.DirectEndpoint)
+	}
+}
+
+func TestDeviceAliasAPIUpdatesDeviceName(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	send := make(chan protocol.Envelope, 1)
+	h.mu.Lock()
+	h.daemons[daemonKey(auth.OwnerAdmin, "dev-1")] = &daemonConn{
+		userID:     auth.OwnerAdmin,
+		deviceID:   "dev-1",
+		deviceName: "old-name",
+		send:       send,
+		lastSeen:   time.Unix(100, 0),
+	}
+	h.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/device/alias", strings.NewReader(`{"device_id":"dev-1","alias":"Desk Rig"}`))
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeAPI(res, req)
+		close(done)
+	}()
+
+	var forwarded protocol.Envelope
+	select {
+	case forwarded = <-send:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for daemon request")
+	}
+	if forwarded.Type != protocol.TypeDeviceAliasSet || forwarded.To.DeviceID != "dev-1" {
+		t.Fatalf("forwarded envelope = %#v", forwarded)
+	}
+	request, err := protocol.DecodePayload[protocol.DeviceAliasSetRequest](forwarded)
+	if err != nil {
+		t.Fatalf("decode forwarded payload: %v", err)
+	}
+	if request.Alias != "Desk Rig" || request.DeviceID != "dev-1" || request.RequestID == "" {
+		t.Fatalf("forwarded request = %#v", request)
+	}
+	h.handleDaemonMessage(h.daemons[daemonKey(auth.OwnerAdmin, "dev-1")], protocol.NewEnvelope(protocol.TypeDeviceAliasSet, "daemon", protocol.DeviceAliasResult{
+		RequestID:  request.RequestID,
+		DeviceID:   "dev-1",
+		DeviceName: "Desk Rig",
+		Alias:      "Desk Rig",
+	}))
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for API response")
+	}
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", res.Code, res.Body.String())
+	}
+	state := h.stateView(auth.OwnerAdmin)
+	if len(state.Devices) != 1 || state.Devices[0].Name != "Desk Rig" {
+		t.Fatalf("state devices = %#v, want updated alias", state.Devices)
 	}
 }

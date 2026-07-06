@@ -453,6 +453,9 @@ function terminalKindFromAgent(agent: unknown): TerminalKind | "" {
   if (normalized === "claude-code") return "claude";
   if (normalized === "kilocode" || normalized === "kilo-code") return "kilo";
   if (normalized === "antigravity") return "agy";
+  if (normalized === "github-copilot") return "copilot";
+  if (normalized === "cursor-agent") return "cursor";
+  if (normalized === "open-claw") return "openclaw";
   return isTerminalKind(normalized) ? normalized : "";
 }
 

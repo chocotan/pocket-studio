@@ -358,12 +358,13 @@ export function buildAgentToolCallItems(
     const deltaData = terminalDelta ? String(terminalDelta.data || "") : "";
 
     let nextOutput = existing?.output;
+    const appendOutput = shouldAppendToolOutput(update);
     if (deltaData) {
-      const currentTerminalOutput =
-        typeof existing?.output === "string" ? existing.output : "";
-      nextOutput = currentTerminalOutput + deltaData;
+      nextOutput = appendToolOutput(existing?.output, deltaData);
     } else if (hasToolValue(output)) {
-      if (typeof existing?.output === "string" && existing.output.trim()) {
+      if (appendOutput) {
+        nextOutput = appendToolOutput(existing?.output, output);
+      } else if (typeof existing?.output === "string" && existing.output.trim()) {
         // If we already have terminal output and the new output is just exit_code, append it or keep the terminal output
         if (output && typeof output === "object") {
           const outRecord = output as Record<string, unknown>;
@@ -542,6 +543,23 @@ function getToolCompletionTime(
   return undefined;
 }
 
+function shouldAppendToolOutput(record: Record<string, unknown> | null) {
+  if (!record) {
+    return false;
+  }
+  if (
+    record.append === true ||
+    record.isDelta === true ||
+    record.is_delta === true
+  ) {
+    return true;
+  }
+  return hasToolValue(record.outputDelta) ||
+    hasToolValue(record.output_delta) ||
+    hasToolValue(record.rawOutputDelta) ||
+    hasToolValue(record.raw_output_delta);
+}
+
 function getToolKind(record: Record<string, unknown> | null) {
   if (!record) {
     return undefined;
@@ -647,7 +665,16 @@ function getToolOutput(record: Record<string, unknown> | null): unknown {
   if (!record) {
     return undefined;
   }
-  for (const key of ["rawOutput", "raw_output", "output", "result"]) {
+  for (const key of [
+    "rawOutputDelta",
+    "raw_output_delta",
+    "outputDelta",
+    "output_delta",
+    "rawOutput",
+    "raw_output",
+    "output",
+    "result",
+  ]) {
     const output = simplifyToolOutput(record[key]);
     if (hasToolValue(output)) {
       return output;
@@ -742,6 +769,33 @@ function simplifyToolOutput(value: unknown): unknown {
     return undefined;
   }
   return record;
+}
+
+function appendToolOutput(existing: unknown, delta: unknown) {
+  const existingText = toolOutputText(existing);
+  const deltaText = toolOutputText(delta);
+  if (!existingText) {
+    return hasToolValue(deltaText) ? deltaText : delta;
+  }
+  if (!deltaText) {
+    return existing;
+  }
+  return existingText + deltaText;
+}
+
+function toolOutputText(value: unknown): string {
+  const simplified = simplifyToolOutput(value);
+  if (typeof simplified === "string") {
+    return simplified;
+  }
+  if (!hasToolValue(simplified)) {
+    return "";
+  }
+  try {
+    return JSON.stringify(simplified, null, 2);
+  } catch {
+    return String(simplified);
+  }
 }
 
 export function hasToolValue(value: unknown) {

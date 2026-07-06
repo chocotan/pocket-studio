@@ -1,13 +1,18 @@
 import { FolderTree, Terminal as TerminalIcon } from "lucide-react";
-import { TERMINAL_TYPES, type TerminalKind } from "./terminal-types";
+import type { Device } from "@/lib/types";
+import { availableTerminalTypes, type TerminalKind } from "./terminal-types";
 
 export function EmptyWorkspace({
+  device,
   onCreate,
   onCreateFileExplorer,
 }: {
+  device?: Device;
   onCreate: (kind: TerminalKind) => void;
   onCreateFileExplorer?: () => void;
 }) {
+  const terminalTypes = availableTerminalTypes(device);
+
   return (
     <div className="absolute inset-0 flex items-center justify-center border border-dashed border-slate-300 bg-white/70">
       <div className="w-full max-w-xl px-6 text-center">
@@ -29,7 +34,7 @@ export function EmptyWorkspace({
               <span className="truncate">文件</span>
             </button>
           )}
-          {TERMINAL_TYPES.map((item) => (
+          {terminalTypes.map((item) => (
             <button
               key={item.value}
               type="button"

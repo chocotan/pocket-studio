@@ -409,6 +409,33 @@ func TestOnlineTerminalCommandMapsToACPX(t *testing.T) {
 	}
 }
 
+func TestKnownTerminalTitlesForAdditionalAgents(t *testing.T) {
+	tests := []struct {
+		command string
+		title   string
+		agent   string
+	}{
+		{command: "qwen --acp", title: "Qwen Code", agent: "qwen"},
+		{command: "kimi acp", title: "Kimi", agent: "kimi"},
+		{command: "copilot --acp --stdio", title: "GitHub Copilot", agent: "copilot"},
+		{command: "cursor-agent acp", title: "Cursor Agent", agent: "cursor"},
+		{command: "openclaw acp", title: "OpenClaw", agent: "openclaw"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.agent, func(t *testing.T) {
+			if got := initialTerminalTitle(tt.command, ""); got != tt.title {
+				t.Fatalf("initialTerminalTitle(%q) = %q, want %q", tt.command, got, tt.title)
+			}
+			if got := terminalTitleFromPaneInfo("Shell", "/repo", tt.command); got != tt.title {
+				t.Fatalf("terminalTitleFromPaneInfo(Shell, %q) = %q, want %q", tt.command, got, tt.title)
+			}
+			if got := agentTerminalCommand(tt.command); got != tt.agent {
+				t.Fatalf("agentTerminalCommand(%q) = %q, want %q", tt.command, got, tt.agent)
+			}
+		})
+	}
+}
+
 func TestTerminalTitleFromPaneInfoUsesRuntimePaneFields(t *testing.T) {
 	if got := terminalTitleFromPaneInfo("nvim", "/repo", "nvim"); got != "nvim" {
 		t.Fatalf("terminalTitleFromPaneInfo() = %q, want pane title", got)

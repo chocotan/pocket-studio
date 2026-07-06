@@ -105,7 +105,7 @@ func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskD
 	}
 	client.session = firstStringInJSON(raw, "sessionId", "session_id", "id")
 	if client.session == "" && recovered {
-		client.session = firstNonEmpty(task.ResumeSessionID, restoredDirectACPSessionID(d.history[taskID]))
+		client.session = d.directACPResumeSessionID(task)
 	}
 	if client.session == "" {
 		client.session = sessionName
@@ -178,10 +178,7 @@ func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskD
 }
 
 func (d *Daemon) openDirectACPSession(ctx context.Context, client *directACPClient, task protocol.TaskDispatch, workspacePath string, capabilities directACPCapabilities) (json.RawMessage, bool, error) {
-	d.mu.Lock()
-	restoredSessionID := restoredDirectACPSessionID(d.history[task.TaskID])
-	d.mu.Unlock()
-	sessionID := firstNonEmpty(task.ResumeSessionID, restoredSessionID)
+	sessionID := d.directACPResumeSessionID(task)
 	if sessionID != "" && capabilities.Load {
 		raw, err := client.request(ctx, "session/load", map[string]any{
 			"sessionId":  sessionID,
@@ -212,6 +209,30 @@ func (d *Daemon) openDirectACPSession(ctx context.Context, client *directACPClie
 	return raw, false, nil
 }
 
+func (d *Daemon) directACPResumeSessionID(task protocol.TaskDispatch) string {
+	d.mu.Lock()
+	restoredSessionID := restoredDirectACPSessionID(d.history[task.TaskID])
+	d.mu.Unlock()
+	return providerResumeSessionID(task, restoredSessionID)
+}
+
+func providerResumeSessionID(task protocol.TaskDispatch, restoredSessionID string) string {
+	resumeSessionID := strings.TrimSpace(task.ResumeSessionID)
+	restoredSessionID = strings.TrimSpace(restoredSessionID)
+	taskID := strings.TrimSpace(task.TaskID)
+	sessionName := strings.TrimSpace(task.SessionName)
+	if restoredSessionID == taskID || restoredSessionID == sessionName {
+		restoredSessionID = ""
+	}
+	if resumeSessionID == "" {
+		return restoredSessionID
+	}
+	if resumeSessionID == taskID || resumeSessionID == sessionName {
+		return restoredSessionID
+	}
+	return resumeSessionID
+}
+
 func restoredDirectACPSessionID(record protocol.TaskRecord) string {
 	return strings.TrimSpace(record.SessionID)
 }
@@ -220,6 +241,10 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 	sessionName := taskSessionName(task, d.cfg.ACPX.SessionName)
 	if sessionName == "" {
 		sessionName = task.TaskID
+	}
+	turnID := task.TurnID
+	if turnID == "" {
+		turnID = protocol.NewID("turn")
 	}
 	ctx, cancel := context.WithCancel(parent)
 	if err := d.ensureDirectACPSession(ctx, task, workspace.Path, task.TaskID); err != nil {
@@ -266,7 +291,9 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 	record.DeviceID = d.cfg.Device.ID
 	record.Prompt = task.Prompt
 	record.ParentTaskID = task.ParentTaskID
-	record.SessionID = firstNonEmpty(task.ResumeSessionID, client.session)
+	if client.session != "" {
+		record.SessionID = client.session
+	}
 	record.Agent = agent
 	record.AgentRuntime = task.AgentRuntime
 	record.SessionName = sessionName
@@ -275,7 +302,7 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 	}
 	record.Status = "running"
 	record.UpdatedAt = now
-	userEvent := userPromptTaskEvent(task.TaskID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events))
+	userEvent := userPromptTaskEvent(task.TaskID, turnID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events))
 	if userEvent.TaskID != "" {
 		record.Events = append(record.Events, userEvent)
 	}
@@ -285,6 +312,7 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 	}
 	rt := &runningTask{
 		id:        task.TaskID,
+		turnID:    turnID,
 		cancel:    cancel,
 		done:      make(chan struct{}),
 		workspace: workspace.Path,
@@ -299,6 +327,7 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 		d.send <- protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", userEvent)
 	}
 	emitter.emit("task.started", map[string]any{
+		"turn_id":       turnID,
 		"workspace":     workspace.Path,
 		"command":       client.cmd.Path,
 		"args":          client.cmd.Args[1:],
@@ -333,17 +362,26 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 	})
 
 	d.mu.Lock()
-	delete(d.tasks, task.TaskID)
+	currentTask := d.tasks[task.TaskID] == rt
+	if currentTask {
+		delete(d.tasks, task.TaskID)
+	}
 	d.mu.Unlock()
 	close(rt.done)
 	cancel()
 
 	if err != nil {
+		if !currentTask {
+			return
+		}
 		if rt.isStopping() {
 			emitter.emit("task.killed", map[string]any{"reason": "user_requested"}, nil)
 			return
 		}
 		emitter.emit("task.failed", map[string]any{"error": err.Error()}, nil)
+		return
+	}
+	if !currentTask {
 		return
 	}
 	if emitter.completedNormally() {
@@ -355,10 +393,11 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 
 func (d *Daemon) ensureDirectACPSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) error {
 	agentName := taskAgentName(task, d.cfg.ACPX.Agent)
+	acpxAgentName := normalizeACPXAgentName(agentName)
 	var conflictingACPXTasks []string
 	d.mu.Lock()
 	for id, rt := range d.tasks {
-		if rt.acpx && rt.agent == agentName {
+		if rt.acpx && normalizeACPXAgentName(rt.agent) == acpxAgentName {
 			conflictingACPXTasks = append(conflictingACPXTasks, id)
 		}
 	}
@@ -372,8 +411,8 @@ func (d *Daemon) ensureDirectACPSession(ctx context.Context, task protocol.TaskD
 	if d.cfg.ACPX.Enabled {
 		acpxSessionName := taskSessionName(task, d.cfg.ACPX.SessionName)
 		if acpxSessionName != "" {
-			log.Printf("[Daemon] Closing conflicting ACPX session %q for agent %q because Direct ACP session is being ensured", acpxSessionName, agentName)
-			_ = d.deleteACPXSession(ctx, nil, workspacePath, agentName, acpxSessionName)
+			log.Printf("[Daemon] Closing conflicting ACPX session %q for agent %q because Direct ACP session is being ensured", acpxSessionName, acpxAgentName)
+			_ = d.deleteACPXSession(ctx, nil, workspacePath, acpxAgentName, acpxSessionName)
 		}
 	}
 
@@ -445,6 +484,9 @@ func (d *Daemon) stopDirectACPTask(taskID string) bool {
 	d.mu.Lock()
 	if current := d.directACP[taskID]; current == session {
 		delete(d.directACP, taskID)
+	}
+	if rt != nil && d.tasks[taskID] == rt {
+		delete(d.tasks, taskID)
 	}
 	d.mu.Unlock()
 	return true
@@ -675,7 +717,7 @@ func shellSupportsLogin(shell string) bool {
 func (c *directACPClient) readStdout(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	adapter := newAgentOutputAdapter(c.emitter, 0)
+	adapter := newAgentOutputAdapter(c.emitter, 0, "")
 	defer adapter.flush()
 	for scanner.Scan() {
 		line := scanner.Bytes()

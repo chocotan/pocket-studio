@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Palette, Check, Cable, Layers, FolderTree, FileText, Plus, Lock, Unlock, Monitor, Folder } from "lucide-react";
 import type { Device } from "@/lib/types";
-import { type StudioTheme, terminalType, terminalTypeFromCommand, cleanTerminalTitle, type TerminalKind, type TerminalTitleState } from "./terminal-types";
+import { type StudioTheme, terminalType, terminalTypeFromCommand, terminalKindFromAgentKind, cleanTerminalTitle, type TerminalTitleState } from "./terminal-types";
 import type { Project } from "./studio-dashboard";
 import { EmptyWorkspace } from "./empty-workspace";
 import { ProjectNavMenu, ProjectSwitcher, deviceDisplayName } from "./project-switcher";
@@ -166,6 +166,7 @@ export function StudioWorkspace({
     notificationJumpTarget,
     onNotificationJumpHandled,
   });
+  const currentDevice = devices.find((device) => device.id === project.device_id);
 
   useEffect(() => {
     localStorage.setItem("pocket-studio-theme", theme);
@@ -368,7 +369,7 @@ export function StudioWorkspace({
     const activeCommand = liveTitle?.command || tab.activeCommand || "";
     const displayType = terminalType(
       tab.kind === "agent_chat"
-        ? (tab.agentKind as TerminalKind || "opencode")
+        ? terminalKindFromAgentKind(tab.agentKind)
         : terminalTypeFromCommand(activeCommand, tab.termType)
     );
 
@@ -495,9 +496,9 @@ export function StudioWorkspace({
       }}
     >
       {!navHidden && (
-        <header className="studio-header shrink-0 h-11 flex items-center gap-2 px-3 z-50 shadow-sm transition-colors duration-150">
+        <header className="studio-header shrink-0 h-9 flex items-center gap-1.5 px-2 z-50 shadow-sm transition-colors duration-150">
           <div className="flex shrink-0 items-center gap-2">
-            <div className="h-6 w-6 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-500/25 flex-shrink-0">
+            <div className="h-5 w-5 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-500/25 flex-shrink-0">
               <span className="text-white font-black text-[10px] leading-none">P</span>
             </div>
             <span className="hidden font-bold text-foreground text-xs tracking-tight sm:inline">Pocket Studio</span>
@@ -515,7 +516,7 @@ export function StudioWorkspace({
             className="flex-1"
           />
 
-          <div className="flex shrink-0 items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-1">
             <ProjectSwitcher
               projects={projects}
               favoriteProjects={favoriteProjects}
@@ -535,14 +536,14 @@ export function StudioWorkspace({
                 void toggleDirectMode();
               }}
               disabled={directModeSaving}
-              className={`flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-bold transition-colors ${project.direct_mode ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300" : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground"} disabled:opacity-60`}
+              className={`flex h-6 items-center gap-1 rounded-md border px-1.5 text-[10px] font-bold transition-colors ${project.direct_mode ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300" : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground"} disabled:opacity-60`}
               title={project.direct_mode ? `直连终端已开启：${project.direct_endpoint?.terminal_ws_url || "等待 daemon 上报端点"}` : "开启后终端 WebSocket 将直连 daemon，文件/Agent 仍走服务器"}
             >
               <Cable className="h-3.5 w-3.5" />
               <span className="hidden lg:inline">{directModeSaving ? "保存中" : project.direct_mode ? "直连" : "中转"}</span>
             </button>
             {directModeError ? (
-              <span className="hidden max-w-[260px] truncate rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-semibold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300" title={directModeError}>
+              <span className="hidden max-w-[260px] truncate rounded-md border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300" title={directModeError}>
                 直连切换失败：{directModeError}
               </span>
             ) : null}
@@ -556,11 +557,11 @@ export function StudioWorkspace({
             <ZoomSelect value={pageZoom} onChange={onPageZoomChange} compact />
 
             {/* Display Mode Toggle */}
-            <div className="flex items-center bg-muted/40 p-0.5 rounded-lg border border-border/60">
+            <div className="flex h-6 items-center rounded-md bg-muted/30">
               <button
                 type="button"
                 onClick={() => setLayoutMode("grid")}
-                className={`p-1.5 rounded-md hover:bg-accent hover:text-accent-foreground transition-all cursor-pointer ${
+                className={`flex size-6 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground transition-all cursor-pointer ${
                   layoutMode === "grid"
                     ? "bg-accent text-accent-foreground shadow-sm font-bold"
                     : "text-muted-foreground"
@@ -572,7 +573,7 @@ export function StudioWorkspace({
               <button
                 type="button"
                 onClick={() => setLayoutMode("floating")}
-                className={`p-1.5 rounded-md hover:bg-accent hover:text-accent-foreground transition-all cursor-pointer ${
+                className={`flex size-6 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground transition-all cursor-pointer ${
                   layoutMode === "floating"
                     ? "bg-accent text-accent-foreground shadow-sm font-bold"
                     : "text-muted-foreground"
@@ -592,7 +593,7 @@ export function StudioWorkspace({
                 event.stopPropagation();
                 setNavHidden(true);
               }}
-              className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors cursor-pointer"
+              className="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors cursor-pointer"
               title="隐藏顶部栏"
             >
               <ChevronUp className="h-4 w-4" />
@@ -606,7 +607,7 @@ export function StudioWorkspace({
                   e.stopPropagation();
                   setThemeMenuOpen(!themeMenuOpen);
                 }}
-                className="p-1.5 rounded-lg hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors cursor-pointer flex items-center gap-1"
+                className="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors cursor-pointer flex items-center gap-1"
                 title="切换主题 / Switch Theme"
               >
                 <Palette className="h-4 w-4" />
@@ -657,7 +658,7 @@ export function StudioWorkspace({
             <button
               type="button"
               onClick={onBackToDashboard}
-              className="flex h-7 w-7 items-center justify-center rounded-md bg-card hover:bg-muted text-foreground border border-border shadow-sm transition-all active:scale-95 duration-150 cursor-pointer hover:text-accent-foreground"
+              className="flex h-6 w-6 items-center justify-center rounded-md bg-card hover:bg-muted text-foreground border border-border shadow-sm transition-all active:scale-95 duration-150 cursor-pointer hover:text-accent-foreground"
               title="返回"
               aria-label="返回"
             >
@@ -681,7 +682,7 @@ export function StudioWorkspace({
         </button>
       )}
 
-      <main className="flex min-h-0 flex-1 flex-col overflow-hidden p-1 bg-slate-50 dark:bg-[#0f131c] transition-colors duration-150 relative">
+      <main className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50 dark:bg-[#0f131c] transition-colors duration-150 relative">
         <div className="relative min-h-0 flex-1 overflow-hidden">
           <div
             className="absolute left-0 top-0"
@@ -697,6 +698,7 @@ export function StudioWorkspace({
                 renderNode(layoutTree)
               ) : (
                 <EmptyWorkspace
+                  device={currentDevice}
                   onCreate={handleCreateInitialPanel}
                   onCreateFileExplorer={handleCreateInitialFileExplorer}
                 />
@@ -714,6 +716,7 @@ export function StudioWorkspace({
               >
                 {panels.length === 0 ? (
                   <EmptyWorkspace
+                    device={currentDevice}
                     onCreate={handleCreateInitialPanel}
                     onCreateFileExplorer={handleCreateInitialFileExplorer}
                   />

@@ -7,9 +7,9 @@ import {
   ArrowRight,
   X
 } from "lucide-react";
-import { OpenCode, Codex, ClaudeCode, Antigravity, KiloCode } from "@lobehub/icons";
+import { Antigravity, ClaudeCode, Codex, Cursor, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
 import { websocketURL } from "@/lib/api";
-import { agentNameForRuntime, makeId } from "../terminal-types";
+import { agentNameForRuntime, makeId, terminalKindFromAgentKind } from "../terminal-types";
 import { type StudioTab } from "../studio-layout";
 import type { Project } from "../studio-dashboard";
 import type { AgentConfigOption } from "@/lib/agent-protocol";
@@ -21,6 +21,7 @@ import {
   makeLocalUserPromptEvent,
   mergeTaskEvents,
   modelListFromTaskEvents,
+  sortTaskEventsForDisplay,
 } from "./event-model";
 import {
   buildMessageStateFromEvents,
@@ -32,6 +33,7 @@ import {
   TodoWidget,
   ToolCallCard,
   ToolCallGroup,
+  RunDurationStatus,
   WorkingStatus,
   extractSubagent,
   extractTodos,
@@ -71,6 +73,24 @@ function envelopeTaskId(envelope: AgentEnvelope) {
   return typeof taskId === "string" ? taskId : "";
 }
 
+function getRunTiming(events: TaskEvent[], agentRuntime: string) {
+  let activeStartedAtMs = 0;
+  let lastCompletedDurationMs = 0;
+  for (const event of sortTaskEventsForDisplay(events)) {
+    if (event.event_type === "task.started") {
+      const timestampMs = Number(event.timestamp || 0) * 1000;
+      activeStartedAtMs = timestampMs > 0 ? timestampMs : 0;
+    } else if (isTerminalTaskEvent(event, agentRuntime)) {
+      const endedAtMs = Number(event.timestamp || 0) * 1000;
+      if (activeStartedAtMs > 0 && endedAtMs > 0) {
+        lastCompletedDurationMs = Math.max(0, endedAtMs - activeStartedAtMs);
+      }
+      activeStartedAtMs = 0;
+    }
+  }
+  return { activeStartedAtMs, lastCompletedDurationMs };
+}
+
 interface AgentChatTabProps {
   project: Project;
   tab: StudioTab;
@@ -100,7 +120,7 @@ export function AgentChatTab({
   const [runStatus, setRunStatus] = useState<AgentRunStatus>("idle");
   const [error, setError] = useState("");
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [runStartedAtMs, setRunStartedAtMs] = useState(() => Date.now());
+  const [localRunStartedAtMs, setLocalRunStartedAtMs] = useState(0);
   const [modelUpdating, setModelUpdating] = useState(false);
   const [customModelInput, setCustomModelInput] = useState("");
   const dismissedErrorRef = useRef("");
@@ -268,13 +288,10 @@ export function AgentChatTab({
             lastEventSeqRef.current = taskEvent.sequence;
           }
           setEvents((prev) => {
-            const base = taskEvent.event_type === "user.prompt"
-              ? prev.filter((event) => !event.event_id.startsWith("local-user.prompt-"))
-              : prev;
-            if (base.some((event) => event.event_id === taskEvent.event_id)) {
-              return base;
+            if (prev.some((event) => event.event_id === taskEvent.event_id)) {
+              return prev;
             }
-            return mergeTaskEvents(base, [taskEvent]);
+            return mergeTaskEvents(prev, [taskEvent]);
           });
           if (isTerminalTaskEvent(taskEvent, agentRuntime)) {
             if (taskEvent.event_type === "task.failed") {
@@ -354,7 +371,7 @@ export function AgentChatTab({
   ]);
 
   const agentLogo = useMemo(() => {
-    switch (agentKind) {
+    switch (terminalKindFromAgentKind(agentKind)) {
       case "opencode":
         return <OpenCode width={16} height={16} />;
       case "codex":
@@ -365,6 +382,16 @@ export function AgentChatTab({
         return <Antigravity width={16} height={16} />;
       case "kilo":
         return <KiloCode width={16} height={16} />;
+      case "qwen":
+        return <Qwen width={16} height={16} />;
+      case "kimi":
+        return <Kimi width={16} height={16} />;
+      case "copilot":
+        return <GithubCopilot width={16} height={16} />;
+      case "cursor":
+        return <Cursor width={16} height={16} />;
+      case "openclaw":
+        return <OpenClaw width={16} height={16} />;
       default:
         return <Cpu className="h-4 w-4" />;
     }
@@ -409,56 +436,30 @@ export function AgentChatTab({
     return () => window.clearInterval(timer);
   }, [runStatus]);
 
+  const runTiming = useMemo(() => {
+    return getRunTiming(events, agentRuntime);
+  }, [agentRuntime, events]);
+  const backendRunStartedAtMs = runTiming.activeStartedAtMs;
+  const lastCompletedRunDurationMs = runTiming.lastCompletedDurationMs;
 
   useEffect(() => {
-    if (events.length === 0) {
-      setRunStatus("idle");
+    if (backendRunStartedAtMs > 0) {
+      setRunStatus("running");
+      awaitingNewTurnRef.current = false;
       return;
     }
 
-    const sorted = [...events].sort((left, right) => {
-      const leftSeq = Number(left.sequence || 0);
-      const rightSeq = Number(right.sequence || 0);
-      const leftLocal = left.event_id.startsWith("local-");
-      const rightLocal = right.event_id.startsWith("local-");
-      if (!leftLocal && !rightLocal && leftSeq > 0 && rightSeq > 0 && leftSeq !== rightSeq) {
-        return leftSeq - rightSeq;
-      }
-      return Number(left.timestamp || 0) - Number(right.timestamp || 0);
+    // No "started-but-not-terminated" turn in the event stream. But if the
+    // user just optimistically sent a message (sending), the backend's
+    // task.started for this turn hasn't arrived yet — keep showing "Working"
+    // instead of flickering back to idle. Any non-sending state means we are
+    // genuinely between turns → idle.
+    setRunStatus(() => {
+      if (awaitingNewTurnRef.current) return "sending";
+      awaitingNewTurnRef.current = false;
+      return "idle";
     });
-
-    let latestStartSeq = -1;
-    let latestTerminalSeq = -1;
-
-    for (const event of sorted) {
-      if (event.event_type === "task.started") {
-        latestStartSeq = Math.max(latestStartSeq, Number(event.sequence || 0));
-      } else if (isTerminalTaskEvent(event, agentRuntime)) {
-        latestTerminalSeq = Math.max(latestTerminalSeq, Number(event.sequence || 0));
-      }
-    }
-
-    if (latestStartSeq > latestTerminalSeq) {
-      setRunStatus((prev) => (prev === "sending" ? "sending" : "running"));
-    } else {
-      // No "started-but-not-terminated" turn in the event stream. But if the
-      // user just optimistically sent a message (sending), the backend's
-      // task.started for this turn hasn't arrived yet — keep showing "Working"
-      // instead of flickering back to idle. Any non-sending state means we are
-      // genuinely between turns → idle.
-      setRunStatus((prev) => {
-        if (prev === "sending") return "sending";
-        awaitingNewTurnRef.current = false;
-        return "idle";
-      });
-    }
-  }, [events, agentRuntime]);
-
-  useEffect(() => {
-    if (runStatus === "running") {
-      setRunStartedAtMs(Date.now());
-    }
-  }, [runStatus]);
+  }, [backendRunStartedAtMs, events.length]);
 
   const messages = messageState.messages;
 
@@ -486,19 +487,8 @@ export function AgentChatTab({
   const showDirectACPConfigOptions = agentRuntime === "direct_acp" && configOptions.length > 0;
   const isRunning = runStatus !== "idle";
   const showWorking = isRunning;
-  const hasActiveBackendTurn = useMemo(() => {
-    let latestStartSeq = -1;
-    let latestTerminalSeq = -1;
-    for (const event of events) {
-      const seq = Number(event.sequence || 0);
-      if (event.event_type === "task.started") {
-        latestStartSeq = Math.max(latestStartSeq, seq);
-      } else if (isTerminalTaskEvent(event, agentRuntime)) {
-        latestTerminalSeq = Math.max(latestTerminalSeq, seq);
-      }
-    }
-    return latestStartSeq > latestTerminalSeq;
-  }, [agentRuntime, events]);
+  const hasActiveBackendTurn = backendRunStartedAtMs > 0;
+  const workingStartedAtMs = hasActiveBackendTurn ? backendRunStartedAtMs : localRunStartedAtMs || nowMs;
 
   useEffect(() => {
     selectedModelIdRef.current = selectedModelId;
@@ -646,7 +636,7 @@ export function AgentChatTab({
   async function dispatchPrompt(promptText: string) {
     clearErrorForNewAction();
     setRunStatus("sending");
-    setRunStartedAtMs(Date.now());
+    setLocalRunStartedAtMs(Date.now());
     // Mark that we are awaiting the new turn's task.started event.
     // While this flag is true, late-arriving terminal events from the
     // previous turn will be ignored.
@@ -662,8 +652,9 @@ export function AgentChatTab({
         runStatus,
         hasActiveBackendTurn,
       });
+      const turnId = makeId("turn");
       const maxSeq = events.reduce((max, ev) => Math.max(max, Number(ev.sequence || 0)), 0);
-      const localUserEvent = makeLocalUserPromptEvent(activeSessionId, promptText, maxSeq + 1);
+      const localUserEvent = makeLocalUserPromptEvent(activeSessionId, turnId, promptText, maxSeq + 1);
       setEvents((prev) => mergeTaskEvents(prev, [localUserEvent]));
 
       if (selectedModelIdRef.current && typeof window !== "undefined" && window.localStorage) {
@@ -673,11 +664,11 @@ export function AgentChatTab({
       // Dispatch prompt task.dispatch
       const dispatchPayload: Record<string, unknown> = {
         task_id: activeSessionId,
+        turn_id: turnId,
         workspace_path: workspacePath,
         agent: agentNameForRuntime(agentKind, agentRuntime),
         agent_runtime: agentRuntime,
         prompt: promptText,
-        resume_session_id: activeSessionId,
         model_id: messages.length === 0 ? selectedModelIdRef.current : ""
       };
       dispatchPayload.session_name = activeSessionName;
@@ -698,6 +689,7 @@ export function AgentChatTab({
     } catch (err) {
       showError(err instanceof Error ? err.message : "执行出错");
       setRunStatus("idle");
+      setLocalRunStartedAtMs(0);
     }
   }
 
@@ -739,6 +731,8 @@ export function AgentChatTab({
     try {
       queuedPromptsRef.current = [];
       setQueuedPrompts([]);
+      awaitingNewTurnRef.current = false;
+      setLocalRunStartedAtMs(0);
       const stopEnv = {
         id: makeId("msg"),
         type: "task.stop",
@@ -976,7 +970,10 @@ export function AgentChatTab({
               return rendered;
             })()}
             {showWorking && (
-              <WorkingStatus elapsedMs={nowMs - runStartedAtMs} />
+              <WorkingStatus elapsedMs={nowMs - workingStartedAtMs} />
+            )}
+            {!showWorking && lastCompletedRunDurationMs > 0 && (
+              <RunDurationStatus elapsedMs={lastCompletedRunDurationMs} />
             )}
 
             <div ref={eventsEndRef} />

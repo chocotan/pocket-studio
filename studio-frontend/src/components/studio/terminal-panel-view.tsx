@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
 import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal, Minus, Minimize2, Maximize2, FilePlus2, FolderPlus } from "lucide-react";
-import { OpenCode, Codex, ClaudeCode, KiloCode } from "@lobehub/icons";
+import { ClaudeCode, Codex, Cursor, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
 import {
   Tooltip,
   TooltipContent,
@@ -19,11 +19,14 @@ import {
   cleanTerminalTitle,
   terminalType,
   terminalTypeFromCommand,
+  terminalKindFromAgentKind,
+  agentAvailable,
+  agentCapabilityAvailable,
+  availableTerminalTypes,
   type SplitDirection,
   type TerminalKind,
   type TerminalTitleState,
   type StudioTheme,
-  TERMINAL_TYPES,
 } from "./terminal-types";
 
 
@@ -150,8 +153,12 @@ function TerminalPanelViewComponent({
     cyan: "bg-cyan-100 text-cyan-700 ring-1 ring-cyan-200/70 dark:bg-cyan-400/16 dark:text-cyan-200 dark:ring-cyan-300/20",
     rose: "bg-rose-100 text-rose-600 ring-1 ring-rose-200/70 dark:bg-rose-400/16 dark:text-rose-200 dark:ring-rose-300/20",
     lime: "bg-lime-100 text-lime-700 ring-1 ring-lime-200/70 dark:bg-lime-400/16 dark:text-lime-200 dark:ring-lime-300/20",
+    sky: "bg-sky-100 text-sky-700 ring-1 ring-sky-200/70 dark:bg-sky-400/16 dark:text-sky-200 dark:ring-sky-300/20",
+    slate: "bg-slate-100 text-slate-600 ring-1 ring-slate-200/70 dark:bg-slate-400/16 dark:text-slate-200 dark:ring-slate-300/20",
   };
   const panelAlert = panel.tabs.some((tab) => alertTerminalIds.has(tab.id));
+  const activeProject = projects.find((p) => p.id === projectId) || project;
+  const activeDevice = devices.find((d) => d.id === activeProject.device_id);
   function updateScrollState() {
     const scroller = tabScrollerRef.current;
     if (!scroller) return;
@@ -363,7 +370,7 @@ function TerminalPanelViewComponent({
             const activeCommand = liveTitle?.command || tab.activeCommand || "";
             const displayType = terminalType(
               tab.kind === "agent_chat"
-                ? (tab.agentKind as TerminalKind || "opencode")
+                ? terminalKindFromAgentKind(tab.agentKind)
                 : terminalTypeFromCommand(activeCommand, tab.termType)
             );
             const displayTitle = displayTitleForTab(tab);
@@ -656,14 +663,16 @@ function TerminalPanelViewComponent({
                 <Terminal className="h-3.5 w-3.5 text-slate-500 shrink-0 dark:text-slate-400" />
                 打开 Bash 终端
               </button>
-              <button
-                type="button"
-                onClick={() => onAddTab(panel.id, "claude")}
-                className="w-full h-8 px-3 text-[10px] font-bold bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-indigo-600 transition-all flex items-center gap-2 justify-center cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-indigo-400"
-              >
-                <Cpu className="h-3 w-3 text-indigo-500 shrink-0" />
-                打开 Claude Code
-              </button>
+              {agentAvailable(activeDevice, "claude") && (
+                <button
+                  type="button"
+                  onClick={() => onAddTab(panel.id, "claude")}
+                  className="w-full h-8 px-3 text-[10px] font-bold bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-indigo-600 transition-all flex items-center gap-2 justify-center cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-indigo-400"
+                >
+                  <Cpu className="h-3 w-3 text-indigo-500 shrink-0" />
+                  打开 Claude Code
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => onAddFileExplorer(panel.id)}
@@ -813,13 +822,17 @@ export function TerminalTypeMenu({
   }, [projects, devices]);
 
   const [selectedProjId, setSelectedProjId] = useState(projectId);
+  useEffect(() => setSelectedProjId(projectId), [projectId]);
+  const selectedProject = projects.find((p) => p.id === selectedProjId) || projects.find((p) => p.id === projectId);
+  const selectedDevice = devices.find((d) => d.id === selectedProject?.device_id);
 
-  const terminalMenuItems = TERMINAL_TYPES
+  const terminalMenuItems = availableTerminalTypes(selectedDevice)
     .map((item) => ({
       ...item,
       menuLabel: terminalMenuLabel(item.value),
     }))
     .sort((left, right) => terminalMenuOrder(left.value) - terminalMenuOrder(right.value));
+  const acpxItems = acpxMenuItems(selectedDevice);
 
   return (
     <div
@@ -876,7 +889,9 @@ export function TerminalTypeMenu({
             </>
           )}
           <MenuBranch label="终端类型" icon={<Terminal className="h-3.5 w-3.5" />} tone="slate" onClick={() => setSubmenu("terminal")} />
-          <MenuBranch label="ACPX会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="amber" onClick={() => setSubmenu("acpx")} />
+          {acpxItems.length > 0 && (
+            <MenuBranch label="ACPX会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="amber" onClick={() => setSubmenu("acpx")} />
+          )}
           <MenuBranch label="ACP会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="emerald" onClick={() => setSubmenu("acp")} />
           <div className="border-t border-slate-100 my-1" />
           <button
@@ -906,9 +921,15 @@ export function TerminalTypeMenu({
       ) : submenu === "acpx" ? (
         <>
           <MenuHeader label="ACPX会话" onBack={() => setSubmenu(null)} />
-          <MenuItem label="opencode" icon={<OpenCode width={14} height={14} />} tone="amber" onClick={() => onAddAgentChat("opencode", "acpx", selectedProjId)} />
-          <MenuItem label="claude code" icon={<ClaudeCode width={14} height={14} />} tone="violet" onClick={() => onAddAgentChat("claude", "acpx", selectedProjId)} />
-          <MenuItem label="pi" icon={<span className="text-[10px] font-black leading-none">π</span>} tone="cyan" onClick={() => onAddAgentChat("pi", "acpx", selectedProjId)} />
+          {acpxItems.map((item) => (
+            <MenuItem
+              key={item.agent}
+              label={item.label}
+              icon={item.icon}
+              tone={item.tone}
+              onClick={() => onAddAgentChat(item.agent, "acpx", selectedProjId)}
+            />
+          ))}
         </>
       ) : (
         <>
@@ -923,7 +944,7 @@ export function TerminalTypeMenu({
 }
 
 function terminalMenuOrder(kind: TerminalKind) {
-  const order: TerminalKind[] = ["bash", "opencode", "codex", "claude", "kilo", "pi", "agy"];
+  const order: TerminalKind[] = ["bash", "opencode", "codex", "claude", "kilo", "qwen", "kimi", "copilot", "cursor", "openclaw", "pi", "agy"];
   const index = order.indexOf(kind);
   return index === -1 ? order.length : index;
 }
@@ -934,9 +955,39 @@ function terminalMenuLabel(kind: TerminalKind) {
       return "普通终端";
     case "claude":
       return "claude code";
+    case "kilo":
+      return "kilo code";
+    case "qwen":
+      return "qwen code";
+    case "copilot":
+      return "github copilot";
+    case "cursor":
+      return "cursor agent";
     default:
       return kind;
   }
+}
+
+function acpxMenuItems(device: Device | undefined) {
+  if (!isACPXDevice(device)) return [];
+  const items = [
+    { agent: "opencode", capability: "opencode", label: "opencode", icon: <OpenCode width={14} height={14} />, tone: "amber" },
+    { agent: "claude", capability: "claude", label: "claude code", icon: <ClaudeCode width={14} height={14} />, tone: "violet" },
+    { agent: "codex", capability: "codex", label: "codex", icon: <Codex width={14} height={14} />, tone: "emerald" },
+    { agent: "kilo", capability: "kilocode", label: "kilo code", icon: <KiloCode width={14} height={14} />, tone: "lime" },
+    { agent: "qwen", capability: "qwen", label: "qwen code", icon: <Qwen width={14} height={14} />, tone: "cyan" },
+    { agent: "kimi", capability: "kimi", label: "kimi", icon: <Kimi width={14} height={14} />, tone: "sky" },
+    { agent: "copilot", capability: "copilot", label: "github copilot", icon: <GithubCopilot width={14} height={14} />, tone: "emerald" },
+    { agent: "cursor", capability: "cursor", label: "cursor agent", icon: <Cursor width={14} height={14} />, tone: "slate" },
+    { agent: "openclaw", capability: "openclaw", label: "openclaw", icon: <OpenClaw width={14} height={14} />, tone: "rose" },
+    { agent: "pi", capability: "pi", label: "pi", icon: <span className="text-[10px] font-black leading-none">π</span>, tone: "cyan" },
+  ] as const;
+  return items.filter((item) => agentCapabilityAvailable(device, item.capability));
+}
+
+function isACPXDevice(device: Device | undefined) {
+  const agent = (device?.agent || "").trim().toLowerCase();
+  return agent !== "" && agent !== "claude_code" && agent !== "claude-code";
 }
 
 function MenuHeader({ label, onBack }: { label: string; onBack: () => void }) {

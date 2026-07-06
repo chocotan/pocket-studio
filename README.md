@@ -216,7 +216,8 @@ go build -trimpath -ldflags="-s -w" -o ./daemon ./cmd/daemon
 | 参数命令行 Flag | 默认值 / 机制 | 说明 |
 | --- | --- | --- |
 | `-daemon.device.id` | 随机生成（保存在 `device.json` 中） | 唯一设备 ID，向 Server 和 Studio 标识当前主机 |
-| `-daemon.device.name` | 当前系统主机名 | 展现在 Studio 工作台上的设备易读名称 |
+| `-daemon.device.name` | 当前系统主机名 | 设备基础名称；未设置别名时作为 Studio 显示名 |
+| `-daemon.device.alias` | 空 | 设备别名，优先作为 Studio 工作台展示名称，适合给机器配置易记名称 |
 | `-daemon.server.url` | **必填** | Server 的 Daemon WebSocket 中继地址，例如 `ws://127.0.0.1:18080/ws/daemon` |
 | `-daemon.server.token` | **必填** (与 Server Token 匹配) | 接入控制中心的 Token |
 | `-daemon.workspace` | 默认 `~/Agent`（可多次指定） | 工作区目录。支持直接路径，或格式为 `id:display_name:absolute_path` 的定制串 |
@@ -246,7 +247,8 @@ go build -trimpath -ldflags="-s -w" -o ./daemon ./cmd/daemon
 {
   "device": {
     "id": "dev_my_macbook",
-    "name": "My Dev Macbook"
+    "name": "macbook-hostname",
+    "alias": "My Dev Macbook"
   },
   "server": {
     "url": "ws://192.168.1.100:18080/ws/daemon",
@@ -366,15 +368,25 @@ A: 请依次排查以下三项：
 3. 检查 Server 的监听地址、安全防火墙或反向代理（如 Nginx）是否正确配置并放行了 WebSocket 流量。
 
 ### Q: 如何给开发机/设备重命名？
-A: 您可以在启动 Daemon 时通过命令行参数传入名字：
+A: 推荐在 Daemon 配置文件 `agentbridge.daemon.json` 的 `device.alias` 字段配置别名，前端会优先显示这个别名：
+```json
+{
+  "device": {
+    "id": "dev_my_macbook",
+    "name": "macbook-hostname",
+    "alias": "My-Powerful-Workstation"
+  }
+}
+```
+也可以在启动 Daemon 时通过命令行参数临时覆盖：
 ```bash
 go run ./cmd/daemon \
-  -daemon.device.name "My-Powerful-Workstation" \
+  -daemon.device.alias "My-Powerful-Workstation" \
   -daemon.server.url ws://localhost:18080/ws/daemon \
   -daemon.server.token dev_token \
   -daemon.workspace ~/Agent
 ```
-也可以直接在 Daemon 的 `device.json` 文件或配置 JSON 的 `device.name` 字段中进行修改。
+如果没有设置 `device.alias`，Studio 会继续使用 `device.name` 或自动解析出的主机名。
 
 ### Q: 工作区路径支持什么格式？
 A: 

@@ -16,7 +16,7 @@ import (
 func TestACPXToolUpdatesAreForwardedIndividuallyWithRawPayload(t *testing.T) {
 	d := New(Config{})
 	emitter := &taskEmitter{daemon: d, taskID: "task-1"}
-	adapter := newAgentOutputAdapter(emitter, 0)
+	adapter := newAgentOutputAdapter(emitter, 0, "")
 
 	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"call-1","title":"bash","status":"pending","rawInput":{"cwd":"/tmp"}}}}`))
 	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","title":"bash","status":"pending","rawInput":{"cwd":"/tmp","command":"df -h"}}}}`))
@@ -51,6 +51,38 @@ func TestACPXToolUpdatesAreForwardedIndividuallyWithRawPayload(t *testing.T) {
 	rawInput, _ := update["rawInput"].(map[string]any)
 	if rawInput["command"] != "df -h" {
 		t.Fatalf("second rawInput = %#v, want command", rawInput)
+	}
+}
+
+func TestACPXToolUpdateOutputDeltaCarriesAppendMetadata(t *testing.T) {
+	d := New(Config{})
+	emitter := &taskEmitter{daemon: d, taskID: "task-1"}
+	adapter := newAgentOutputAdapter(emitter, 0, "")
+
+	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"subagent-1","title":"Task","status":"running","rawInput":{"description":"inspect bug","subagent_type":"debugger"},"outputDelta":"first chunk\n","stream_id":"subagent-stream-1"}}}`))
+	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"subagent-1","title":"Task","status":"running","rawOutputDelta":"second chunk\n","output_stream_id":"subagent-stream-1"}}}`))
+
+	got := drainTaskEvents(d.send)
+	if len(got) != 2 {
+		t.Fatalf("events len = %d, want 2: %#v", len(got), got)
+	}
+	for _, event := range got {
+		if event.EventType != "tool.output" {
+			t.Fatalf("event type = %q, want tool.output", event.EventType)
+		}
+		var data map[string]any
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatalf("decode data: %v", err)
+		}
+		if data["tool_use_id"] != "subagent-1" || data["append"] != true || data["stream_id"] != "subagent-stream-1" {
+			t.Fatalf("tool delta data = %#v", data)
+		}
+		if data["status"] != "running" {
+			t.Fatalf("status = %#v, want running", data["status"])
+		}
+		if strings.TrimSpace(stringField(data, "output")) == "" {
+			t.Fatalf("output = %#v, want delta text", data["output"])
+		}
 	}
 }
 
@@ -153,6 +185,40 @@ func TestACPXPromptArgsUsePromptSubcommandBeforeSessionOption(t *testing.T) {
 	}
 }
 
+func TestACPXPromptArgsNormalizeKiloToKilocode(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ACPX.Args = []string{"--format", "json", "--approve-all"}
+	d := New(cfg)
+
+	args := d.buildACPXPromptArgs(protocol.TaskDispatch{
+		Agent:       "kilo",
+		SessionName: "agentbridge",
+		Prompt:      "ping",
+	}, "/tmp/work")
+
+	want := []string{"--format", "json", "--approve-all", "--ttl", "300", "--cwd", "/tmp/work", "kilocode", "prompt", "--session", "agentbridge", "ping"}
+	if got := strings.Join(args, "\x00"); got != strings.Join(want, "\x00") {
+		t.Fatalf("buildACPXPromptArgs() = %#v, want %#v", args, want)
+	}
+}
+
+func TestACPXPromptArgsKeepCodexAgent(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ACPX.Args = []string{"--format", "json", "--approve-all"}
+	d := New(cfg)
+
+	args := d.buildACPXPromptArgs(protocol.TaskDispatch{
+		Agent:       "codex",
+		SessionName: "agentbridge",
+		Prompt:      "ping",
+	}, "/tmp/work")
+
+	want := []string{"--format", "json", "--approve-all", "--ttl", "300", "--cwd", "/tmp/work", "codex", "prompt", "--session", "agentbridge", "ping"}
+	if got := strings.Join(args, "\x00"); got != strings.Join(want, "\x00") {
+		t.Fatalf("buildACPXPromptArgs() = %#v, want %#v", args, want)
+	}
+}
+
 func TestACPXSessionEnsureTimesOut(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell sleep test is unix-specific")
@@ -187,10 +253,127 @@ func TestACPXSessionEnsureTimesOut(t *testing.T) {
 	}
 }
 
+func TestACPXClaudeAuthenticationErrorFallsBackToClaudeCLI(t *testing.T) {
+	dir := t.TempDir()
+	acpxPath := filepath.Join(dir, "fake-acpx")
+	acpxScript := `#!/bin/sh
+case "$*" in
+  *" sessions ensure "*)
+    printf '{"acpxRecordId":"rec-1","acpxSessionId":"sess-1","name":"agentbridge"}\n'
+    ;;
+  *" status "*)
+    printf '{"action":"status_snapshot","status":"idle","availableModels":["sonnet"],"model":"sonnet"}\n'
+    ;;
+  *" prompt "*)
+    printf '{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"Authentication required"}}\n'
+    exit 1
+    ;;
+  *)
+    printf '{}\n'
+    ;;
+esac
+`
+	if err := os.WriteFile(acpxPath, []byte(acpxScript), 0o755); err != nil {
+		t.Fatalf("write fake acpx: %v", err)
+	}
+
+	claudePath := filepath.Join(dir, "fake-claude")
+	claudeScript := `#!/bin/sh
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"fallback ok"}]}}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn"}\n'
+`
+	if err := os.WriteFile(claudePath, []byte(claudeScript), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.ACPX.Command = acpxPath
+	cfg.ACPX.Args = nil
+	cfg.ACPX.TTLSeconds = 0
+	cfg.ACPX.Agent = "claude"
+	cfg.Claude.Command = claudePath
+	cfg.Claude.Args = []string{"--output-format", "stream-json", "--verbose"}
+	d := New(cfg)
+
+	d.startTask(context.Background(), protocol.TaskDispatch{
+		TaskID:        "task-auth-fallback",
+		WorkspacePath: dir,
+		Agent:         "claude",
+		AgentRuntime:  "acpx",
+		SessionName:   "agentbridge",
+		Prompt:        "ping",
+	})
+
+	events := drainTaskEvents(d.send)
+	if !hasTaskEvent(events, "task.fallback") {
+		t.Fatalf("events missing task.fallback: %#v", events)
+	}
+	if !hasTaskEvent(events, "assistant.message") {
+		t.Fatalf("events missing fallback assistant.message: %#v", events)
+	}
+	if !hasTaskEvent(events, "task.completed") {
+		t.Fatalf("events missing task.completed: %#v", events)
+	}
+	if hasTaskEvent(events, "task.failed") {
+		t.Fatalf("events contain task.failed despite fallback: %#v", events)
+	}
+}
+
 func TestExtractACPXErrorTextIncludesDetailCode(t *testing.T) {
 	got := extractACPXErrorText(`{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Authentication required","data":{"acpxCode":"RUNTIME","detailCode":"AUTH_REQUIRED"}}}`)
 	if got != "Authentication required (AUTH_REQUIRED)" {
 		t.Fatalf("extractACPXErrorText() = %q", got)
+	}
+}
+
+func TestACPXSessionRecordsUseSnakeCaseTimesAndKeepRepeatedPrompts(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fake-acpx")
+	script := `#!/bin/sh
+case "$*" in
+  *" sessions list "*)
+    printf '[{"acpx_record_id":"rec-1","name":"acpx-repeat","cwd":"%s","created_at":"2026-07-03T09:25:16.020Z","last_used_at":"2026-07-06T02:01:20.612Z","messages":[{"User":{"content":[{"Text":"again"}]}},{"Agent":{"content":[{"Text":"first reply"}]}},{"User":{"content":[{"Text":"again"}]}},{"Agent":{"content":[{"Text":"second reply"}]}}]}]' "$PWD"
+    ;;
+  *)
+    printf '{}\n'
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake acpx: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Workspaces = []protocol.Workspace{{ID: "w", Path: dir}}
+	cfg.ACPX.Enabled = true
+	cfg.ACPX.Command = scriptPath
+	cfg.ACPX.Args = nil
+	cfg.ACPX.TTLSeconds = 0
+	cfg.ACPX.Agent = "opencode"
+	d := New(cfg)
+
+	records, err := d.acpxSessionRecords(context.Background(), d.cfg.ACPX.Agent)
+	if err != nil {
+		t.Fatalf("acpxSessionRecords() error = %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records len = %d, want 1: %#v", len(records), records)
+	}
+	events := records[0].Events
+	if len(events) != 4 {
+		t.Fatalf("events len = %d, want 4: %#v", len(events), events)
+	}
+	wantTypes := []string{"user.prompt", "assistant.message", "user.prompt", "assistant.message"}
+	for i, want := range wantTypes {
+		if events[i].EventType != want {
+			t.Fatalf("event %d type = %q, want %q: %#v", i, events[i].EventType, want, events)
+		}
+		if events[i].Sequence != int64(i+1) {
+			t.Fatalf("event %d sequence = %d, want %d", i, events[i].Sequence, i+1)
+		}
+		if events[i].Timestamp == 0 {
+			t.Fatalf("event %d timestamp = 0, want parsed snake_case timestamp: %#v", i, events[i])
+		}
 	}
 }
 
@@ -220,7 +403,7 @@ esac
 	cfg.ACPX.Agent = "opencode"
 	d := New(cfg)
 
-	records, err := d.acpxSessionRecords(context.Background())
+	records, err := d.acpxSessionRecords(context.Background(), d.cfg.ACPX.Agent)
 	if err != nil {
 		t.Fatalf("acpxSessionRecords() error = %v", err)
 	}
@@ -229,13 +412,13 @@ esac
 	}
 	var record protocol.TaskRecord
 	for _, item := range records {
-		if item.TaskID == "acpx-mqrestore123" {
+		if item.TaskID == "rec-1" {
 			record = item
 			break
 		}
 	}
 	if record.TaskID == "" {
-		t.Fatalf("missing acpx-mqrestore123 record: %#v", records)
+		t.Fatalf("missing rec-1 record: %#v", records)
 	}
 	if record.SessionID != "rec-1" {
 		t.Fatalf("SessionID = %q, want acpx record id", record.SessionID)
@@ -280,6 +463,35 @@ func TestMergeTaskEventsDeduplicatesSameEventDataWithDifferentRaw(t *testing.T) 
 	merged := mergeTaskEvents(base, extra)
 	if len(merged) != 1 || merged[0].EventID != "evt-history" {
 		t.Fatalf("merged events = %#v, want one history event", merged)
+	}
+}
+
+func TestMergeTaskEventsKeepsRepeatedUserPromptsWithoutTurnID(t *testing.T) {
+	data := json.RawMessage(`{"prompt":"again"}`)
+	base := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-user-1", EventType: "user.prompt", Sequence: 1, Data: data},
+	}
+	extra := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-user-2", EventType: "user.prompt", Sequence: 2, Data: data},
+	}
+
+	merged := mergeTaskEvents(base, extra)
+	if len(merged) != 2 {
+		t.Fatalf("merged events = %#v, want both repeated user prompts", merged)
+	}
+}
+
+func TestMergeTaskEventsDeduplicatesSameTurnUserPromptEcho(t *testing.T) {
+	base := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-server", EventType: "user.prompt", Sequence: 1, Data: json.RawMessage(`{"prompt":"again","turn_id":"turn-1"}`)},
+	}
+	extra := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-daemon", EventType: "user.prompt", Sequence: 2, Data: json.RawMessage(`{"prompt":"again","turn_id":"turn-1"}`)},
+	}
+
+	merged := mergeTaskEvents(base, extra)
+	if len(merged) != 1 || merged[0].EventID != "evt-server" {
+		t.Fatalf("merged events = %#v, want one same-turn user prompt", merged)
 	}
 }
 

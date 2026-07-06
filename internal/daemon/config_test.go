@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"remote-agent/internal/protocol"
 )
 
 func TestNormalizeConfigRequiresServerURL(t *testing.T) {
@@ -43,6 +45,52 @@ func TestNormalizeConfigTrimsServerCredentials(t *testing.T) {
 	}
 	if got.Server.Token != "ps_test" {
 		t.Fatalf("NormalizeConfig() server token = %q, want trimmed token", got.Server.Token)
+	}
+}
+
+func TestDisplayDeviceNamePrefersAlias(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Device.ID = "dev_test"
+	cfg.Device.Name = "host-name"
+	cfg.Device.Alias = "  Build Box  "
+	cfg.Server.URL = "ws://localhost:18080/ws/daemon"
+	cfg.Workspaces = nil
+
+	got, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeConfig() error = %v", err)
+	}
+	if got.Device.Alias != "Build Box" {
+		t.Fatalf("NormalizeConfig() alias = %q, want trimmed alias", got.Device.Alias)
+	}
+	if got.DisplayDeviceName() != "Build Box" {
+		t.Fatalf("DisplayDeviceName() = %q, want alias", got.DisplayDeviceName())
+	}
+}
+
+func TestSaveConfigFilePersistsDeviceAlias(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("POCKET_STUDIO_DAEMON_CONFIG_DIR", dir)
+	cfg := DefaultConfig()
+	cfg.Device.ID = "dev_test"
+	cfg.Device.Name = "host-name"
+	cfg.Device.Alias = "Desk Rig"
+	cfg.Server.URL = "ws://localhost:18080/ws/daemon"
+	cfg.Workspaces = nil
+
+	got, err := NormalizeConfig(cfg)
+	if err != nil {
+		t.Fatalf("NormalizeConfig() error = %v", err)
+	}
+	if err := SaveConfigFile(got); err != nil {
+		t.Fatalf("SaveConfigFile() error = %v", err)
+	}
+	loaded, err := LoadConfigFile()
+	if err != nil {
+		t.Fatalf("LoadConfigFile() error = %v", err)
+	}
+	if loaded.Device.Alias != "Desk Rig" {
+		t.Fatalf("loaded alias = %q, want persisted alias", loaded.Device.Alias)
 	}
 }
 
@@ -147,6 +195,40 @@ func TestNormalizeDirectACPAgentsLocalFallback(t *testing.T) {
 	}
 }
 
+func TestAgentCapabilitiesOnlyReportInstalledAgents(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"qwen", "cursor-agent", "kilo", "agy"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+
+	cfg := DefaultConfig()
+	cfg.ACPX.Enabled = true
+	cfg.ACPX.Agent = "qwen"
+	d := New(cfg)
+
+	got := capabilityNames(d.agentCapabilities())
+	want := []string{"qwen", "cursor", "kilocode", "antigravity"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("agentCapabilities() names = %v, want %v", got, want)
+	}
+}
+
+func TestAgentCapabilitiesReportEmptyListWhenNothingInstalled(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	cfg := DefaultConfig()
+	cfg.ACPX.Enabled = true
+	d := New(cfg)
+
+	if got := d.agentCapabilities(); len(got) != 0 {
+		t.Fatalf("agentCapabilities() = %v, want empty", got)
+	}
+}
+
 func TestSupportsTaskAgentForRuntimeUsesDirectACPConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ACPX.Enabled = true
@@ -159,7 +241,15 @@ func TestSupportsTaskAgentForRuntimeUsesDirectACPConfig(t *testing.T) {
 	if !d.supportsTaskAgentForRuntime("kilo", "direct_acp") {
 		t.Fatal("supportsTaskAgentForRuntime(kilo, direct_acp) = false, want true")
 	}
-	if d.supportsTaskAgentForRuntime("kilo", "acpx") {
-		t.Fatal("supportsTaskAgentForRuntime(kilo, acpx) = true, want false without ACPX kilocode support")
+	if !d.supportsTaskAgentForRuntime("kilo", "acpx") {
+		t.Fatal("supportsTaskAgentForRuntime(kilo, acpx) = false, want true with ACPX kilocode support")
 	}
+}
+
+func capabilityNames(caps []protocol.AgentCapability) []string {
+	names := make([]string, 0, len(caps))
+	for _, cap := range caps {
+		names = append(names, cap.Name)
+	}
+	return names
 }

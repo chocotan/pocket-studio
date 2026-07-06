@@ -77,19 +77,47 @@ function isLocalEvent(evt: TaskEvent) {
   return evt.event_id.startsWith("local-");
 }
 
+function hasSequenceRegression(events: TaskEvent[]) {
+  let maxSeq = 0;
+  for (const event of events) {
+    if (isLocalEvent(event)) continue;
+    const seq = Number(event.sequence || 0);
+    if (seq <= 0) continue;
+    if (seq < maxSeq) return true;
+    maxSeq = seq;
+  }
+  return false;
+}
+
 export function sortTaskEventsForDisplay(events: TaskEvent[]) {
-  return [...events].sort((left, right) => {
-    const leftSeq = Number(left.sequence || 0);
-    const rightSeq = Number(right.sequence || 0);
-    if (!isLocalEvent(left) && !isLocalEvent(right) && leftSeq > 0 && rightSeq > 0 && leftSeq !== rightSeq) {
+  const sequenceRegression = hasSequenceRegression(events);
+  return events
+    .map((event, index) => ({ event, index }))
+    .sort((leftItem, rightItem) => {
+      const left = leftItem.event;
+      const right = rightItem.event;
+      const leftSeq = Number(left.sequence || 0);
+      const rightSeq = Number(right.sequence || 0);
+      if (
+        !sequenceRegression &&
+        !isLocalEvent(left) &&
+        !isLocalEvent(right) &&
+        leftSeq > 0 &&
+        rightSeq > 0 &&
+        leftSeq !== rightSeq
+      ) {
+        return leftSeq - rightSeq;
+      }
+      if (sequenceRegression) {
+        return leftItem.index - rightItem.index;
+      }
+      const timeDiff = Number(left.timestamp || 0) - Number(right.timestamp || 0);
+      if (timeDiff !== 0) return timeDiff;
+      const rankDiff = eventDisplayRank(left.event_type) - eventDisplayRank(right.event_type);
+      if (rankDiff !== 0) return rankDiff;
       return leftSeq - rightSeq;
-    }
-    const timeDiff = Number(left.timestamp || 0) - Number(right.timestamp || 0);
-    if (timeDiff !== 0) return timeDiff;
-    const rankDiff = eventDisplayRank(left.event_type) - eventDisplayRank(right.event_type);
-    if (rankDiff !== 0) return rankDiff;
-    return leftSeq - rightSeq;
-  });
+    })
+    .map((item) => item.event);
 }
 
 export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
@@ -101,24 +129,21 @@ export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
     }
     let isDuplicate = false;
     if (event.event_type === "user.prompt") {
-      const eventPrompt = getMetadata(event.data)?.prompt;
-      if (eventPrompt) {
+      const eventData = getMetadata(event.data);
+      const eventTurnId = typeof eventData?.turn_id === "string" ? eventData.turn_id : "";
+      if (eventTurnId) {
         for (let index = 0; index < merged.length; index++) {
           const existing = merged[index];
-          if (existing.event_type === "user.prompt") {
-            const existingPrompt = getMetadata(existing.data)?.prompt;
-            if (
-              existingPrompt === eventPrompt &&
-              Math.abs(existing.timestamp - event.timestamp) < 10
-            ) {
-              if (existing.event_id.startsWith("local-user.prompt-")) {
-                merged[index] = {
-                  ...event,
-                  timestamp: existing.timestamp,
-                };
-                existingIds.add(event.event_id);
-                existingIds.delete(existing.event_id);
-              }
+          if (existing.event_type === "user.prompt" && existing.event_id.startsWith("local-user.prompt-")) {
+            const existingData = getMetadata(existing.data);
+            const existingTurnId = typeof existingData?.turn_id === "string" ? existingData.turn_id : "";
+            if (existingTurnId === eventTurnId) {
+              merged[index] = {
+                ...event,
+                timestamp: existing.timestamp,
+              };
+              existingIds.add(event.event_id);
+              existingIds.delete(existing.event_id);
               isDuplicate = true;
               break;
             }
@@ -134,7 +159,7 @@ export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
   return merged;
 }
 
-export function makeLocalUserPromptEvent(taskID: string, prompt: string, sequence?: number): TaskEvent {
+export function makeLocalUserPromptEvent(taskID: string, turnID: string, prompt: string, sequence?: number): TaskEvent {
   const now = getUnixTimestamp();
   return {
     task_id: taskID,
@@ -143,8 +168,8 @@ export function makeLocalUserPromptEvent(taskID: string, prompt: string, sequenc
     source: "web",
     sequence: sequence !== undefined ? sequence : now,
     timestamp: now,
-    data: JSON.stringify({ prompt }),
-    raw: JSON.stringify({ local: true, eventType: "user.prompt", prompt }),
+    data: JSON.stringify({ prompt, turn_id: turnID }),
+    raw: JSON.stringify({ local: true, eventType: "user.prompt", prompt, turn_id: turnID }),
   };
 }
 
@@ -305,7 +330,9 @@ export function normalizeToolEventMetadata(
       toolCallId: toolId,
       tool_call_id: toolId,
       output,
-      status: isError ? "failed" : "completed",
+      status: isError ? "failed" : dataPayload?.status ?? rawMetadata?.status ?? "completed",
+      append: dataPayload?.append ?? rawMetadata?.append,
+      stream_id: dataPayload?.stream_id ?? rawMetadata?.stream_id,
     };
   }
   return rawMetadata ?? dataPayload;
