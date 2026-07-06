@@ -46,6 +46,8 @@ type Daemon struct {
 	termMu              sync.Mutex
 	terminalPTYs        map[string]*runningPTY
 	directTerminalConns map[string]map[*directTerminalSubscriber]struct{}
+	directACPXConns     map[string]map[*directACPXSubscriber]struct{}
+	directACPXProjects  map[string]string
 	hookURL             string
 	hookToken           string
 	hookAlerts          map[string]time.Time
@@ -104,6 +106,8 @@ func New(cfg Config) *Daemon {
 		sendBinary:          make(chan []byte, 256),
 		terminalPTYs:        make(map[string]*runningPTY),
 		directTerminalConns: make(map[string]map[*directTerminalSubscriber]struct{}),
+		directACPXConns:     make(map[string]map[*directACPXSubscriber]struct{}),
+		directACPXProjects:  make(map[string]string),
 		hookToken:           randomHookToken(),
 		hookAlerts:          make(map[string]time.Time),
 		directACP:           make(map[string]*directACPSession),
@@ -907,15 +911,7 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 
 func (d *Daemon) sendTaskHistory(request protocol.TaskHistoryGet) {
 	d.mu.Lock()
-	record := d.history[request.TaskID]
-	if record.TaskID == "" {
-		for _, r := range d.history {
-			if r.SessionName == request.TaskID {
-				record = r
-				break
-			}
-		}
-	}
+	record := d.taskHistoryRecordLocked(request.TaskID)
 	d.mu.Unlock()
 
 	result := protocol.TaskHistoryResult{
@@ -924,11 +920,27 @@ func (d *Daemon) sendTaskHistory(request protocol.TaskHistoryGet) {
 	}
 	if record.TaskID != "" {
 		record.TaskID = request.TaskID
+		for i := range record.Events {
+			record.Events[i].TaskID = request.TaskID
+		}
 		record.Events = normalizedTaskHistoryEvents(record)
 		result.Record = &record
 		result.Events = append([]protocol.TaskEvent(nil), record.Events...)
 	}
 	d.send <- protocol.NewEnvelope(protocol.TypeTaskHistoryResult, "daemon", result)
+}
+
+func (d *Daemon) taskHistoryRecordLocked(taskID string) protocol.TaskRecord {
+	record := d.history[taskID]
+	if record.TaskID != "" {
+		return record
+	}
+	for _, candidate := range d.history {
+		if candidate.SessionName == taskID || candidate.SessionID == taskID {
+			return candidate
+		}
+	}
+	return protocol.TaskRecord{}
 }
 
 // lockTaskDispatch serializes startTask calls for the same task ID. The
@@ -4165,7 +4177,7 @@ func (d *Daemon) emitTaskEventWithNextSequence(taskID, eventType string, data an
 	}
 	d.mu.Unlock()
 
-	d.send <- protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", event)
+	d.sendTaskEvent(event)
 	d.maybeSendAgentCompletionAlert(record, event)
 }
 
@@ -4186,7 +4198,12 @@ func (d *Daemon) emitTaskEvent(taskID, eventType string, sequence int64, data an
 		Raw:       raw,
 	}
 	d.recordTaskEvent(event)
+	d.sendTaskEvent(event)
+}
+
+func (d *Daemon) sendTaskEvent(event protocol.TaskEvent) {
 	d.send <- protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", event)
+	d.broadcastDirectACPXEvent(event)
 }
 
 func injectUniqueFields(data any, seq int64) any {

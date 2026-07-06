@@ -93,6 +93,136 @@ func TestDirectTerminalSubscribersReceiveDataTitleAndExit(t *testing.T) {
 	d.broadcastDirectTerminalExit(protocol.TerminalStreamExit{ProjectID: "project", TerminalID: "term"})
 }
 
+func TestDirectACPXEndpointRoutesHistoryAndLiveEvents(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Device.ID = "dev"
+	cfg.DirectWeb.Enabled = true
+	cfg.DirectWeb.Token = "secret"
+	workspacePath := t.TempDir()
+	cfg.Workspaces = []protocol.Workspace{{ID: "project", Name: "Project", Path: workspacePath}}
+	d := New(cfg)
+	d.mu.Lock()
+	d.projects["project"] = protocol.Project{ID: "project", Name: "Project", DeviceID: "dev", WorkspacePath: workspacePath, DirectMode: true}
+	d.history["rec-1"] = protocol.TaskRecord{
+		TaskID:        "rec-1",
+		SessionID:     "task",
+		WorkspacePath: workspacePath,
+		Status:        "created",
+		Events: []protocol.TaskEvent{{
+			TaskID:    "rec-1",
+			EventID:   "evt-history",
+			EventType: "session.created",
+			Source:    "claude_code",
+			Sequence:  1,
+		}},
+	}
+	d.mu.Unlock()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/acpx", d.handleDirectACPXWebSocket)
+	server := http.Server{Handler: mux}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	go server.Serve(ln)
+
+	token := protocol.NewDirectTerminalToken("secret", "project", time.Now().Add(time.Minute))
+	ws, _, err := websocket.DefaultDialer.Dial("ws://"+ln.Addr().String()+"/ws/acpx?project_id=project&task_id=task&token="+token, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	var history protocol.Envelope
+	if err := ws.ReadJSON(&history); err != nil {
+		t.Fatal(err)
+	}
+	event, err := protocol.DecodePayload[protocol.TaskEvent](history)
+	if err != nil {
+		t.Fatalf("decode history event: %v", err)
+	}
+	if history.Type != protocol.TypeTaskEvent || event.EventID != "evt-history" || event.TaskID != "task" {
+		t.Fatalf("history envelope = %#v event=%#v", history, event)
+	}
+
+	d.emitTaskEvent("task", "model.list", 0, map[string]any{"models": []string{"a"}}, nil)
+	var live protocol.Envelope
+	if err := ws.ReadJSON(&live); err != nil {
+		t.Fatal(err)
+	}
+	event, err = protocol.DecodePayload[protocol.TaskEvent](live)
+	if err != nil {
+		t.Fatalf("decode live event: %v", err)
+	}
+	if live.Type != protocol.TypeTaskEvent || event.EventType != "model.list" {
+		t.Fatalf("live envelope = %#v event=%#v", live, event)
+	}
+}
+
+func TestDirectACPXWebSocketRejectsBadToken(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Device.ID = "dev"
+	cfg.DirectWeb.Enabled = true
+	cfg.DirectWeb.Token = "secret"
+	workspacePath := t.TempDir()
+	d := New(cfg)
+	d.mu.Lock()
+	d.projects["project"] = protocol.Project{ID: "project", Name: "Project", DeviceID: "dev", WorkspacePath: workspacePath, DirectMode: true}
+	d.mu.Unlock()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/acpx", d.handleDirectACPXWebSocket)
+	server := http.Server{Handler: mux}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	go server.Serve(ln)
+
+	_, resp, err := websocket.DefaultDialer.Dial("ws://"+ln.Addr().String()+"/ws/acpx?project_id=project&task_id=task&token=bad", nil)
+	if err == nil {
+		t.Fatal("Dial with bad token succeeded")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("bad token response = %#v err=%v", resp, err)
+	}
+}
+
+func TestDirectACPXWebSocketRequiresProjectDirectMode(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Device.ID = "dev"
+	cfg.DirectWeb.Enabled = true
+	cfg.DirectWeb.Token = "secret"
+	workspacePath := t.TempDir()
+	d := New(cfg)
+	d.mu.Lock()
+	d.projects["project"] = protocol.Project{ID: "project", Name: "Project", DeviceID: "dev", WorkspacePath: workspacePath, DirectMode: false}
+	d.mu.Unlock()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/acpx", d.handleDirectACPXWebSocket)
+	server := http.Server{Handler: mux}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	go server.Serve(ln)
+
+	token := protocol.NewDirectTerminalToken("secret", "project", time.Now().Add(time.Minute))
+	_, resp, err := websocket.DefaultDialer.Dial("ws://"+ln.Addr().String()+"/ws/acpx?project_id=project&task_id=task&token="+token, nil)
+	if err == nil {
+		t.Fatal("Dial for direct-mode disabled project succeeded")
+	}
+	if resp == nil || resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("direct-mode disabled response = %#v err=%v", resp, err)
+	}
+}
+
 func TestDirectTerminalSubscriberReplacementClosesStaleSocket(t *testing.T) {
 	cfg := DefaultConfig()
 	d := New(cfg)

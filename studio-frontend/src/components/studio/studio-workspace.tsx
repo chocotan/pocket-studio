@@ -161,6 +161,7 @@ export function StudioWorkspace({
   } = useWorkspaceLayout({
     projectId,
     project,
+    projects,
     alertTerminalIds,
     onTerminalFocused,
     notificationJumpTarget,
@@ -537,7 +538,7 @@ export function StudioWorkspace({
               }}
               disabled={directModeSaving}
               className={`flex h-6 items-center gap-1 rounded-md border px-1.5 text-[10px] font-bold transition-colors ${project.direct_mode ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300" : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground"} disabled:opacity-60`}
-              title={project.direct_mode ? `直连终端已开启：${project.direct_endpoint?.terminal_ws_url || "等待 daemon 上报端点"}` : "开启后终端 WebSocket 将直连 daemon，文件/Agent 仍走服务器"}
+              title={project.direct_mode ? `直连已开启：${project.direct_endpoint?.terminal_ws_url || "等待 daemon 上报端点"}` : "开启后 Terminal 与 Agent Chat WebSocket 将直连 daemon"}
             >
               <Cable className="h-3.5 w-3.5" />
               <span className="hidden lg:inline">{directModeSaving ? "保存中" : project.direct_mode ? "直连" : "中转"}</span>
@@ -737,6 +738,7 @@ export function StudioWorkspace({
                         isMaximized={floatState.isMaximized}
                         isMinimized={floatState.isMinimized}
                         focused={focusedId === p.id && !floatState.isMinimized}
+                        scale={panelScale}
                         onFocus={() => focusFloatingPanelAndRevealDock(p.id)}
                         onUpdatePosition={(newX, newY) => {
                           setFloatingPanels((prev) => ({

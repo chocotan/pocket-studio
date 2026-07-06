@@ -11,6 +11,7 @@ interface FloatingWindowProps {
   isMaximized: boolean;
   isMinimized: boolean;
   focused: boolean;
+  scale?: number;
   onFocus: () => void;
   onUpdatePosition: (x: number, y: number) => void;
   onUpdateSize: (x: number, y: number, w: number, h: number) => void;
@@ -48,9 +49,10 @@ interface WindowFrame {
 const MIN_WIDTH = 320;
 const MIN_HEIGHT = 240;
 
-function frameFromDrag(drag: DragState, clientX: number, clientY: number): WindowFrame {
-  const dx = clientX - drag.startX;
-  const dy = clientY - drag.startY;
+function frameFromDrag(drag: DragState, clientX: number, clientY: number, scale = 1): WindowFrame {
+  const normalizedScale = scale > 0 ? scale : 1;
+  const dx = (clientX - drag.startX) / normalizedScale;
+  const dy = (clientY - drag.startY) / normalizedScale;
 
   if (drag.type === "drag") {
     return {
@@ -108,6 +110,7 @@ export function FloatingWindow({
   isMaximized,
   isMinimized,
   focused,
+  scale = 1,
   onFocus,
   onUpdatePosition,
   onUpdateSize,
@@ -206,7 +209,7 @@ export function FloatingWindow({
     const drag = dragStateRef.current;
     if (!drag || drag.pointerId !== e.pointerId) return;
     e.preventDefault();
-    scheduleFrame(frameFromDrag(drag, e.clientX, e.clientY));
+    scheduleFrame(frameFromDrag(drag, e.clientX, e.clientY, scale));
   };
 
   const handlePointerUp = (e: React.PointerEvent) => {
@@ -225,7 +228,7 @@ export function FloatingWindow({
       animationFrameRef.current = null;
     }
 
-    const nextFrame = frameFromDrag(drag, e.clientX, e.clientY);
+    const nextFrame = frameFromDrag(drag, e.clientX, e.clientY, scale);
     pendingFrameRef.current = null;
     setDragFrame(null);
 

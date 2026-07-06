@@ -338,6 +338,7 @@ function TerminalPanelViewComponent({
       <div
         ref={tabbarRef}
         data-studio-tabbar="true"
+        data-panel-tabs-container="true"
         data-panel-id={panel.id}
         data-tab-count={panel.tabs.length}
         onPointerDown={onHeaderPointerDown}
@@ -404,6 +405,7 @@ function TerminalPanelViewComponent({
                           }
                         }}
                         data-studio-tab="true"
+                        data-tab-button="true"
                         data-panel-id={panel.id}
                         data-tab-index={tabIndex}
                         data-alert={alerting ? "true" : "false"}

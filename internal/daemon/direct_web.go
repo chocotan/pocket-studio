@@ -25,9 +25,15 @@ type directTerminalSubscriber struct {
 	mu   sync.Mutex
 }
 
+type directACPXSubscriber struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
 var directWebUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 const directTerminalWriteTimeout = 2 * time.Second
+const directACPXWriteTimeout = 2 * time.Second
 
 func (d *Daemon) startDirectWebServer(ctx context.Context) (func(), error) {
 	if !d.cfg.DirectWeb.Enabled {
@@ -35,6 +41,7 @@ func (d *Daemon) startDirectWebServer(ctx context.Context) (func(), error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/terminal", d.handleDirectTerminalWebSocket)
+	mux.HandleFunc("/ws/acpx", d.handleDirectACPXWebSocket)
 	listener, err := net.Listen("tcp", d.cfg.DirectWeb.ListenAddr)
 	if err != nil {
 		return nil, err
@@ -142,6 +149,77 @@ func (d *Daemon) handleDirectTerminalWebSocket(w http.ResponseWriter, r *http.Re
 	}
 }
 
+func (d *Daemon) handleDirectACPXWebSocket(w http.ResponseWriter, r *http.Request) {
+	if !d.cfg.DirectWeb.Enabled {
+		http.Error(w, "direct websocket disabled", http.StatusNotFound)
+		return
+	}
+	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
+	if projectID == "" {
+		http.Error(w, "project_id is required", http.StatusBadRequest)
+		return
+	}
+	if !protocol.VerifyDirectTerminalToken(d.cfg.DirectWeb.Token, projectID, r.URL.Query().Get("token"), time.Now()) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	taskID := strings.TrimSpace(r.URL.Query().Get("task_id"))
+	if taskID == "" {
+		http.Error(w, "task_id is required", http.StatusBadRequest)
+		return
+	}
+	if !safeTerminalID(taskID) {
+		http.Error(w, "invalid task_id", http.StatusBadRequest)
+		return
+	}
+	if _, ok := d.projectForDirectTerminal(projectID); !ok {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	conn, err := directWebUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("upgrade direct acpx websocket: %v", err)
+		return
+	}
+	defer conn.Close()
+	enableTCPNoDelay(conn)
+
+	key := directACPXKey(projectID, taskID)
+	subscriber := &directACPXSubscriber{conn: conn}
+	d.addDirectACPXSubscriber(projectID, taskID, subscriber)
+	defer d.removeDirectACPXSubscriber(key, subscriber)
+
+	d.sendDirectTaskHistory(subscriber, taskID)
+
+	for {
+		var env protocol.Envelope
+		if err := conn.ReadJSON(&env); err != nil {
+			break
+		}
+		if env.From == "" {
+			env.From = "web"
+		}
+		if env.Type == "ping" {
+			_ = subscriber.writeEnvelope(protocol.NewEnvelope("pong", "daemon", nil))
+			continue
+		}
+		if !isDirectACPXCommandType(env.Type) {
+			_ = subscriber.writeEnvelope(directServerError("unsupported_type", "unsupported ACPX websocket message type", env.ID))
+			continue
+		}
+		if !envelopeMatchesDirectTask(env, taskID) {
+			_ = subscriber.writeEnvelope(directServerError("task_mismatch", "message task_id does not match websocket task_id", env.ID))
+			continue
+		}
+		if env.To.DeviceID == "" {
+			env.To.DeviceID = d.cfg.Device.ID
+		}
+		if !d.handleDirectACPXEnvelope(env) {
+			_ = subscriber.writeEnvelope(directServerError("bad_payload", "invalid ACPX websocket message payload", env.ID))
+		}
+	}
+}
+
 func (d *Daemon) directEndpoint() *protocol.DirectEndpoint {
 	if !d.cfg.DirectWeb.Enabled {
 		return nil
@@ -167,8 +245,8 @@ func (d *Daemon) directEndpoint() *protocol.DirectEndpoint {
 	if port == "" {
 		return nil
 	}
-	u := url.URL{Scheme: "ws", Host: net.JoinHostPort(host, port), Path: "/ws/terminal"}
-	return &protocol.DirectEndpoint{TerminalWebSocketURL: u.String(), Token: d.cfg.DirectWeb.Token}
+	terminalURL := url.URL{Scheme: "ws", Host: net.JoinHostPort(host, port), Path: "/ws/terminal"}
+	return &protocol.DirectEndpoint{TerminalWebSocketURL: terminalURL.String(), Token: d.cfg.DirectWeb.Token}
 }
 
 func (d *Daemon) projectForDirectTerminal(projectID string) (protocol.Project, bool) {
@@ -203,6 +281,183 @@ func safeTerminalID(id string) bool {
 
 func terminalKey(projectID string, terminalID string) string {
 	return projectID + "::" + terminalID
+}
+
+func directACPXKey(projectID string, taskID string) string {
+	return projectID + "::" + taskID
+}
+
+func (d *Daemon) addDirectACPXSubscriber(projectID string, taskID string, subscriber *directACPXSubscriber) {
+	key := directACPXKey(projectID, taskID)
+	d.termMu.Lock()
+	if d.directACPXConns[key] == nil {
+		d.directACPXConns[key] = make(map[*directACPXSubscriber]struct{})
+	}
+	d.directACPXConns[key][subscriber] = struct{}{}
+	d.directACPXProjects[taskID] = projectID
+	d.termMu.Unlock()
+}
+
+func (d *Daemon) removeDirectACPXSubscriber(key string, subscriber *directACPXSubscriber) {
+	d.termMu.Lock()
+	if subscribers := d.directACPXConns[key]; subscribers != nil {
+		delete(subscribers, subscriber)
+		if len(subscribers) == 0 {
+			delete(d.directACPXConns, key)
+			if _, taskID, ok := splitDirectACPXKey(key); ok {
+				delete(d.directACPXProjects, taskID)
+			}
+		}
+	}
+	d.termMu.Unlock()
+}
+
+func splitDirectACPXKey(key string) (string, string, bool) {
+	before, after, ok := strings.Cut(key, "::")
+	if !ok || before == "" || after == "" {
+		return "", "", false
+	}
+	return before, after, true
+}
+
+func (d *Daemon) directACPXSubscribers(projectID string, taskID string) []*directACPXSubscriber {
+	d.termMu.Lock()
+	defer d.termMu.Unlock()
+	subscribers := d.directACPXConns[directACPXKey(projectID, taskID)]
+	out := make([]*directACPXSubscriber, 0, len(subscribers))
+	for subscriber := range subscribers {
+		out = append(out, subscriber)
+	}
+	return out
+}
+
+func (d *Daemon) broadcastDirectACPXEvent(event protocol.TaskEvent) {
+	if event.TaskID == "" {
+		return
+	}
+	projectID := d.projectIDForDirectACPXTask(event.TaskID)
+	if projectID == "" {
+		return
+	}
+	env := protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", event)
+	for _, subscriber := range d.directACPXSubscribers(projectID, event.TaskID) {
+		if err := subscriber.writeEnvelope(env); err != nil {
+			d.removeDirectACPXSubscriber(directACPXKey(projectID, event.TaskID), subscriber)
+			_ = subscriber.conn.Close()
+		}
+	}
+}
+
+func (d *Daemon) projectIDForDirectACPXTask(taskID string) string {
+	d.termMu.Lock()
+	projectID := d.directACPXProjects[taskID]
+	d.termMu.Unlock()
+	if projectID != "" {
+		return projectID
+	}
+	return d.projectIDForTask(taskID)
+}
+
+func (d *Daemon) projectIDForTask(taskID string) string {
+	d.mu.Lock()
+	record := d.history[taskID]
+	d.mu.Unlock()
+	if record.WorkspacePath == "" {
+		return ""
+	}
+	return d.projectIDForWorkspacePath(record.WorkspacePath)
+}
+
+func (d *Daemon) sendDirectTaskHistory(subscriber *directACPXSubscriber, taskID string) {
+	d.mu.Lock()
+	record := d.taskHistoryRecordLocked(taskID)
+	d.mu.Unlock()
+
+	if record.TaskID == "" {
+		return
+	}
+	record.TaskID = taskID
+	for i := range record.Events {
+		record.Events[i].TaskID = taskID
+	}
+	for _, event := range normalizedTaskHistoryEvents(record) {
+		if err := subscriber.writeEnvelope(protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", event)); err != nil {
+			return
+		}
+	}
+}
+
+func (d *Daemon) handleDirectACPXEnvelope(env protocol.Envelope) bool {
+	switch env.Type {
+	case protocol.TypeSessionCreate:
+		session, err := protocol.DecodePayload[protocol.SessionCreate](env)
+		if err != nil {
+			return false
+		}
+		go d.createSession(context.Background(), session)
+	case protocol.TypeTaskDispatch:
+		task, err := protocol.DecodePayload[protocol.TaskDispatch](env)
+		if err != nil {
+			return false
+		}
+		go d.startTask(context.Background(), task)
+	case protocol.TypeTaskStop:
+		stop, err := protocol.DecodePayload[protocol.TaskStop](env)
+		if err != nil {
+			return false
+		}
+		go d.stopTask(stop.TaskID)
+	case protocol.TypeTaskSetModel:
+		change, err := protocol.DecodePayload[protocol.TaskSetModel](env)
+		if err != nil {
+			return false
+		}
+		go d.setTaskModel(context.Background(), change)
+	case protocol.TypeTaskSetConfigOption:
+		change, err := protocol.DecodePayload[protocol.TaskSetConfigOption](env)
+		if err != nil {
+			return false
+		}
+		go d.setTaskConfigOption(context.Background(), change)
+	case protocol.TypeSessionDelete:
+		remove, err := protocol.DecodePayload[protocol.SessionDelete](env)
+		if err != nil {
+			return false
+		}
+		go d.deleteSession(context.Background(), remove)
+	default:
+		return false
+	}
+	return true
+}
+
+func isDirectACPXCommandType(messageType string) bool {
+	switch messageType {
+	case protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func envelopeMatchesDirectTask(env protocol.Envelope, taskID string) bool {
+	if env.To.TaskID != "" && env.To.TaskID != taskID {
+		return false
+	}
+	if len(env.Payload) == 0 {
+		return true
+	}
+	var payload struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		return true
+	}
+	return payload.TaskID == "" || payload.TaskID == taskID
+}
+
+func directServerError(code, message string, requestID string) protocol.Envelope {
+	return protocol.NewEnvelope(protocol.TypeServerError, "daemon", protocol.ServerError{Code: code, Message: message, RequestID: requestID})
 }
 
 func (d *Daemon) addDirectTerminalSubscriber(key string, subscriber *directTerminalSubscriber) {
@@ -287,6 +542,15 @@ func (s *directTerminalSubscriber) writeJSON(value any) error {
 	defer s.mu.Unlock()
 	_ = s.conn.SetWriteDeadline(time.Now().Add(directTerminalWriteTimeout))
 	err := s.conn.WriteJSON(value)
+	_ = s.conn.SetWriteDeadline(time.Time{})
+	return err
+}
+
+func (s *directACPXSubscriber) writeEnvelope(env protocol.Envelope) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.conn.SetWriteDeadline(time.Now().Add(directACPXWriteTimeout))
+	err := writeEnvelope(s.conn, env)
 	_ = s.conn.SetWriteDeadline(time.Time{})
 	return err
 }

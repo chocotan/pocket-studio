@@ -437,6 +437,41 @@ esac
 	}
 }
 
+func TestTaskHistoryRestoresACPXRecordBySessionID(t *testing.T) {
+	d := New(Config{})
+	d.mu.Lock()
+	d.history["rec-1"] = protocol.TaskRecord{
+		TaskID:       "rec-1",
+		SessionName:  "acpx-mqrestore123",
+		SessionID:    "ui-task-1",
+		AgentRuntime: "acpx",
+		Events: []protocol.TaskEvent{{
+			TaskID:    "rec-1",
+			EventID:   "evt-restored",
+			EventType: "assistant.message",
+			Sequence:  1,
+			Timestamp: 100,
+		}},
+	}
+	d.mu.Unlock()
+
+	d.sendTaskHistory(protocol.TaskHistoryGet{RequestID: "req-1", TaskID: "ui-task-1"})
+	env := <-d.send
+	if env.Type != protocol.TypeTaskHistoryResult {
+		t.Fatalf("env type = %q, want task.history.result", env.Type)
+	}
+	result, err := protocol.DecodePayload[protocol.TaskHistoryResult](env)
+	if err != nil {
+		t.Fatalf("decode history result: %v", err)
+	}
+	if result.Record == nil || result.Record.TaskID != "ui-task-1" {
+		t.Fatalf("record = %#v, want restored task id ui-task-1", result.Record)
+	}
+	if len(result.Events) != 1 || result.Events[0].TaskID != "ui-task-1" || result.Events[0].EventID != "evt-restored" {
+		t.Fatalf("events = %#v, want restored event rewritten to ui-task-1", result.Events)
+	}
+}
+
 func TestMergeTaskEventsDeduplicatesSameEventDataWithDifferentRaw(t *testing.T) {
 	data := json.RawMessage(`{"text":"same assistant answer"}`)
 	base := []protocol.TaskEvent{

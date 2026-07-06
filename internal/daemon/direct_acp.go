@@ -324,7 +324,7 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 
 	emitter := client.emitter
 	if userEvent.TaskID != "" {
-		d.send <- protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", userEvent)
+		d.sendTaskEvent(userEvent)
 	}
 	emitter.emit("task.started", map[string]any{
 		"turn_id":       turnID,

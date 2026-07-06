@@ -8,10 +8,10 @@ import {
   X
 } from "lucide-react";
 import { Antigravity, ClaudeCode, Codex, Cursor, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
-import { websocketURL } from "@/lib/api";
 import { agentNameForRuntime, makeId, terminalKindFromAgentKind } from "../terminal-types";
 import { type StudioTab } from "../studio-layout";
 import type { Project } from "../studio-dashboard";
+import { agentChatWebSocketURL } from "./direct-websocket";
 import type { AgentConfigOption } from "@/lib/agent-protocol";
 import {
   configOptionsFromTaskEvents,
@@ -208,7 +208,8 @@ export function AgentChatTab({
   }, []);
 
   const openAgentSocket = useCallback((activeSessionId: string, activeSessionName: string) => {
-    const socket = new WebSocket(websocketURL("/ws/acpx", new URLSearchParams({ task_id: activeSessionId })));
+    const { url: socketURL, transport } = agentChatWebSocketURL(project, activeSessionId);
+    const socket = new WebSocket(socketURL);
     socketRef.current = socket;
     socketTaskIdRef.current = activeSessionId;
     setError("");
@@ -218,6 +219,7 @@ export function AgentChatTab({
       phase: "ws.opening",
       taskId: activeSessionId,
       sessionName: activeSessionName,
+      transport,
     });
 
     let pingInterval: number | null = null;
@@ -365,6 +367,7 @@ export function AgentChatTab({
     agentRuntime,
     buildSessionCreateEnvelope,
     flushPendingEnvelopes,
+    project,
     showError,
     supportsModelSelection,
     tab.id,

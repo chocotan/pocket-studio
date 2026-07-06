@@ -44,6 +44,7 @@ import {
   editableTargetShouldKeepKeyboard,
 } from "../studio-layout-ops";
 import { directWebsocketURL, getJSON, postJSON, websocketURL } from "@/lib/api";
+import { agentChatWebSocketURL } from "../agent-chat/direct-websocket";
 import type { NotificationJumpTarget } from "../terminal-notifications";
 
 function collectAllPanels(node: LayoutNode | null): TerminalPanel[] {
@@ -52,9 +53,15 @@ function collectAllPanels(node: LayoutNode | null): TerminalPanel[] {
   return node.children.flatMap(collectAllPanels);
 }
 
+type SavedStudioState = {
+  layoutMode?: unknown;
+  floatingPanels?: unknown;
+};
+
 interface UseWorkspaceLayoutProps {
   projectId: string;
   project: Project;
+  projects: Project[];
   alertTerminalIds: Set<string>;
   onTerminalFocused: (projectId: string, tabId: string) => void;
   notificationJumpTarget: NotificationJumpTarget | null;
@@ -64,6 +71,7 @@ interface UseWorkspaceLayoutProps {
 export function useWorkspaceLayout({
   projectId,
   project,
+  projects,
   alertTerminalIds,
   onTerminalFocused,
   notificationJumpTarget,
@@ -120,7 +128,8 @@ export function useWorkspaceLayout({
 
   function deleteAgentSession(tab: StudioTab) {
     if (tab.kind !== "agent_chat" || !tab.agentSessionId) return;
-    const socket = new WebSocket(websocketURL("/ws/acpx", new URLSearchParams({ task_id: tab.agentSessionId })));
+    const tabProject = projects.find((item) => item.id === (tab.projectId || projectId)) || project;
+    const socket = new WebSocket(agentChatWebSocketURL(tabProject, tab.agentSessionId).url);
     const message = JSON.stringify({
       id: makeId("msg"),
       type: "session.delete",
@@ -215,7 +224,7 @@ export function useWorkspaceLayout({
       setFocusedId(next.focusedId);
       setNewTerminalType(next.newTerminalType);
 
-      const raw = stateProject.studio_state as any;
+      const raw = stateProject.studio_state as SavedStudioState | null | undefined;
       if (raw) {
         if (raw.layoutMode === "grid" || raw.layoutMode === "floating") {
           setLayoutMode(raw.layoutMode);
@@ -224,7 +233,7 @@ export function useWorkspaceLayout({
           setLayoutMode(saved === "floating" ? "floating" : "grid");
         }
         if (raw.floatingPanels && typeof raw.floatingPanels === "object") {
-          setFloatingPanels(raw.floatingPanels);
+          setFloatingPanels(raw.floatingPanels as Record<string, FloatingPanelState>);
         } else {
           setFloatingPanels({});
         }
