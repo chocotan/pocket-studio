@@ -118,6 +118,7 @@ export function StudioWorkspace({
     if (typeof window === "undefined") return false;
     return localStorage.getItem(STUDIO_NAV_HIDDEN_KEY) === "true";
   });
+  const [projectListOpen, setProjectListOpen] = useState(false);
   const panelScale = pageZoom / 100;
 
   const {
@@ -480,7 +481,11 @@ export function StudioWorkspace({
     >
       {!navHidden && (
         <header className="studio-header shrink-0 h-7 flex items-center gap-1.5 px-2 z-50 shadow-sm transition-colors duration-150">
-          <div className="flex h-6 shrink-0 items-center gap-1.5">
+          <div
+            onClick={onBackToDashboard}
+            className="flex h-6 shrink-0 items-center gap-1.5 cursor-pointer hover:opacity-80 active:scale-95 transition-all select-none"
+            title="返回"
+          >
             <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-indigo-600 shadow-sm shadow-indigo-500/25">
               <span className="text-white font-black text-[8px] leading-none">P</span>
             </div>
@@ -496,6 +501,9 @@ export function StudioWorkspace({
             currentProjectId={projectId}
             alertProjectIds={new Set([...alertProjectIds].filter((id) => id !== projectId))}
             onSelectProject={onSelectProject}
+            onAddFavorite={() => setProjectListOpen(true)}
+            onRemoveFavorite={onToggleFavorite}
+            onMoveFavorite={onMoveFavorite}
             className="flex-1"
           />
 
@@ -508,8 +516,9 @@ export function StudioWorkspace({
               currentProjectId={projectId}
               onSelectProject={onSelectProject}
               onToggleFavorite={onToggleFavorite}
-              onMoveFavorite={onMoveFavorite}
               onDirectModeChange={onDirectModeChange}
+              open={projectListOpen}
+              onOpenChange={setProjectListOpen}
               triggerClassName="hidden md:flex"
             />
 

@@ -22,6 +22,7 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [favorites, setFavorites] = useState<string[]>(() => loadFavorites());
   const [selectedProjectId, setSelectedProjectId] = useState<string>(initialProjectId);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
   const [pageZoom, setPageZoom] = useState<PageZoom>(() => loadZoom());
   const [terminalNotifications, setTerminalNotifications] = useState<TerminalNotification[]>([]);
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
@@ -34,7 +35,12 @@ export default function App() {
   const orderedProjectsRef = useRef<Project[]>([]);
   const webTransportRef = useRef<StudioWebTransport | null>(null);
   const refreshProjectsRef = useRef<() => void>(() => {});
-  const orderedProjects = projects;
+  const orderedDevices = useMemo(() => {
+    return [...devices].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  }, [devices]);
+  const orderedProjects = useMemo(() => {
+    return [...projects].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  }, [projects]);
   const favoriteProjects = useMemo(() => favoriteProjectsFrom(projects, favorites), [favorites, projects]);
   const favoriteIdSet = useMemo(() => new Set(favorites), [favorites]);
   const envelopeHandlerRef = useRef<(envelope: StudioEnvelope) => void>(() => {});
@@ -64,13 +70,21 @@ export default function App() {
   }, [projects]);
 
   useEffect(() => {
-    devicesRef.current = devices;
-  }, [devices]);
+    devicesRef.current = orderedDevices;
+  }, [orderedDevices]);
 
   useEffect(() => {
     projectsRef.current = projects;
     orderedProjectsRef.current = orderedProjects;
   }, [orderedProjects, projects]);
+
+  useEffect(() => {
+    if (orderedDevices.length > 0) {
+      if (!selectedDeviceId || !orderedDevices.some((d) => d.id === selectedDeviceId)) {
+        setSelectedDeviceId(orderedDevices[0].id);
+      }
+    }
+  }, [orderedDevices, selectedDeviceId]);
 
   useEffect(() => {
     envelopeHandlerRef.current = (envelope) => {
@@ -142,14 +156,7 @@ export default function App() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  useEffect(() => {
-    if (!selectedProjectId || orderedProjects.length === 0) return;
-    if (!orderedProjects.some((project) => project.id === selectedProjectId)) {
-      setSelectedProjectId("");
-      setView("studio_dashboard");
-      replacePath(studioPath("/"));
-    }
-  }, [orderedProjects, selectedProjectId]);
+
 
 
   async function refreshProjects() {
@@ -335,12 +342,11 @@ export default function App() {
     <div className="h-full w-full">
       {!showWorkspace ? (
         <StudioDashboard
-          devices={devices}
+          devices={orderedDevices}
           projects={orderedProjects}
           favoriteProjects={favoriteProjects}
           favoriteIds={favoriteIdSet}
           onToggleFavorite={handleToggleFavorite}
-          onMoveFavorite={handleMoveFavorite}
           onDirectModeChange={handleDirectModeChange}
           onSelectProject={handleSelectProject}
           onDeleteProject={handleDeleteProject}
@@ -352,6 +358,8 @@ export default function App() {
           onNotificationCenterOpenChange={setNotificationCenterOpen}
           onSelectNotification={handleSelectNotification}
           onMarkAllNotificationsRead={handleMarkAllNotificationsRead}
+          selectedDeviceId={selectedDeviceId}
+          onSelectDevice={setSelectedDeviceId}
         />
       ) : (
           <StudioWorkspace
@@ -363,7 +371,7 @@ export default function App() {
             onToggleFavorite={handleToggleFavorite}
             onMoveFavorite={handleMoveFavorite}
             onDirectModeChange={handleDirectModeChange}
-            devices={devices}
+            devices={orderedDevices}
             pageZoom={pageZoom}
             onPageZoomChange={setPageZoom}
             onSelectProject={handleSelectProject}
@@ -416,11 +424,6 @@ function stripStudioPrefix(path: string) {
 function pushPath(path: string) {
   if (window.location.pathname === path) return;
   window.history.pushState({}, "", path);
-}
-
-function replacePath(path: string) {
-  if (window.location.pathname === path) return;
-  window.history.replaceState({}, "", path);
 }
 
 function loadFavorites() {

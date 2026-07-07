@@ -251,6 +251,15 @@ function terminalHomeEndSequence(key: string) {
   return "";
 }
 
+function isAntigravityCommand(command: string) {
+  const normalized = command.toLowerCase();
+  return normalized.includes("agy") || normalized.includes("antigravity");
+}
+
+function normalizePasteLineFeeds(text: string) {
+  return text.replace(/\r\n?/g, "\n");
+}
+
 function isEditableOutsideTerminal(target: EventTarget | null, terminalContainer: HTMLElement) {
   if (!(target instanceof HTMLElement)) return false;
   if (terminalContainer.contains(target)) return false;
@@ -613,8 +622,14 @@ export function XtermInstance({
         return `./${filename}`;
       };
 
-      const safePaste = (text: string) => {
+      const pasteIntoTerminal = (text: string) => {
         if (!term) return;
+        if (isAntigravityCommand(currentCommandRef.current || "")) {
+          const payload = normalizePasteLineFeeds(text);
+          term.input(term.modes.bracketedPasteMode ? `\x1b[200~${payload}\x1b[201~` : payload);
+          if (term.textarea) term.textarea.value = "";
+          return;
+        }
         term.paste(text);
       };
 
@@ -660,19 +675,19 @@ export function XtermInstance({
             }
             if (navigator.clipboard.readText) {
               void navigator.clipboard.readText().then((text) => {
-                if (text) safePaste(text);
+                if (text) pasteIntoTerminal(text);
               }).catch(() => {});
             }
           }).catch(() => {
             if (navigator.clipboard.readText) {
               void navigator.clipboard.readText().then((text) => {
-                if (text) safePaste(text);
+                if (text) pasteIntoTerminal(text);
               }).catch(() => {});
             }
           });
         } else if (navigator.clipboard?.readText) {
           void navigator.clipboard.readText().then((text) => {
-            if (text) safePaste(text);
+            if (text) pasteIntoTerminal(text);
           }).catch(() => {});
         }
       };
@@ -721,7 +736,7 @@ export function XtermInstance({
         if (text) {
           event.preventDefault();
           event.stopPropagation();
-          safePaste(text);
+          pasteIntoTerminal(text);
           return;
         }
         const items = event.clipboardData?.items;

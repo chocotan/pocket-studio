@@ -56,7 +56,6 @@ interface StudioDashboardProps {
   favoriteProjects: Project[];
   favoriteIds: Set<string>;
   onToggleFavorite: (projectId: string) => void;
-  onMoveFavorite: (projectId: string, direction: "up" | "down") => void;
   onDirectModeChange: (projectId: string, directMode: boolean) => void;
   onSelectProject: (projectId: string) => void;
   onRefreshProjects: () => void;
@@ -68,6 +67,8 @@ interface StudioDashboardProps {
   onSelectNotification?: (notification: TerminalNotification) => void;
   onMarkAllNotificationsRead?: () => void;
   onDeleteProject?: (projectId: string) => void;
+  selectedDeviceId?: string;
+  onSelectDevice?: (deviceId: string) => void;
 }
 
 
@@ -78,7 +79,6 @@ export function StudioDashboard({
   favoriteProjects,
   favoriteIds,
   onToggleFavorite,
-  onMoveFavorite,
   onDirectModeChange,
   onSelectProject,
   onRefreshProjects,
@@ -90,8 +90,12 @@ export function StudioDashboard({
   onSelectNotification = () => {},
   onMarkAllNotificationsRead = () => {},
   onDeleteProject,
+  selectedDeviceId: propSelectedDeviceId,
+  onSelectDevice,
 }: StudioDashboardProps) {
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
+  const [localSelectedDeviceId, setLocalSelectedDeviceId] = useState<string>("");
+  const selectedDeviceId = propSelectedDeviceId !== undefined ? propSelectedDeviceId : localSelectedDeviceId;
+  const setSelectedDeviceId = onSelectDevice !== undefined ? onSelectDevice : setLocalSelectedDeviceId;
   const [createOpen, setCreateOpen] = useState(false);
   const [newProjName, setNewProjName] = useState("");
   const [newProjPath, setNewProjPath] = useState("");
@@ -119,7 +123,7 @@ export function StudioDashboard({
     if (devices.length > 0 && !selectedDeviceId) {
       setSelectedDeviceId(devices[0].id);
     }
-  }, [devices, selectedDeviceId]);
+  }, [devices, selectedDeviceId, setSelectedDeviceId]);
 
   useEffect(() => {
     loadClientConfig().then((cfg) => {
@@ -316,7 +320,6 @@ export function StudioDashboard({
             devices={devices}
             onSelectProject={onSelectProject}
             onToggleFavorite={onToggleFavorite}
-            onMoveFavorite={onMoveFavorite}
             onDirectModeChange={onDirectModeChange}
             triggerClassName="hidden sm:flex"
           />
