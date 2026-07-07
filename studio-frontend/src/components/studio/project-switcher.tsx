@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Check, FolderGit2, Search, Server, Star } from "lucide-react";
+import { ArrowDown, ArrowUp, Cable, Check, FolderGit2, Search, Server, Star } from "lucide-react";
 import type { Device } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ interface ProjectSwitcherProps {
   onSelectProject: (projectId: string) => void;
   onToggleFavorite: (projectId: string) => void;
   onMoveFavorite: (projectId: string, direction: "up" | "down") => void;
+  onDirectModeChange: (projectId: string, directMode: boolean) => void;
   triggerClassName?: string;
   triggerLabel?: string;
 }
@@ -38,6 +39,7 @@ export function ProjectSwitcher({
   onSelectProject,
   onToggleFavorite,
   onMoveFavorite,
+  onDirectModeChange,
   triggerClassName,
   triggerLabel = "我的收藏",
 }: ProjectSwitcherProps) {
@@ -114,6 +116,21 @@ export function ProjectSwitcher({
           </button>
 
           <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => onDirectModeChange(project.id, !project.direct_mode)}
+              title={project.direct_mode ? "切换为中转" : "切换为直连"}
+              aria-label={`${project.name} ${project.direct_mode ? "切换为中转" : "切换为直连"}`}
+              className={cn(
+                "flex h-6 items-center gap-1 rounded-md border px-1.5 text-[10px] font-bold transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400",
+                project.direct_mode
+                  ? "border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-950/70"
+                  : "border-slate-200 bg-white text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+              )}
+            >
+              <Cable className="h-3 w-3" />
+              <span>{project.direct_mode ? "直连" : "中转"}</span>
+            </button>
             {options.favorite && (
               <>
                 <Button
@@ -168,7 +185,7 @@ export function ProjectSwitcher({
           setOpen(true);
         }}
         className={cn(
-          "flex h-6 min-w-0 items-center gap-1.5 rounded-full border border-slate-200/60 bg-slate-100/80 px-2 text-[11px] text-slate-500 transition-colors hover:border-indigo-200 hover:bg-indigo-50/70 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 dark:border-slate-700/60 dark:bg-slate-800/50 dark:text-slate-400 dark:hover:border-indigo-800 dark:hover:bg-slate-800",
+          "flex h-6 min-w-0 items-center gap-1.5 rounded-full border border-slate-200/60 bg-slate-100/80 px-2 text-[10px] text-slate-500 transition-colors hover:border-indigo-200 hover:bg-indigo-50/70 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 dark:border-slate-700/60 dark:bg-slate-800/50 dark:text-slate-400 dark:hover:border-indigo-800 dark:hover:bg-slate-800",
           triggerClassName
         )}
         aria-label={triggerLabel}

@@ -66,7 +66,7 @@ export function NotificationCenter({
           type="button"
           onClick={() => onSelect(visibleTickerItem)}
           data-alert={unreadCount > 0 ? "true" : "false"}
-          className="studio-notification-ticker-button relative hidden h-7 min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white px-2 text-left text-slate-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 sm:block"
+          className="studio-notification-ticker-button relative hidden h-6 min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white px-2 text-left text-slate-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 sm:block"
           title={notificationTickerText(visibleTickerItem, now)}
           aria-label={`跳转消息：${notificationTickerText(visibleTickerItem, now)}`}
         >
@@ -87,7 +87,7 @@ export function NotificationCenter({
         type="button"
         onClick={() => onOpenChange(!open)}
         data-alert={unreadCount > 0 ? "true" : "false"}
-        className="studio-notification-button relative flex h-7 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-slate-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+        className="studio-notification-button relative flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-slate-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
         title="消息列表"
         aria-label={`消息列表${unreadCount ? `，${unreadCount} 条未读` : ""}`}
       >
@@ -103,7 +103,7 @@ export function NotificationCenter({
       {open && (
         <>
           <div className="fixed inset-0 z-40 cursor-default" onClick={() => onOpenChange(false)} />
-          <div className="absolute right-0 top-9 z-50 w-[min(22rem,calc(100dvw-1rem))] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
+          <div className="absolute right-0 top-8 z-50 w-[min(22rem,calc(100dvw-1rem))] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
             <div className="flex h-9 items-center justify-between border-b border-slate-100 px-3 dark:border-slate-800">
               <span className="text-xs font-bold text-slate-800 dark:text-slate-100">消息</span>
               <button

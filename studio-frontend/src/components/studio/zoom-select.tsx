@@ -18,7 +18,7 @@ export function ZoomSelect({ value, onChange, compact = false }: ZoomSelectProps
     <label
       className={cn(
         "flex items-center rounded-lg border border-border bg-card text-[11px] font-semibold text-muted-foreground shadow-sm",
-        compact ? "h-6 gap-0 px-1" : "gap-1.5 px-2 py-1"
+        compact ? "h-6 gap-0 px-1" : "h-6 gap-1.5 px-2"
       )}
     >
       {!compact && <Percent className="h-3.5 w-3.5" aria-hidden="true" />}

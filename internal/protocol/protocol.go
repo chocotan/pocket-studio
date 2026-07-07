@@ -18,6 +18,7 @@ const (
 	TypeTaskEvent            = "task.event"
 	TypeTaskHistoryGet       = "task.history.get"
 	TypeTaskHistoryResult    = "task.history.result"
+	TypeTaskHistoryReady     = "task.history.ready"
 	TypeTaskSnapshot         = "task.snapshot"
 	TypeTaskStop             = "task.stop"
 	TypeTaskSetModel         = "task.set_model"
@@ -173,8 +174,9 @@ type TaskRecord struct {
 }
 
 type TaskHistoryGet struct {
-	RequestID string `json:"request_id,omitempty"`
-	TaskID    string `json:"task_id"`
+	RequestID     string `json:"request_id,omitempty"`
+	TaskID        string `json:"task_id"`
+	WorkspacePath string `json:"workspace_path,omitempty"`
 }
 
 type TaskHistoryResult struct {
@@ -182,6 +184,12 @@ type TaskHistoryResult struct {
 	TaskID    string      `json:"task_id"`
 	Record    *TaskRecord `json:"record,omitempty"`
 	Events    []TaskEvent `json:"events,omitempty"`
+}
+
+type TaskHistoryReady struct {
+	RequestID string `json:"request_id,omitempty"`
+	TaskID    string `json:"task_id"`
+	HasEvents bool   `json:"has_events"`
 }
 
 type TaskSnapshot struct {

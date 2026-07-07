@@ -2,7 +2,6 @@ import { buildAgentToolCallItems } from "@/lib/agent-protocol";
 import type { ChatMessage, TaskEvent } from "./types";
 import {
   compactStreamEvents,
-  conversationEvents,
   getMetadata,
   getToolEventId,
   normalizeTextForDedup,
@@ -29,6 +28,7 @@ type MessageState = {
   }>;
   emittedToolIds: Set<string>;
   lastActivityStartedMs: number;
+  runStartedAtMs: number;
 };
 
 function isLocalUserPromptMessage(message: ChatMessage) {
@@ -52,6 +52,7 @@ function cloneState(prev: MessageState): MessageState {
     pendingToolEvents: [...prev.pendingToolEvents],
     emittedToolIds: new Set(prev.emittedToolIds),
     lastActivityStartedMs: prev.lastActivityStartedMs,
+    runStartedAtMs: prev.runStartedAtMs,
   };
 }
 
@@ -66,6 +67,7 @@ export function createMessageState(): MessageState {
     pendingToolEvents: [],
     emittedToolIds: new Set(),
     lastActivityStartedMs: 0,
+    runStartedAtMs: 0,
   };
 }
 
@@ -136,6 +138,19 @@ function finalizeOpenMessages(state: MessageState, evt: TaskEvent) {
     },
   }));
   rebuildMessageIndex(state);
+
+  const startedAtMs = state.runStartedAtMs;
+  if (startedAtMs > 0 && endedAtMs >= startedAtMs) {
+    appendMessage(state, {
+      id: evt.event_id,
+      seq: Number(evt.sequence),
+      kind: "run_duration",
+      content: "",
+      createdAt: endedAt,
+      durationMs: Math.max(0, endedAtMs - startedAtMs),
+    });
+  }
+  state.runStartedAtMs = 0;
 }
 
 function applyUserPrompt(state: MessageState, evt: TaskEvent, dataPayload: EventRecord | undefined) {
@@ -168,6 +183,9 @@ function applyUserPrompt(state: MessageState, evt: TaskEvent, dataPayload: Event
     appendMessage(state, message);
   }
   state.lastActivityStartedMs = evt.timestamp * 1000;
+  if (state.runStartedAtMs <= 0) {
+    state.runStartedAtMs = evt.timestamp * 1000;
+  }
   state.assistantStreams.clear();
   state.thoughtStreams.clear();
   state.assistantSignatures.clear();
@@ -306,6 +324,7 @@ function applyMessageEvent(state: MessageState, evt: TaskEvent) {
       return;
     case "task.started":
       state.lastActivityStartedMs = evt.timestamp * 1000;
+      state.runStartedAtMs = evt.timestamp * 1000;
       return;
     case "user.prompt":
       applyUserPrompt(state, evt, dataPayload);
@@ -333,8 +352,9 @@ export function applyTaskEventToMessageState(prev: MessageState, event: TaskEven
 }
 
 export function buildMessageStateFromEvents(events: TaskEvent[], taskID: string): MessageState {
+  void taskID;
   const state = createMessageState();
-  for (const event of compactStreamEvents(sortTaskEventsForDisplay(conversationEvents(events, taskID)))) {
+  for (const event of compactStreamEvents(sortTaskEventsForDisplay(events))) {
     applyMessageEvent(state, event);
   }
   return state;

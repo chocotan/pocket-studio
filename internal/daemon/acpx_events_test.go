@@ -360,10 +360,10 @@ esac
 		t.Fatalf("records len = %d, want 1: %#v", len(records), records)
 	}
 	events := records[0].Events
-	if len(events) != 4 {
-		t.Fatalf("events len = %d, want 4: %#v", len(events), events)
+	if len(events) != 8 {
+		t.Fatalf("events len = %d, want 8 with restored turn boundaries: %#v", len(events), events)
 	}
-	wantTypes := []string{"user.prompt", "assistant.message", "user.prompt", "assistant.message"}
+	wantTypes := []string{"task.started", "user.prompt", "assistant.message", "task.completed", "task.started", "user.prompt", "assistant.message", "task.completed"}
 	for i, want := range wantTypes {
 		if events[i].EventType != want {
 			t.Fatalf("event %d type = %q, want %q: %#v", i, events[i].EventType, want, events)
@@ -429,11 +429,13 @@ esac
 	if record.Status != "closed" {
 		t.Fatalf("Status = %q, want closed", record.Status)
 	}
-	if len(record.Events) != 2 {
-		t.Fatalf("events len = %d, want restored user and assistant events: %#v", len(record.Events), record.Events)
+	if len(record.Events) != 4 {
+		t.Fatalf("events len = %d, want restored turn, user, assistant, completion events: %#v", len(record.Events), record.Events)
 	}
-	if record.Events[0].TaskID != record.TaskID || record.Events[1].TaskID != record.TaskID {
-		t.Fatalf("event task ids = %q, %q, want %q", record.Events[0].TaskID, record.Events[1].TaskID, record.TaskID)
+	for _, event := range record.Events {
+		if event.TaskID != record.TaskID {
+			t.Fatalf("event task id = %q, want %q: %#v", event.TaskID, record.TaskID, record.Events)
+		}
 	}
 }
 
@@ -469,6 +471,158 @@ func TestTaskHistoryRestoresACPXRecordBySessionID(t *testing.T) {
 	}
 	if len(result.Events) != 1 || result.Events[0].TaskID != "ui-task-1" || result.Events[0].EventID != "evt-restored" {
 		t.Fatalf("events = %#v, want restored event rewritten to ui-task-1", result.Events)
+	}
+}
+
+func TestTaskHistoryRestoresACPXRecordFromLocalSessionsBySessionName(t *testing.T) {
+	defaultDir := t.TempDir()
+	projectDir := t.TempDir()
+	otherDir := t.TempDir()
+	scriptPath := filepath.Join(defaultDir, "fake-acpx")
+	script := `#!/bin/sh
+case "$*" in
+  *" qwen sessions list "*)
+    case "$PWD" in
+      "$POCKET_TEST_PROJECT_DIR")
+        printf '[{"acpxRecordId":"rec-empty","name":"acpx-ui-task","cwd":"%s","createdAt":"2026-01-01T00:00:00Z","lastUsedAt":"2026-01-01T00:00:20Z","messages":[]},{"acpxRecordId":"rec-1","name":"acpx-ui-task","cwd":"%s","createdAt":"2026-01-01T00:00:00Z","lastUsedAt":"2026-01-01T00:00:10Z","messages":[{"User":{"content":[{"Text":"hello restored"}]}},{"Agent":{"content":[{"Text":"restored answer"}]}}]},{"acpxRecordId":"rec-other","name":"acpx-ui-task","cwd":"%s","createdAt":"2026-01-01T00:00:00Z","lastUsedAt":"2026-01-01T00:00:30Z","messages":[{"User":{"content":[{"Text":"wrong project"}]}}]}]' "$PWD" "$PWD" "$POCKET_TEST_OTHER_DIR"
+        ;;
+      *)
+        printf '[]'
+        ;;
+    esac
+    ;;
+  *" sessions list "*)
+    printf '[]'
+    ;;
+  *)
+    printf '{}\n'
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake acpx: %v", err)
+	}
+	t.Setenv("POCKET_TEST_PROJECT_DIR", projectDir)
+	t.Setenv("POCKET_TEST_OTHER_DIR", otherDir)
+
+	cfg := DefaultConfig()
+	cfg.Workspaces = []protocol.Workspace{{ID: "default", Path: defaultDir}, {ID: "project", Path: projectDir}, {ID: "other", Path: otherDir}}
+	cfg.ACPX.Enabled = true
+	cfg.ACPX.Command = scriptPath
+	cfg.ACPX.Args = []string{"--project-dir", projectDir}
+	cfg.ACPX.TTLSeconds = 0
+	cfg.ACPX.Agent = "opencode"
+	d := New(cfg)
+
+	d.sendTaskHistory(protocol.TaskHistoryGet{RequestID: "req-1", TaskID: "acpx-ui-task", WorkspacePath: projectDir})
+	env := <-d.send
+	if env.Type != protocol.TypeTaskHistoryResult {
+		t.Fatalf("env type = %q, want task.history.result", env.Type)
+	}
+	result, err := protocol.DecodePayload[protocol.TaskHistoryResult](env)
+	if err != nil {
+		t.Fatalf("decode history result: %v", err)
+	}
+	if result.Record == nil || result.Record.TaskID != "acpx-ui-task" {
+		t.Fatalf("record = %#v, want restored task id acpx-ui-task", result.Record)
+	}
+	if result.Record.SessionID != "rec-1" || result.Record.SessionName != "acpx-ui-task" {
+		t.Fatalf("record session = (%q, %q), want rec-1/acpx-ui-task", result.Record.SessionID, result.Record.SessionName)
+	}
+	if result.Record.Agent != "qwen" {
+		t.Fatalf("record agent = %q, want qwen restored even when configured agent is opencode", result.Record.Agent)
+	}
+	if len(result.Events) != 4 {
+		t.Fatalf("events len = %d, want restored turn boundary and message events: %#v", len(result.Events), result.Events)
+	}
+	for _, event := range result.Events {
+		if event.TaskID != "acpx-ui-task" {
+			t.Fatalf("event task id = %q, want acpx-ui-task: %#v", event.TaskID, result.Events)
+		}
+	}
+	if taskEventOfType(result.Events, "task.started").EventType == "" || taskEventOfType(result.Events, "task.completed").EventType == "" {
+		t.Fatalf("events missing restored run boundary events: %#v", result.Events)
+	}
+	if got := d.history["acpx-ui-task"]; got.TaskID != "acpx-ui-task" || len(got.Events) != 4 {
+		t.Fatalf("cached alias record = %#v, want restored history cached under ui task id", got)
+	}
+}
+
+func TestTaskHistoryMergesRestoredACPXRecordWithExistingTurnEvents(t *testing.T) {
+	defaultDir := t.TempDir()
+	projectDir := t.TempDir()
+	scriptPath := filepath.Join(defaultDir, "fake-acpx")
+	script := `#!/bin/sh
+case "$*" in
+  *" qwen sessions list "*)
+    printf '[{"acpxRecordId":"rec-old","name":"acpx-ui-task","cwd":"%s","createdAt":"2026-01-01T00:00:00Z","lastUsedAt":"2026-01-01T00:00:10Z","messages":[{"User":{"content":[{"Text":"old prompt"}]}},{"Agent":{"content":[{"Text":"old answer"}]}}]}]' "$PWD"
+    ;;
+  *" sessions list "*)
+    printf '[]'
+    ;;
+  *)
+    printf '{}\n'
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake acpx: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Workspaces = []protocol.Workspace{{ID: "default", Path: defaultDir}, {ID: "project", Path: projectDir}}
+	cfg.ACPX.Enabled = true
+	cfg.ACPX.Command = scriptPath
+	cfg.ACPX.Args = []string{"--project-dir", projectDir}
+	cfg.ACPX.TTLSeconds = 0
+	cfg.ACPX.Agent = "opencode"
+	d := New(cfg)
+
+	d.mu.Lock()
+	d.history["acpx-ui-task"] = protocol.TaskRecord{
+		TaskID:        "acpx-ui-task",
+		WorkspacePath: projectDir,
+		AgentRuntime:  "acpx",
+		Prompt:        "new prompt",
+		Status:        "running",
+		UpdatedAt:     20,
+		Events: []protocol.TaskEvent{
+			userPromptTaskEvent("acpx-ui-task", "turn-new", "new prompt", 20, 1),
+		},
+	}
+	d.mu.Unlock()
+
+	d.sendTaskHistory(protocol.TaskHistoryGet{RequestID: "req-1", TaskID: "acpx-ui-task", WorkspacePath: projectDir})
+	env := <-d.send
+	if env.Type != protocol.TypeTaskHistoryResult {
+		t.Fatalf("env type = %q, want task.history.result", env.Type)
+	}
+	result, err := protocol.DecodePayload[protocol.TaskHistoryResult](env)
+	if err != nil {
+		t.Fatalf("decode history result: %v", err)
+	}
+	if result.Record == nil {
+		t.Fatal("record is nil, want merged history")
+	}
+	var prompts []string
+	for _, event := range result.Events {
+		if event.EventType != "user.prompt" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatalf("decode prompt data: %v", err)
+		}
+		prompts = append(prompts, stringField(data, "prompt"))
+	}
+	if !containsString(prompts, "old prompt") || !containsString(prompts, "new prompt") {
+		t.Fatalf("prompts = %#v, want restored old prompt and existing new prompt; events=%#v", prompts, result.Events)
+	}
+	if taskEventOfType(result.Events, "task.completed").EventType == "" {
+		t.Fatalf("events missing restored task.completed for historical turn: %#v", result.Events)
+	}
+	if got := d.history["acpx-ui-task"]; len(got.Events) < 5 {
+		t.Fatalf("cached history events = %d, want restored + existing events: %#v", len(got.Events), got.Events)
 	}
 }
 
@@ -537,6 +691,15 @@ func taskEventOfType(events []protocol.TaskEvent, eventType string) protocol.Tas
 		}
 	}
 	return protocol.TaskEvent{}
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func drainTaskEvents(ch <-chan protocol.Envelope) []protocol.TaskEvent {

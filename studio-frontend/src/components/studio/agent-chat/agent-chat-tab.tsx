@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from "react";
 import {
   Send,
   Cpu,
   AlertCircle,
   StopCircle,
   ArrowRight,
+  Loader2,
   X
 } from "lucide-react";
 import { Antigravity, ClaudeCode, Codex, Cursor, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
@@ -75,20 +76,15 @@ function envelopeTaskId(envelope: AgentEnvelope) {
 
 function getRunTiming(events: TaskEvent[], agentRuntime: string) {
   let activeStartedAtMs = 0;
-  let lastCompletedDurationMs = 0;
   for (const event of sortTaskEventsForDisplay(events)) {
     if (event.event_type === "task.started") {
       const timestampMs = Number(event.timestamp || 0) * 1000;
       activeStartedAtMs = timestampMs > 0 ? timestampMs : 0;
     } else if (isTerminalTaskEvent(event, agentRuntime)) {
-      const endedAtMs = Number(event.timestamp || 0) * 1000;
-      if (activeStartedAtMs > 0 && endedAtMs > 0) {
-        lastCompletedDurationMs = Math.max(0, endedAtMs - activeStartedAtMs);
-      }
       activeStartedAtMs = 0;
     }
   }
-  return { activeStartedAtMs, lastCompletedDurationMs };
+  return { activeStartedAtMs };
 }
 
 interface AgentChatTabProps {
@@ -111,19 +107,36 @@ export function AgentChatTab({
   const agentRuntime = tab.agentRuntime || (agentKind === "codex" || agentKind === "kilo" ? "direct_acp" : "acpx");
   const agentRuntimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : "Agent";
   const supportsModelSelection = agentRuntime === "direct_acp" || agentRuntime === "acpx";
+  const projectId = project.id;
+  const projectDeviceId = project.device_id;
+  const projectDirectMode = Boolean(project.direct_mode);
+  const projectDirectEndpointURL = project.direct_endpoint?.terminal_ws_url || "";
+  const projectDirectEndpointToken = project.direct_endpoint?.token || "";
+  const projectDirectEndpointTokenRef = useRef(projectDirectEndpointToken);
+  const agentSocketProject = useMemo(() => ({
+    id: projectId,
+    direct_mode: projectDirectMode,
+    direct_endpoint: projectDirectEndpointURL
+      ? { terminal_ws_url: projectDirectEndpointURL }
+      : undefined,
+  }), [projectDirectEndpointURL, projectDirectMode, projectId]);
 
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const messageState = useMemo(() => {
     return buildMessageStateFromEvents(events, sessionId || "");
   }, [events, sessionId]);
+  const messages = messageState.messages;
   const [input, setInput] = useState("");
   const [runStatus, setRunStatus] = useState<AgentRunStatus>("idle");
   const [error, setError] = useState("");
+  const [historyLoading, setHistoryLoading] = useState(() => Boolean(sessionId));
+  const [historyLoadedOnce, setHistoryLoadedOnce] = useState(() => !sessionId);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [localRunStartedAtMs, setLocalRunStartedAtMs] = useState(0);
   const [modelUpdating, setModelUpdating] = useState(false);
   const [customModelInput, setCustomModelInput] = useState("");
   const dismissedErrorRef = useRef("");
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const eventsEndRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const socketTaskIdRef = useRef("");
@@ -136,6 +149,8 @@ export function AgentChatTab({
   const dispatchPromptRef = useRef<(promptText: string) => Promise<void>>(async () => {});
   const lastEventSeqRef = useRef(0);
   const awaitingNewTurnRef = useRef(false);
+  const historyLoadedOnceRef = useRef(historyLoadedOnce);
+  const previousSessionIdRef = useRef(sessionId || "");
   const pendingSessionCreatesRef = useRef<Set<string>>(new Set());
   const pendingSessionResolveRef = useRef<((sessionId: string) => void) | null>(null);
   const pendingSessionRejectRef = useRef<((error: Error) => void) | null>(null);
@@ -146,6 +161,10 @@ export function AgentChatTab({
   useEffect(() => {
     onUpdateTabPropertiesRef.current = onUpdateTabProperties;
   }, [onUpdateTabProperties]);
+
+  useEffect(() => {
+    projectDirectEndpointTokenRef.current = projectDirectEndpointToken;
+  }, [projectDirectEndpointToken]);
 
   const showError = useCallback((message: string) => {
     const text = message.trim();
@@ -169,7 +188,7 @@ export function AgentChatTab({
     version: 1,
     timestamp: getUnixTimestamp(),
     from: "web",
-    to: { device_id: project.device_id },
+    to: { device_id: projectDeviceId },
     payload: {
       task_id: activeSessionId,
       workspace_path: workspacePath,
@@ -177,7 +196,7 @@ export function AgentChatTab({
       agent_runtime: agentRuntime,
       session_name: activeSessionName
     }
-  }), [agentKind, agentRuntime, project.device_id, workspacePath]);
+  }), [agentKind, agentRuntime, projectDeviceId, workspacePath]);
 
   const flushPendingEnvelopes = useCallback((socket: WebSocket, activeSessionId: string) => {
     if (socket.readyState !== WebSocket.OPEN) return;
@@ -207,8 +226,32 @@ export function AgentChatTab({
     }
   }, []);
 
+  const resetHistoryForSocketOpen = useCallback((activeSessionId: string) => {
+    setEvents([]);
+    lastEventSeqRef.current = 0;
+    historyLoadedOnceRef.current = false;
+    setHistoryLoading(true);
+    setHistoryLoadedOnce(false);
+    sessionCreateSentRef.current.delete(activeSessionId);
+    pushAgentChatDebug({
+      phase: "history.reset",
+      taskId: activeSessionId,
+      reason: "ws.opening",
+    });
+  }, []);
+
   const openAgentSocket = useCallback((activeSessionId: string, activeSessionName: string) => {
-    const { url: socketURL, transport } = agentChatWebSocketURL(project, activeSessionId);
+    const socketProject = agentSocketProject.direct_endpoint
+      ? {
+        ...agentSocketProject,
+        direct_endpoint: {
+          ...agentSocketProject.direct_endpoint,
+          token: projectDirectEndpointTokenRef.current,
+        },
+      }
+      : agentSocketProject;
+    const { url: socketURL, transport } = agentChatWebSocketURL(socketProject, activeSessionId);
+    resetHistoryForSocketOpen(activeSessionId);
     const socket = new WebSocket(socketURL);
     socketRef.current = socket;
     socketTaskIdRef.current = activeSessionId;
@@ -254,6 +297,7 @@ export function AgentChatTab({
     };
 
     socket.onmessage = (message) => {
+      if (closed || socketRef.current !== socket) return;
       try {
         const envelope = JSON.parse(String(message.data));
         if (envelope?.type === "pong") return;
@@ -301,6 +345,18 @@ export function AgentChatTab({
               showError(String(meta.message || meta.error || "任务执行失败"));
             }
           }
+        } else if (envelope?.type === "task.history.ready") {
+          const payload = envelope.payload || {};
+          const taskId = typeof payload.task_id === "string" ? payload.task_id : "";
+          if (!taskId || taskId === activeSessionId) {
+            pushAgentChatDebug({
+              phase: "history.ready",
+              taskId: activeSessionId,
+              hasEvents: payload.has_events === true,
+            });
+            setHistoryLoading(false);
+            setHistoryLoadedOnce(true);
+          }
         } else if (envelope?.type === "server.error") {
           const payload = envelope.payload || {};
           const message = String(payload.message || payload.code || "Agent 通信失败");
@@ -313,6 +369,8 @@ export function AgentChatTab({
           pendingSessionResolveRef.current = null;
           pendingSessionRejectRef.current = null;
           showError(message);
+          setHistoryLoading(false);
+          setHistoryLoadedOnce(true);
           setRunStatus("idle");
           setModelUpdating(false);
         }
@@ -331,6 +389,10 @@ export function AgentChatTab({
         phase: "ws.error",
         taskId: activeSessionId,
       });
+      if (socketRef.current === socket) {
+        setHistoryLoading(false);
+        setHistoryLoadedOnce(true);
+      }
       if (!closed) showError("Agent WebSocket 连接失败");
     };
     socket.onclose = (event) => {
@@ -346,6 +408,8 @@ export function AgentChatTab({
       });
       if (socketRef.current === socket) {
         socketRef.current = null;
+        setHistoryLoading(false);
+        setHistoryLoadedOnce(true);
       }
     };
 
@@ -364,10 +428,11 @@ export function AgentChatTab({
       },
     };
   }, [
+    agentSocketProject,
     agentRuntime,
     buildSessionCreateEnvelope,
     flushPendingEnvelopes,
-    project,
+    resetHistoryForSocketOpen,
     showError,
     supportsModelSelection,
     tab.id,
@@ -404,6 +469,8 @@ export function AgentChatTab({
     if (!sessionId) {
       setEvents([]);
       setRunStatus("idle");
+      setHistoryLoading(false);
+      setHistoryLoadedOnce(true);
       lastEventSeqRef.current = 0;
       socketTaskIdRef.current = "";
       pendingEnvelopesRef.current = [];
@@ -414,6 +481,10 @@ export function AgentChatTab({
       return;
     }
 
+    if (previousSessionIdRef.current !== sessionId) {
+      previousSessionIdRef.current = sessionId;
+      setHistoryLoadedOnce(false);
+    }
     const socketHandle = openAgentSocket(sessionId, sessionName || sessionId);
 
     return () => {
@@ -427,10 +498,23 @@ export function AgentChatTab({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openAgentSocket, sessionId]);
 
+  useLayoutEffect(() => {
+    const justLoaded = !historyLoadedOnceRef.current && historyLoadedOnce;
+    historyLoadedOnceRef.current = historyLoadedOnce;
+    if (!justLoaded) return;
+    const container = scrollContainerRef.current;
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+      return;
+    }
+    eventsEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [historyLoadedOnce, messages.length]);
+
   // Auto scroll to bottom
   useEffect(() => {
+    if (historyLoading && !historyLoadedOnce) return;
     eventsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [events.length]);
+  }, [events.length, historyLoadedOnce, historyLoading]);
 
   useEffect(() => {
     if (runStatus === "idle") return;
@@ -443,7 +527,6 @@ export function AgentChatTab({
     return getRunTiming(events, agentRuntime);
   }, [agentRuntime, events]);
   const backendRunStartedAtMs = runTiming.activeStartedAtMs;
-  const lastCompletedRunDurationMs = runTiming.lastCompletedDurationMs;
 
   useEffect(() => {
     if (backendRunStartedAtMs > 0) {
@@ -463,8 +546,6 @@ export function AgentChatTab({
       return "idle";
     });
   }, [backendRunStartedAtMs, events.length]);
-
-  const messages = messageState.messages;
 
   const modelList = useMemo(() => {
     return modelListFromTaskEvents(events);
@@ -492,6 +573,7 @@ export function AgentChatTab({
   const showWorking = isRunning;
   const hasActiveBackendTurn = backendRunStartedAtMs > 0;
   const workingStartedAtMs = hasActiveBackendTurn ? backendRunStartedAtMs : localRunStartedAtMs || nowMs;
+  const showHistoryLoading = historyLoading && !historyLoadedOnce;
 
   useEffect(() => {
     selectedModelIdRef.current = selectedModelId;
@@ -636,6 +718,20 @@ export function AgentChatTab({
     return prompt;
   }, []);
 
+  const removeQueuedPrompt = useCallback((index: number) => {
+    setQueuedPrompts((prev) => {
+      if (index < 0 || index >= prev.length) return prev;
+      const next = prev.filter((_, itemIndex) => itemIndex !== index);
+      queuedPromptsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const clearQueuedPrompts = useCallback(() => {
+    queuedPromptsRef.current = [];
+    setQueuedPrompts([]);
+  }, []);
+
   async function dispatchPrompt(promptText: string) {
     clearErrorForNewAction();
     setRunStatus("sending");
@@ -681,7 +777,7 @@ export function AgentChatTab({
         version: 1,
         timestamp: getUnixTimestamp(),
         from: "web",
-        to: { device_id: project.device_id },
+        to: { device_id: projectDeviceId },
         payload: dispatchPayload
       };
 
@@ -732,8 +828,7 @@ export function AgentChatTab({
     if (!sessionId || !isRunning) return;
 
     try {
-      queuedPromptsRef.current = [];
-      setQueuedPrompts([]);
+      clearQueuedPrompts();
       awaitingNewTurnRef.current = false;
       setLocalRunStartedAtMs(0);
       const stopEnv = {
@@ -742,7 +837,7 @@ export function AgentChatTab({
         version: 1,
         timestamp: getUnixTimestamp(),
         from: "web",
-        to: { device_id: project.device_id },
+        to: { device_id: projectDeviceId },
         payload: {
           task_id: sessionId,
           reason: "user_cancel"
@@ -780,7 +875,7 @@ export function AgentChatTab({
         version: 1,
         timestamp: getUnixTimestamp(),
         from: "web",
-        to: { device_id: project.device_id },
+        to: { device_id: projectDeviceId },
         payload: {
           task_id: activeSessionId,
           model_id: modelId
@@ -809,7 +904,7 @@ export function AgentChatTab({
         version: 1,
         timestamp: getUnixTimestamp(),
         from: "web",
-        to: { device_id: project.device_id },
+        to: { device_id: projectDeviceId },
         payload: {
           task_id: activeSessionId,
           config_id: option.id,
@@ -870,8 +965,15 @@ export function AgentChatTab({
       )}
 
       {/* Main chat flow */}
-      <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2 select-text">
-        {!showWorking && messages.length === 0 ? (
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-2 space-y-2 select-text">
+        {showHistoryLoading ? (
+          <div className="h-full flex flex-col items-center justify-center p-6 text-center select-none">
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/70" />
+            <div className="mt-3 text-[11px] font-medium text-muted-foreground">
+              加载中
+            </div>
+          </div>
+        ) : !showWorking && messages.length === 0 ? (
           /* Landing Screen */
           <div className="h-full flex flex-col items-center justify-center p-6 text-center max-w-lg mx-auto select-none">
             <div className="h-12 w-12 rounded-2xl bg-primary/10 border border-primary/20 flex items-center justify-center mb-4 animate-fade-in shadow-sm">
@@ -931,6 +1033,11 @@ export function AgentChatTab({
                     </div>
                   );
                   i++;
+                } else if (msg.kind === "run_duration") {
+                  rendered.push(
+                    <RunDurationStatus key={msg.id} elapsedMs={msg.durationMs || 0} />
+                  );
+                  i++;
                 } else if (msg.kind === "tool_call" && msg.toolCall) {
                   const toolCallType = getToolCallType(msg);
                   if (toolCallType === "todo") {
@@ -975,9 +1082,6 @@ export function AgentChatTab({
             {showWorking && (
               <WorkingStatus elapsedMs={nowMs - workingStartedAtMs} />
             )}
-            {!showWorking && lastCompletedRunDurationMs > 0 && (
-              <RunDurationStatus elapsedMs={lastCompletedRunDurationMs} />
-            )}
 
             <div ref={eventsEndRef} />
           </div>
@@ -987,22 +1091,41 @@ export function AgentChatTab({
       {/* Input box */}
       <div className="p-3 border-t border-border/60 bg-muted/5 shrink-0 z-10 select-none">
         {queuedPrompts.length > 0 && (
-          <div className="mb-2 rounded-xl border border-dashed border-primary/25 bg-primary/5 px-3.5 py-2 text-[11px] text-primary flex items-center justify-between">
-            <div className="min-w-0 flex-1 truncate">
+          <div className="mb-2 rounded-xl border border-dashed border-primary/25 bg-primary/5 px-3 py-2 text-[11px] text-primary">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
               <span className="font-semibold text-primary/90">队列中 {queuedPrompts.length} 条</span>
-              <span className="mx-2 text-primary/30">|</span>
-              <span className="text-primary/80">下一条: {queuedPrompts[0]}</span>
+              <button
+                type="button"
+                onClick={clearQueuedPrompts}
+                className="h-5 shrink-0 rounded px-1.5 text-[10px] font-semibold text-primary/80 hover:bg-primary/10 hover:text-primary cursor-pointer"
+              >
+                清空队列
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                queuedPromptsRef.current = [];
-                setQueuedPrompts([]);
-              }}
-              className="text-[10px] text-primary/80 hover:text-primary hover:underline font-semibold ml-2 cursor-pointer shrink-0"
-            >
-              清空队列
-            </button>
+            <div className="max-h-32 space-y-1 overflow-y-auto pr-0.5">
+              {queuedPrompts.map((prompt, index) => (
+                <div
+                  key={`${index}-${prompt}`}
+                  className="flex items-start gap-2 rounded-lg border border-primary/10 bg-card/65 px-2 py-1.5 text-primary/85"
+                >
+                  <span className="mt-0.5 h-4 min-w-4 rounded bg-primary/10 px-1 text-center text-[9.5px] font-semibold leading-4 text-primary/75">
+                    {index + 1}
+                  </span>
+                  <div className="min-w-0 flex-1 whitespace-pre-wrap break-words text-[10.5px] leading-relaxed text-foreground/80">
+                    {prompt}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeQueuedPrompt(index)}
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground/70 hover:bg-red-500/10 hover:text-red-600 cursor-pointer"
+                    aria-label={`删除队列消息 ${index + 1}`}
+                    title="删除"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
         <form

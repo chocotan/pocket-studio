@@ -865,29 +865,19 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 			return
 		}
 	} else if d.cfg.ACPX.Enabled {
-		if _, sessionName, err := d.ensureACPXSession(ctx, task, workspace.Path, session.TaskID); err != nil {
+		if recordID, sessionName, err := d.ensureACPXSession(ctx, task, workspace.Path, session.TaskID); err != nil {
 			d.emitError(session.TaskID, "session_ensure_failed", err.Error())
 			return
 		} else if sessionName != "" {
+			task.ResumeSessionID = recordID
 			session.SessionName = sessionName
 			task.SessionName = sessionName
 		}
 	}
 	now := time.Now().Unix()
 	d.mu.Lock()
-	record := d.history[session.TaskID]
-	if record.TaskID == "" {
-		for _, r := range d.history {
-			if r.SessionName == session.TaskID || (session.SessionName != "" && r.SessionName == session.SessionName) || (r.SessionID != "" && r.SessionID == session.TaskID) {
-				record = r
-				record.TaskID = session.TaskID
-				for i := range record.Events {
-					record.Events[i].TaskID = session.TaskID
-				}
-				break
-			}
-		}
-	}
+	record := d.taskHistoryRecordLocked(session.TaskID)
+	record = restoreTaskRecordForUI(record, session.TaskID)
 	if record.TaskID == "" {
 		record.TaskID = session.TaskID
 		record.StartedAt = now
@@ -897,6 +887,9 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 	record.DeviceID = d.cfg.Device.ID
 	record.Agent = d.recordAgentNameForTask(task)
 	record.AgentRuntime = task.AgentRuntime
+	if task.ResumeSessionID != "" {
+		record.SessionID = task.ResumeSessionID
+	}
 	record.SessionName = taskSessionName(task, d.cfg.ACPX.SessionName)
 	record.Status = "created"
 	record.UpdatedAt = now
@@ -910,9 +903,7 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 }
 
 func (d *Daemon) sendTaskHistory(request protocol.TaskHistoryGet) {
-	d.mu.Lock()
-	record := d.taskHistoryRecordLocked(request.TaskID)
-	d.mu.Unlock()
+	record := d.taskHistoryForRequest(request.TaskID, request.WorkspacePath)
 
 	result := protocol.TaskHistoryResult{
 		RequestID: request.RequestID,
@@ -930,17 +921,139 @@ func (d *Daemon) sendTaskHistory(request protocol.TaskHistoryGet) {
 	d.send <- protocol.NewEnvelope(protocol.TypeTaskHistoryResult, "daemon", result)
 }
 
+func (d *Daemon) taskHistoryForRequest(taskID string, workspacePath string) protocol.TaskRecord {
+	d.mu.Lock()
+	record := d.taskHistoryRecordLocked(taskID)
+	d.mu.Unlock()
+	if !d.shouldRestoreACPXTaskHistory(record) {
+		return record
+	}
+	if restored := d.restoreACPXTaskHistory(taskID, workspacePath); restored.TaskID != "" {
+		return restored
+	}
+	return record
+}
+
+func (d *Daemon) shouldRestoreACPXTaskHistory(record protocol.TaskRecord) bool {
+	if !d.cfg.ACPX.Enabled {
+		return false
+	}
+	if record.TaskID == "" {
+		return true
+	}
+	if isDirectACPRecord(record) {
+		return false
+	}
+	return record.AgentRuntime == "acpx"
+}
+
+func (d *Daemon) restoreACPXTaskHistory(taskID string, workspacePath string) protocol.TaskRecord {
+	if !d.cfg.ACPX.Enabled || strings.TrimSpace(taskID) == "" {
+		return protocol.TaskRecord{}
+	}
+	var best protocol.TaskRecord
+	for _, agent := range d.acpxSnapshotAgents() {
+		records, err := d.acpxSessionRecords(context.Background(), agent, workspacePath)
+		if err != nil {
+			continue
+		}
+		for _, record := range records {
+			if record.TaskID != taskID && record.SessionName != taskID && record.SessionID != taskID {
+				continue
+			}
+			if best.TaskID == "" || preferACPXRestoreCandidate(best, record, taskID) {
+				best = record
+			}
+		}
+	}
+	if best.TaskID == "" {
+		return protocol.TaskRecord{}
+	}
+	d.mu.Lock()
+	existing := d.taskHistoryRecordLocked(taskID)
+	if len(existing.Events) > 0 {
+		best.Events = compactStreamTaskEvents(mergeTaskEvents(best.Events, existing.Events))
+		if existing.Status == "running" || existing.Status == "stopping" {
+			best.Status = existing.Status
+		}
+		if existing.UpdatedAt > best.UpdatedAt {
+			best.UpdatedAt = existing.UpdatedAt
+		}
+		if best.Prompt == "" {
+			best.Prompt = existing.Prompt
+		}
+	}
+	d.history[best.TaskID] = best
+	if best.TaskID != taskID {
+		aliasRecord := restoreTaskRecordForUI(best, taskID)
+		d.history[taskID] = aliasRecord
+		best = aliasRecord
+	}
+	d.mu.Unlock()
+	return best
+}
+
+func preferACPXRestoreCandidate(existing protocol.TaskRecord, candidate protocol.TaskRecord, taskID string) bool {
+	existingConversation := conversationEventCount(existing.Events)
+	candidateConversation := conversationEventCount(candidate.Events)
+	if existingConversation != candidateConversation {
+		return candidateConversation > existingConversation
+	}
+	if len(existing.Events) != len(candidate.Events) {
+		return len(candidate.Events) > len(existing.Events)
+	}
+	if (existing.Prompt == "") != (candidate.Prompt == "") {
+		return candidate.Prompt != ""
+	}
+	existingExact := existing.TaskID == taskID
+	candidateExact := candidate.TaskID == taskID
+	if existingExact != candidateExact {
+		return candidateExact
+	}
+	return candidate.UpdatedAt > existing.UpdatedAt
+}
+
+func conversationEventCount(events []protocol.TaskEvent) int {
+	count := 0
+	for _, event := range events {
+		switch event.EventType {
+		case "user.prompt", "assistant.message", "assistant.thinking", "tool.call", "tool.output":
+			count++
+		}
+	}
+	return count
+}
+
 func (d *Daemon) taskHistoryRecordLocked(taskID string) protocol.TaskRecord {
 	record := d.history[taskID]
 	if record.TaskID != "" {
 		return record
 	}
 	for _, candidate := range d.history {
-		if candidate.SessionName == taskID || candidate.SessionID == taskID {
+		if taskMatchesRecord(candidate, taskID) {
 			return candidate
 		}
 	}
 	return protocol.TaskRecord{}
+}
+
+func taskMatchesRecord(record protocol.TaskRecord, taskID string) bool {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return false
+	}
+	return record.TaskID == taskID || record.SessionName == taskID || record.SessionID == taskID
+}
+
+func restoreTaskRecordForUI(record protocol.TaskRecord, taskID string) protocol.TaskRecord {
+	if record.TaskID == "" || record.TaskID == taskID {
+		return record
+	}
+	record.TaskID = taskID
+	for i := range record.Events {
+		record.Events[i].TaskID = taskID
+	}
+	return record
 }
 
 // lockTaskDispatch serializes startTask calls for the same task ID. The
@@ -1102,19 +1215,8 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	rt.cmd = cmd
 	d.tasks[task.TaskID] = rt
 	now := time.Now().Unix()
-	record := d.history[task.TaskID]
-	if record.TaskID == "" {
-		for _, r := range d.history {
-			if r.SessionName == task.TaskID || (task.SessionName != "" && r.SessionName == task.SessionName) || (r.SessionID != "" && r.SessionID == task.TaskID) {
-				record = r
-				record.TaskID = task.TaskID
-				for i := range record.Events {
-					record.Events[i].TaskID = task.TaskID
-				}
-				break
-			}
-		}
-	}
+	record := d.taskHistoryRecordLocked(task.TaskID)
+	record = restoreTaskRecordForUI(record, task.TaskID)
 	if record.TaskID == "" {
 		record.TaskID = task.TaskID
 		record.StartedAt = now
@@ -1320,12 +1422,12 @@ func taskSessionName(task protocol.TaskDispatch, fallback string) string {
 
 func isKnownACPXAgent(agent string) bool {
 	agent = normalizeACPXAgentName(agent)
-	switch agent {
-	case "codex", "claude", "gemini", "cursor", "copilot", "qwen", "opencode", "openclaw", "pi", "droid", "iflow", "kilocode", "kimi", "kiro", "qoder", "trae":
-		return true
-	default:
-		return false
+	for _, known := range knownACPXAgents() {
+		if agent == known {
+			return true
+		}
 	}
+	return false
 }
 
 func (d *Daemon) buildClaudeArgs(task protocol.TaskDispatch) []string {
@@ -3325,21 +3427,7 @@ func (d *Daemon) runningTaskIDs() []string {
 
 func (d *Daemon) sendSnapshot() {
 	if d.cfg.ACPX.Enabled {
-		agents := []string{"claude", "opencode", "pi", "codex", "kilocode"}
-		configuredAgent := normalizeACPXAgentName(d.cfg.ACPX.Agent)
-		if configuredAgent != "" {
-			found := false
-			for _, a := range agents {
-				if a == configuredAgent {
-					found = true
-					break
-				}
-			}
-			if !found {
-				agents = append(agents, configuredAgent)
-			}
-		}
-		for _, agent := range agents {
+		for _, agent := range d.acpxSnapshotAgents() {
 			if tasks, err := d.acpxSessionRecords(context.Background(), agent); err == nil {
 				d.mu.Lock()
 				for _, record := range tasks {
@@ -3376,8 +3464,31 @@ func (d *Daemon) sendSnapshot() {
 	})
 }
 
-func (d *Daemon) acpxSessionRecords(ctx context.Context, agent string) ([]protocol.TaskRecord, error) {
+func (d *Daemon) acpxSnapshotAgents() []string {
+	configuredAgent := normalizeACPXAgentName(d.cfg.ACPX.Agent)
+	agents := make([]string, 0, len(knownACPXAgents())+1)
+	if configuredAgent != "" {
+		agents = append(agents, configuredAgent)
+	}
+	for _, agent := range knownACPXAgents() {
+		if agent != configuredAgent {
+			agents = append(agents, agent)
+		}
+	}
+	return agents
+}
+
+func knownACPXAgents() []string {
+	return []string{"claude", "opencode", "pi", "codex", "kilocode", "gemini", "cursor", "copilot", "qwen", "openclaw", "droid", "iflow", "kimi", "kiro", "qoder", "trae"}
+}
+
+func (d *Daemon) acpxSessionRecords(ctx context.Context, agent string, workspacePath ...string) ([]protocol.TaskRecord, error) {
 	workspace := d.defaultACPXWorkspace()
+	targetWorkspace := ""
+	if len(workspacePath) > 0 && strings.TrimSpace(workspacePath[0]) != "" {
+		targetWorkspace = strings.TrimSpace(workspacePath[0])
+		workspace = targetWorkspace
+	}
 	if agent == "" {
 		agent = normalizeACPXAgentName(d.cfg.ACPX.Agent)
 	}
@@ -3419,6 +3530,9 @@ func (d *Daemon) acpxSessionRecords(ctx context.Context, agent string) ([]protoc
 		closed, _ := item["closed"].(bool)
 		taskID := acpxTaskIDForRecord(recordID, sessionName)
 		cwd := stringField(item, "cwd")
+		if targetWorkspace != "" && cwd != "" && !sameWorkspacePath(cwd, targetWorkspace) {
+			continue
+		}
 		modelID := ""
 		if acpx, _ := item["acpx"].(map[string]any); acpx != nil {
 			modelID = stringField(acpx, "current_model_id")
@@ -3470,10 +3584,13 @@ func (d *Daemon) acpxSessionRecords(ctx context.Context, agent string) ([]protoc
 }
 
 func preferACPXTaskRecord(existing protocol.TaskRecord, candidate protocol.TaskRecord) bool {
-	existingEvents := len(existing.Events)
-	candidateEvents := len(candidate.Events)
-	if existingEvents != candidateEvents {
-		return existingEvents > candidateEvents
+	existingConversation := conversationEventCount(existing.Events)
+	candidateConversation := conversationEventCount(candidate.Events)
+	if existingConversation != candidateConversation {
+		return existingConversation > candidateConversation
+	}
+	if len(existing.Events) != len(candidate.Events) {
+		return len(existing.Events) > len(candidate.Events)
 	}
 	if existing.Prompt != "" && candidate.Prompt == "" {
 		return true
@@ -3482,6 +3599,26 @@ func preferACPXTaskRecord(existing protocol.TaskRecord, candidate protocol.TaskR
 		return false
 	}
 	return existing.UpdatedAt >= candidate.UpdatedAt
+}
+
+func sameWorkspacePath(left string, right string) bool {
+	left = strings.TrimSpace(left)
+	right = strings.TrimSpace(right)
+	if left == "" || right == "" {
+		return false
+	}
+	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
+	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return left == right
+	}
+	if leftReal, err := filepath.EvalSymlinks(leftAbs); err == nil {
+		leftAbs = leftReal
+	}
+	if rightReal, err := filepath.EvalSymlinks(rightAbs); err == nil {
+		rightAbs = rightReal
+	}
+	return leftAbs == rightAbs
 }
 
 func acpxTaskIDForRecord(recordID string, sessionName string) string {
@@ -3558,6 +3695,8 @@ func isEmptyACPXRecordValue(value any) bool {
 func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt int64, updatedAt int64) []protocol.TaskEvent {
 	events := make([]protocol.TaskEvent, 0)
 	seq := int64(1)
+	activeTurnStartedAt := int64(0)
+	activeTurnID := ""
 	add := func(eventType string, data any, raw any) {
 		timestamp := createdAt
 		if timestamp == 0 {
@@ -3582,6 +3721,58 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 		events = append(events, event)
 		seq++
 	}
+	addAt := func(eventType string, timestamp int64, data any, raw any) {
+		if timestamp == 0 {
+			timestamp = updatedAt
+			if timestamp == 0 {
+				timestamp = createdAt
+			}
+		}
+		event := protocol.TaskEvent{
+			TaskID:    taskID,
+			EventID:   fmt.Sprintf("%s_%d", taskID, seq),
+			EventType: eventType,
+			Source:    "acpx",
+			Sequence:  seq,
+			Timestamp: timestamp,
+			Data:      mustJSON(data),
+			Raw:       mustJSON(raw),
+		}
+		events = append(events, event)
+		seq++
+	}
+	eventTimestamp := func(offset int64) int64 {
+		timestamp := createdAt
+		if timestamp == 0 {
+			timestamp = updatedAt
+		}
+		if timestamp == 0 {
+			return 0
+		}
+		timestamp += offset
+		if updatedAt != 0 && timestamp > updatedAt {
+			timestamp = updatedAt
+		}
+		return timestamp
+	}
+	closeActiveTurn := func(endTimestamp int64) {
+		if activeTurnStartedAt == 0 {
+			return
+		}
+		if endTimestamp == 0 {
+			endTimestamp = updatedAt
+		}
+		if endTimestamp == 0 || endTimestamp < activeTurnStartedAt {
+			endTimestamp = activeTurnStartedAt
+		}
+		data := map[string]any{"exit_code": 0, "stop_reason": "history"}
+		if activeTurnID != "" {
+			data["turn_id"] = activeTurnID
+		}
+		addAt("task.completed", endTimestamp, data, nil)
+		activeTurnStartedAt = 0
+		activeTurnID = ""
+	}
 
 	if acpx, _ := record["acpx"].(map[string]any); acpx != nil {
 		if raw := acpxModelListRaw(record, acpx); raw != nil {
@@ -3601,6 +3792,16 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 		if user, _ := message["User"].(map[string]any); user != nil {
 			prompt := acpxContentText(user["content"])
 			if strings.TrimSpace(prompt) != "" {
+				promptTimestamp := eventTimestamp(seq - 1)
+				closeActiveTurn(promptTimestamp - 1)
+				activeTurnID = fmt.Sprintf("history-turn-%d", seq)
+				activeTurnStartedAt = promptTimestamp
+				addAt("task.started", activeTurnStartedAt, map[string]any{
+					"agent":      stringField(record, "agent"),
+					"source":     "acpx.history",
+					"turn_id":    activeTurnID,
+					"session_id": stringField(record, "acpxRecordId", "acpx_record_id"),
+				}, nil)
 				raw := map[string]any{
 					"type": "user",
 					"message": map[string]any{
@@ -3608,7 +3809,7 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 						"content": []any{map[string]any{"type": "text", "text": prompt}},
 					},
 				}
-				add("user.prompt", map[string]any{"prompt": prompt}, raw)
+				add("user.prompt", map[string]any{"prompt": prompt, "turn_id": activeTurnID}, raw)
 			}
 			continue
 		}
@@ -3688,6 +3889,7 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 			add("tool.output", map[string]any{"tool_use_id": toolUseID, "text": text, "is_error": isError}, raw)
 		}
 	}
+	closeActiveTurn(updatedAt)
 	return events
 }
 

@@ -20,7 +20,6 @@ import { FloatingWindow } from "./floating-window";
 import { ZoomSelect } from "./zoom-select";
 import { NotificationCenter } from "./notification-center";
 import type { PageZoom } from "@/lib/zoom";
-import { postJSON } from "@/lib/api";
 import type { NotificationJumpTarget, TerminalNotification } from "./terminal-notifications";
 import { useWorkspaceLayout } from "./hooks/useWorkspaceLayout";
 import { updateSplitSizes } from "./studio-layout-ops";
@@ -33,6 +32,7 @@ interface StudioWorkspaceProps {
   favoriteIds: Set<string>;
   onToggleFavorite: (projectId: string) => void;
   onMoveFavorite: (projectId: string, direction: "up" | "down") => void;
+  onDirectModeChange: (projectId: string, directMode: boolean) => void;
   devices: Device[];
   pageZoom: PageZoom;
   onPageZoomChange: (zoom: PageZoom) => void;
@@ -62,6 +62,7 @@ export function StudioWorkspace({
   favoriteIds,
   onToggleFavorite,
   onMoveFavorite,
+  onDirectModeChange,
   devices,
   pageZoom,
   onPageZoomChange,
@@ -111,8 +112,6 @@ export function StudioWorkspace({
   const dockRevealTimerRef = useRef<number | null>(null);
   const previousFocusedIdRef = useRef("");
   const previousTopFloatingPanelIdRef = useRef("");
-  const [directModeSaving, setDirectModeSaving] = useState(false);
-  const [directModeError, setDirectModeError] = useState("");
   const [navHidden, setNavHidden] = useState(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem(STUDIO_NAV_HIDDEN_KEY) === "true";
@@ -240,30 +239,10 @@ export function StudioWorkspace({
     revealDockBriefly();
   }, [floatingPanels, layoutMode, dockAutoHide]);
 
-  useEffect(() => {
-    setDirectModeError("");
-  }, [projectId, project.direct_mode]);
-
-  async function toggleDirectMode() {
-    if (directModeSaving) return;
+  function toggleDirectMode() {
     const desiredDirectMode = !project.direct_mode;
-    const previousProject = project;
-    setDirectModeError("");
-    setDirectModeSaving(true);
+    onDirectModeChange(projectId, desiredDirectMode);
     onProjectUpdated({ ...project, direct_mode: desiredDirectMode });
-    try {
-      const updated = await postJSON<Project>("/api/project/direct-mode", {
-        project_id: projectId,
-        direct_mode: desiredDirectMode,
-      });
-      onProjectUpdated(updated);
-    } catch (err) {
-      console.error("failed to toggle direct mode:", err);
-      onProjectUpdated(previousProject);
-      setDirectModeError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setDirectModeSaving(false);
-    }
   }
 
   function renderNode(node: LayoutNode): React.ReactNode {
@@ -497,13 +476,13 @@ export function StudioWorkspace({
       }}
     >
       {!navHidden && (
-        <header className="studio-header shrink-0 h-9 flex items-center gap-1.5 px-2 z-50 shadow-sm transition-colors duration-150">
-          <div className="flex shrink-0 items-center gap-2">
-            <div className="h-5 w-5 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-500/25 flex-shrink-0">
-              <span className="text-white font-black text-[10px] leading-none">P</span>
+        <header className="studio-header shrink-0 h-7 flex items-center gap-1.5 px-2 z-50 shadow-sm transition-colors duration-150">
+          <div className="flex h-6 shrink-0 items-center gap-1.5">
+            <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-indigo-600 shadow-sm shadow-indigo-500/25">
+              <span className="text-white font-black text-[8px] leading-none">P</span>
             </div>
             <span className="hidden font-bold text-foreground text-xs tracking-tight sm:inline">Pocket Studio</span>
-            <span className="hidden px-1.5 py-0.5 text-[9px] uppercase font-bold tracking-widest bg-indigo-50 text-indigo-600 rounded border border-indigo-100 dark:bg-indigo-950/40 dark:text-indigo-400 dark:border-indigo-900/60 md:inline">
+            <span className="hidden h-6 items-center px-1 text-[8px] uppercase font-bold tracking-widest bg-indigo-50 text-indigo-600 rounded border border-indigo-100 dark:bg-indigo-950/40 dark:text-indigo-400 dark:border-indigo-900/60 md:flex">
               PRO
             </span>
           </div>
@@ -527,6 +506,7 @@ export function StudioWorkspace({
               onSelectProject={onSelectProject}
               onToggleFavorite={onToggleFavorite}
               onMoveFavorite={onMoveFavorite}
+              onDirectModeChange={onDirectModeChange}
               triggerClassName="hidden md:flex"
             />
 
@@ -534,20 +514,14 @@ export function StudioWorkspace({
               type="button"
               onClick={(event) => {
                 event.stopPropagation();
-                void toggleDirectMode();
+                toggleDirectMode();
               }}
-              disabled={directModeSaving}
-              className={`flex h-6 items-center gap-1 rounded-md border px-1.5 text-[10px] font-bold transition-colors ${project.direct_mode ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300" : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground"} disabled:opacity-60`}
+              className={`flex h-6 items-center gap-1 rounded-md border px-1.5 text-[10px] font-bold transition-colors ${project.direct_mode ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300" : "border-border bg-card text-muted-foreground hover:bg-accent hover:text-accent-foreground"}`}
               title={project.direct_mode ? `直连已开启：${project.direct_endpoint?.terminal_ws_url || "等待 daemon 上报端点"}` : "开启后 Terminal 与 Agent Chat WebSocket 将直连 daemon"}
             >
-              <Cable className="h-3.5 w-3.5" />
-              <span className="hidden lg:inline">{directModeSaving ? "保存中" : project.direct_mode ? "直连" : "中转"}</span>
+              <Cable className="h-3 w-3" />
+              <span className="hidden lg:inline">{project.direct_mode ? "直连" : "中转"}</span>
             </button>
-            {directModeError ? (
-              <span className="hidden max-w-[260px] truncate rounded-md border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300" title={directModeError}>
-                直连切换失败：{directModeError}
-              </span>
-            ) : null}
             <NotificationCenter
               notifications={notifications}
               open={notificationCenterOpen}
@@ -594,7 +568,7 @@ export function StudioWorkspace({
                 event.stopPropagation();
                 setNavHidden(true);
               }}
-              className="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors cursor-pointer"
+              className="flex h-6 w-6 items-center justify-center rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors cursor-pointer"
               title="隐藏顶部栏"
             >
               <ChevronUp className="h-4 w-4" />
@@ -608,7 +582,7 @@ export function StudioWorkspace({
                   e.stopPropagation();
                   setThemeMenuOpen(!themeMenuOpen);
                 }}
-                className="p-1 rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors cursor-pointer flex items-center gap-1"
+                className="flex h-6 w-6 items-center justify-center rounded-md hover:bg-accent text-muted-foreground hover:text-accent-foreground transition-colors cursor-pointer"
                 title="切换主题 / Switch Theme"
               >
                 <Palette className="h-4 w-4" />

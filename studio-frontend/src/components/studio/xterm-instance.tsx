@@ -5,6 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import type { StudioTheme } from "./terminal-types";
 import { directWebsocketURL, getJSON, postJSON, websocketURL } from "@/lib/api";
 import { pocketElectronAPI } from "@/lib/electron-api";
+import { projectDirectMode } from "@/lib/direct-mode";
 
 export function getXtermTheme(theme: StudioTheme) {
   if (theme === "dark") {
@@ -289,10 +290,10 @@ async function refreshDirectEndpoint(projectId: string): Promise<{ terminal_ws_u
       : projectData && typeof projectData === "object" && Array.isArray((projectData as { projects?: unknown }).projects)
         ? (projectData as { projects: unknown[] }).projects
         : [];
-    const project = projects.find((item): item is { id: string; direct_mode?: boolean; direct_endpoint?: { terminal_ws_url?: string; token?: string } } => {
+    const project = projects.find((item): item is { id: string; direct_endpoint?: { terminal_ws_url?: string; token?: string } } => {
       return Boolean(item && typeof item === "object" && (item as { id?: unknown }).id === projectId);
     });
-    const endpoint = project?.direct_mode ? project.direct_endpoint : undefined;
+    const endpoint = projectDirectMode(projectId) ? project?.direct_endpoint : undefined;
     return endpoint?.terminal_ws_url ? { terminal_ws_url: endpoint.terminal_ws_url, token: endpoint.token } : undefined;
   } catch (err) {
     console.warn("failed to refresh direct terminal endpoint:", err);

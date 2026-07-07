@@ -78,6 +78,7 @@ type Hub struct {
 	mu             sync.RWMutex
 	daemons        map[string]*daemonConn
 	webs           map[*webConn]struct{}
+	taskAliases    map[string]string
 	taskDevices    map[string]string
 	taskEvents     map[string][]protocol.Envelope
 	taskRecords    map[string]protocol.TaskRecord
@@ -117,10 +118,11 @@ type terminalConn struct {
 }
 
 type acpxConn struct {
-	userID string
-	taskID string
-	conn   *websocket.Conn
-	send   chan protocol.Envelope
+	userID    string
+	taskID    string
+	projectID string
+	conn      *websocket.Conn
+	send      chan protocol.Envelope
 }
 
 type DeviceView struct {
@@ -145,6 +147,7 @@ func NewHub(authManager *auth.Manager) *Hub {
 		auth:           authManager,
 		daemons:        make(map[string]*daemonConn),
 		webs:           make(map[*webConn]struct{}),
+		taskAliases:    make(map[string]string),
 		taskDevices:    make(map[string]string),
 		taskEvents:     make(map[string][]protocol.Envelope),
 		taskRecords:    make(map[string]protocol.TaskRecord),
@@ -162,6 +165,26 @@ func scopedKey(userID string, id string) string {
 		userID = auth.OwnerAdmin
 	}
 	return userID + "\x00" + id
+}
+
+func (h *Hub) resolveTaskIDLocked(userID string, taskID string) string {
+	resolved := h.taskAliases[scopedKey(userID, taskID)]
+	if resolved == "" {
+		return taskID
+	}
+	return resolved
+}
+
+func taskAliasIDs(record protocol.TaskRecord) []string {
+	ids := make([]string, 0, 3)
+	for _, id := range []string{record.SessionName, record.SessionID} {
+		id = strings.TrimSpace(id)
+		if id == "" || id == record.TaskID {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 func daemonKey(userID string, deviceID string) string {
@@ -217,9 +240,6 @@ func projectFromDaemonWorkspace(userID string, deviceID string, workspace protoc
 
 func (h *Hub) attachDirectEndpointLocked(project Project) Project {
 	project.DirectEndpoint = nil
-	if !project.DirectMode {
-		return project
-	}
 	if dc := h.daemons[daemonKey(project.UserID, project.DeviceID)]; dc != nil && dc.directEndpoint != nil {
 		endpoint := *dc.directEndpoint
 		expiry := time.Now().Add(15 * time.Minute).Truncate(5 * time.Minute)
@@ -416,12 +436,13 @@ func (h *Hub) ServeACPXWebSocket(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "task_id is required"})
 		return
 	}
+	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("upgrade acpx: %v", err)
 		return
 	}
-	ac := &acpxConn{userID: userID, taskID: taskID, conn: conn, send: make(chan protocol.Envelope, 128)}
+	ac := &acpxConn{userID: userID, taskID: taskID, projectID: projectID, conn: conn, send: make(chan protocol.Envelope, 128)}
 	key := scopedKey(userID, taskID)
 	h.mu.Lock()
 	if h.acpxConns[key] == nil {
@@ -542,46 +563,6 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		}) {
 			h.broadcastToUser(userID, protocol.NewEnvelope("server.state", "server", h.stateView(userID)))
 		}
-		return
-	}
-	if r.URL.Path == "/api/project/direct-mode" && r.Method == http.MethodPost {
-		var req struct {
-			ProjectID  string `json:"project_id"`
-			DirectMode bool   `json:"direct_mode"`
-		}
-		if !decodeJSON(w, r, &req) {
-			return
-		}
-		project, ok := h.projectByID(userID, req.ProjectID)
-		if !ok {
-			writeJSON(w, http.StatusNotFound, protocol.ServerError{Code: "not_found", Message: "project not found"})
-			return
-		}
-		requestID := protocol.NewID("req")
-		env, err := h.requestDaemonForDevice(r, project.DeviceID, protocol.TypeProjectCreate, project.WorkspacePath, requestID, protocol.ProjectCreateRequest{
-			RequestID:     requestID,
-			Name:          project.Name,
-			DeviceID:      project.DeviceID,
-			WorkspacePath: project.WorkspacePath,
-			DirectMode:    req.DirectMode,
-		})
-		writeProjectResult(w, env, err, true, func(updated *Project) {
-			updated.UserID = userID
-			if updated.DeviceID == "" {
-				updated.DeviceID = project.DeviceID
-			}
-			if updated.WorkspacePath == "" {
-				updated.WorkspacePath = project.WorkspacePath
-			}
-			if updated.Name == "" {
-				updated.Name = project.Name
-			}
-			h.mu.Lock()
-			*updated = h.attachDirectEndpointLocked(*updated)
-			h.projects[scopedKey(userID, updated.ID)] = *updated
-			h.mu.Unlock()
-			h.broadcastToUser(userID, protocol.NewEnvelope("server.state", "server", h.stateView(userID)))
-		})
 		return
 	}
 	if r.URL.Path == "/api/project/state" {
@@ -1088,18 +1069,35 @@ func (h *Hub) readACPXLoop(ac *acpxConn) {
 
 func (h *Hub) requestTaskHistoryForACPX(ac *acpxConn) {
 	h.mu.RLock()
-	record := h.taskRecords[scopedKey(ac.userID, ac.taskID)]
+	resolvedTaskID := h.resolveTaskIDLocked(ac.userID, ac.taskID)
+	record := h.taskRecords[scopedKey(ac.userID, resolvedTaskID)]
 	deviceID := record.DeviceID
+	workspacePath := record.WorkspacePath
 	if deviceID == "" {
-		deviceID = h.taskDevices[scopedKey(ac.userID, ac.taskID)]
+		deviceID = h.taskDevices[scopedKey(ac.userID, resolvedTaskID)]
+	}
+	if deviceID == "" && ac.projectID != "" {
+		if project, ok := h.projects[scopedKey(ac.userID, ac.projectID)]; ok {
+			deviceID = project.DeviceID
+			workspacePath = project.WorkspacePath
+		} else if project, ok := h.daemonWorkspaceProjectByIDLocked(ac.userID, ac.projectID); ok {
+			deviceID = project.DeviceID
+			workspacePath = project.WorkspacePath
+		}
 	}
 	dc := h.daemons[daemonKey(ac.userID, deviceID)]
 	h.mu.RUnlock()
 
 	if dc == nil {
+		sent := 0
 		for _, event := range h.taskHistory(ac.userID, ac.taskID) {
 			ac.send <- taskEventEnvelope(event)
+			sent++
 		}
+		ac.send <- protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "server", protocol.TaskHistoryReady{
+			TaskID:    ac.taskID,
+			HasEvents: sent > 0,
+		})
 		return
 	}
 
@@ -1108,8 +1106,9 @@ func (h *Hub) requestTaskHistoryForACPX(ac *acpxConn) {
 	h.acpxHistoryReq[requestID] = ac
 	h.mu.Unlock()
 	env := protocol.NewEnvelope(protocol.TypeTaskHistoryGet, "server", protocol.TaskHistoryGet{
-		RequestID: requestID,
-		TaskID:    ac.taskID,
+		RequestID:     requestID,
+		TaskID:        ac.taskID,
+		WorkspacePath: workspacePath,
 	})
 	env.To.TaskID = ac.taskID
 	dc.send <- env
@@ -1253,6 +1252,27 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 			seen[taskKey] = struct{}{}
 			h.taskDevices[taskKey] = snapshot.DeviceID
 			record.DeviceID = snapshot.DeviceID
+			for _, aliasID := range taskAliasIDs(record) {
+				aliasKey := scopedKey(dc.userID, aliasID)
+				h.taskAliases[aliasKey] = record.TaskID
+				if existing := h.taskRecords[aliasKey]; len(existing.Events) > 0 {
+					record.Events = mergeTaskRecordEvents(record.Events, existing.Events)
+					if existing.Status == "running" || existing.Status == "stopping" {
+						record.Status = existing.Status
+					}
+					if existing.UpdatedAt > record.UpdatedAt {
+						record.UpdatedAt = existing.UpdatedAt
+					}
+					if record.ModelID == "" {
+						record.ModelID = existing.ModelID
+					}
+					if record.Prompt == "" {
+						record.Prompt = existing.Prompt
+					}
+				}
+				h.taskDevices[aliasKey] = snapshot.DeviceID
+				seen[aliasKey] = struct{}{}
+			}
 			if existing := h.taskRecords[taskKey]; len(existing.Events) > 0 {
 				record.Events = mergeTaskRecordEvents(record.Events, existing.Events)
 				if existing.Status == "running" || existing.Status == "stopping" {
@@ -1280,9 +1300,16 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 			if _, ok := seen[taskID]; ok {
 				continue
 			}
+			if canonical := h.taskAliases[taskID]; canonical != "" {
+				if _, ok := seen[scopedKey(dc.userID, canonical)]; ok {
+					seen[taskID] = struct{}{}
+					continue
+				}
+			}
 			delete(h.taskDevices, taskID)
 			delete(h.taskRecords, taskID)
 			delete(h.taskEvents, taskID)
+			delete(h.taskAliases, taskID)
 		}
 		h.mu.Unlock()
 		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
@@ -1360,6 +1387,17 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 					}
 				} else {
 					h.broadcastToTask(dc.userID, result.TaskID, forward)
+				}
+			}
+			if requester != nil {
+				ready := protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "server", protocol.TaskHistoryReady{
+					RequestID: result.RequestID,
+					TaskID:    result.TaskID,
+					HasEvents: len(result.Events) > 0,
+				})
+				select {
+				case requester.send <- ready:
+				default:
 				}
 			}
 		}
@@ -1471,13 +1509,20 @@ func (h *Hub) stateView(userID string) StateView {
 
 func (h *Hub) taskHistory(userID string, taskID string) []protocol.TaskEvent {
 	h.mu.RLock()
-	record := h.taskRecords[scopedKey(userID, taskID)]
+	resolvedTaskID := h.resolveTaskIDLocked(userID, taskID)
+	record := h.taskRecords[scopedKey(userID, resolvedTaskID)]
 	h.mu.RUnlock()
 	if record.TaskID == "" {
 		return nil
 	}
 	events := make([]protocol.TaskEvent, len(record.Events))
 	copy(events, record.Events)
+	if resolvedTaskID != taskID {
+		record.TaskID = taskID
+		for idx := range events {
+			events[idx].TaskID = taskID
+		}
+	}
 	if strings.TrimSpace(record.Prompt) != "" && !hasUserPromptEvent(events) {
 		promptEvent := taskRecordPromptEvent(record)
 		insertAt := promptEventInsertIndex(events)

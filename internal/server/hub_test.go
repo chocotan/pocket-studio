@@ -155,6 +155,63 @@ func TestTaskHistoryDoesNotDuplicateExistingUserPrompt(t *testing.T) {
 	}
 }
 
+func TestTaskSnapshotMapsACPXSessionNameAlias(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	dc := &daemonConn{userID: auth.OwnerAdmin, deviceID: "device-1"}
+	h.taskRecords[scopedKey(auth.OwnerAdmin, "acpx-ui-task")] = protocol.TaskRecord{
+		TaskID:      "acpx-ui-task",
+		SessionName: "acpx-ui-task",
+		SessionID:   "rec-1",
+		Events: []protocol.TaskEvent{{
+			TaskID:    "acpx-ui-task",
+			EventID:   "evt-user",
+			EventType: "user.prompt",
+			Sequence:  1,
+			Data:      json.RawMessage(`{"prompt":"hello"}`),
+		}},
+	}
+	h.taskDevices[scopedKey(auth.OwnerAdmin, "acpx-ui-task")] = "device-1"
+
+	h.handleDaemonMessage(dc, protocol.NewEnvelope(protocol.TypeTaskSnapshot, "daemon", protocol.TaskSnapshot{
+		DeviceID: "device-1",
+		Tasks: []protocol.TaskRecord{{
+			TaskID:       "rec-1",
+			DeviceID:     "device-1",
+			SessionName:  "acpx-ui-task",
+			SessionID:    "rec-1",
+			Agent:        "opencode",
+			AgentRuntime: "acpx",
+			Events: []protocol.TaskEvent{{
+				TaskID:    "rec-1",
+				EventID:   "evt-assistant",
+				EventType: "assistant.message",
+				Sequence:  2,
+				Data:      json.RawMessage(`{"text":"restored"}`),
+			}},
+		}},
+	}))
+
+	if got := h.taskAliases[scopedKey(auth.OwnerAdmin, "acpx-ui-task")]; got != "rec-1" {
+		t.Fatalf("alias = %q, want rec-1", got)
+	}
+	events := h.taskHistory(auth.OwnerAdmin, "acpx-ui-task")
+	if len(events) != 2 {
+		t.Fatalf("events len = %d, want merged restored history: %#v", len(events), events)
+	}
+	for _, event := range events {
+		if event.TaskID != "acpx-ui-task" {
+			t.Fatalf("event task id = %q, want acpx-ui-task: %#v", event.TaskID, events)
+		}
+	}
+	seenEvents := map[string]bool{}
+	for _, event := range events {
+		seenEvents[event.EventID] = true
+	}
+	if !seenEvents["evt-assistant"] || !seenEvents["evt-user"] {
+		t.Fatalf("events = %#v, want canonical plus old alias events", events)
+	}
+}
+
 func TestPrepareTaskDispatchRecordAddsUserPromptEvent(t *testing.T) {
 	h := NewHub(auth.NewOpen(""))
 	task := protocol.TaskDispatch{
@@ -349,7 +406,7 @@ func TestHandleDaemonMessageDoesNotBroadcastDuplicateTaskEvent(t *testing.T) {
 	}
 }
 
-func TestProjectDirectModeMaterializesDaemonWorkspaceProject(t *testing.T) {
+func TestDirectEndpointMaterializesDaemonWorkspaceProject(t *testing.T) {
 	h := NewHub(auth.NewOpen(""))
 	h.mu.Lock()
 	h.daemons[daemonKey(auth.OwnerAdmin, "dev-1")] = &daemonConn{
@@ -368,7 +425,6 @@ func TestProjectDirectModeMaterializesDaemonWorkspaceProject(t *testing.T) {
 	if !ok {
 		t.Fatal("projectByID() missing virtual daemon workspace project")
 	}
-	project.DirectMode = true
 	h.mu.Lock()
 	project = h.attachDirectEndpointLocked(project)
 	h.projects[scopedKey(auth.OwnerAdmin, project.ID)] = project
@@ -378,8 +434,8 @@ func TestProjectDirectModeMaterializesDaemonWorkspaceProject(t *testing.T) {
 	if len(projects) != 1 {
 		t.Fatalf("projects = %#v, want one materialized project", projects)
 	}
-	if !projects[0].DirectMode || projects[0].DirectEndpoint == nil || projects[0].DirectEndpoint.TerminalWebSocketURL == "" {
-		t.Fatalf("materialized direct project = %#v", projects[0])
+	if projects[0].DirectEndpoint == nil || projects[0].DirectEndpoint.TerminalWebSocketURL == "" {
+		t.Fatalf("materialized project direct endpoint = %#v", projects[0])
 	}
 	if projects[0].DirectEndpoint.Token == "secret" || projects[0].DirectEndpoint.Token == "" {
 		t.Fatalf("direct endpoint token should be a scoped capability, got %#v", projects[0].DirectEndpoint)
@@ -389,84 +445,6 @@ func TestProjectDirectModeMaterializesDaemonWorkspaceProject(t *testing.T) {
 	}
 	if protocol.VerifyDirectTerminalToken("secret", "other-project", projects[0].DirectEndpoint.Token, time.Now()) {
 		t.Fatal("direct endpoint token should not validate for another project")
-	}
-}
-
-func TestProjectDirectModeAPIUpdatesVirtualDaemonWorkspaceProject(t *testing.T) {
-	h := NewHub(auth.NewOpen(""))
-	h.mu.Lock()
-	h.daemons[daemonKey(auth.OwnerAdmin, "dev-1")] = &daemonConn{
-		userID:         auth.OwnerAdmin,
-		deviceID:       "dev-1",
-		send:           make(chan protocol.Envelope, 1),
-		directEndpoint: &protocol.DirectEndpoint{TerminalWebSocketURL: "ws://10.0.0.5:18082/ws/terminal", Token: "secret"},
-		workspaces: []protocol.Workspace{{
-			ID:   "project-1",
-			Name: "Project",
-			Path: "/workspace",
-		}},
-	}
-	h.mu.Unlock()
-
-	req := httptest.NewRequest(http.MethodPost, "/api/project/direct-mode", strings.NewReader(`{"project_id":"project-1","direct_mode":true}`))
-	req.Header.Set("Content-Type", "application/json")
-	res := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		h.ServeAPI(res, req)
-		close(done)
-	}()
-
-	var forwarded protocol.Envelope
-	select {
-	case forwarded = <-h.daemons[daemonKey(auth.OwnerAdmin, "dev-1")].send:
-	case <-time.After(time.Second):
-		t.Fatal("server did not forward direct-mode request to daemon")
-	}
-	request, err := protocol.DecodePayload[protocol.ProjectCreateRequest](forwarded)
-	if err != nil {
-		t.Fatalf("decode forwarded project request: %v", err)
-	}
-	if !request.DirectMode || request.WorkspacePath != "/workspace" {
-		t.Fatalf("forwarded request = %#v, want direct mode update for virtual workspace", request)
-	}
-
-	h.mu.RLock()
-	pending := h.pending[scopedKey(auth.OwnerAdmin, request.RequestID)]
-	h.mu.RUnlock()
-	if pending == nil {
-		t.Fatal("pending request not registered")
-	}
-	pending <- protocol.NewEnvelope(protocol.TypeProjectResult, "daemon", protocol.ProjectResult{
-		RequestID: request.RequestID,
-		Project: &protocol.Project{
-			ID:            "project-1",
-			Name:          "Project",
-			DeviceID:      "dev-1",
-			WorkspacePath: "/workspace",
-			AgentIDs:      []string{},
-			TmuxIDs:       []string{},
-			DirectMode:    true,
-		},
-	})
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("direct-mode API did not complete")
-	}
-	if res.Code != http.StatusOK {
-		t.Fatalf("status = %d body = %s", res.Code, res.Body.String())
-	}
-	var got Project
-	if err := json.Unmarshal(res.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode project response: %v", err)
-	}
-	if !got.DirectMode || got.DirectEndpoint == nil || got.DirectEndpoint.TerminalWebSocketURL == "" {
-		t.Fatalf("direct-mode API response = %#v", got)
-	}
-	if got.DirectEndpoint.Token == "secret" || !protocol.VerifyDirectTerminalToken("secret", "project-1", got.DirectEndpoint.Token, time.Now()) {
-		t.Fatalf("direct-mode API token is not scoped: %#v", got.DirectEndpoint)
 	}
 }
 

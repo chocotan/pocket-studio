@@ -172,7 +172,8 @@ func (d *Daemon) handleDirectACPXWebSocket(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid task_id", http.StatusBadRequest)
 		return
 	}
-	if _, ok := d.projectForDirectTerminal(projectID); !ok {
+	project, ok := d.projectForDirectTerminal(projectID)
+	if !ok {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
@@ -189,7 +190,11 @@ func (d *Daemon) handleDirectACPXWebSocket(w http.ResponseWriter, r *http.Reques
 	d.addDirectACPXSubscriber(projectID, taskID, subscriber)
 	defer d.removeDirectACPXSubscriber(key, subscriber)
 
-	d.sendDirectTaskHistory(subscriber, taskID)
+	historyEvents := d.sendDirectTaskHistory(subscriber, taskID, project.WorkspacePath)
+	_ = subscriber.writeEnvelope(protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "daemon", protocol.TaskHistoryReady{
+		TaskID:    taskID,
+		HasEvents: historyEvents > 0,
+	}))
 
 	for {
 		var env protocol.Envelope
@@ -252,7 +257,7 @@ func (d *Daemon) directEndpoint() *protocol.DirectEndpoint {
 func (d *Daemon) projectForDirectTerminal(projectID string) (protocol.Project, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if project, ok := d.projects[projectID]; ok && project.DirectMode {
+	if project, ok := d.projects[projectID]; ok {
 		return project, true
 	}
 	return protocol.Project{}, false
@@ -368,23 +373,23 @@ func (d *Daemon) projectIDForTask(taskID string) string {
 	return d.projectIDForWorkspacePath(record.WorkspacePath)
 }
 
-func (d *Daemon) sendDirectTaskHistory(subscriber *directACPXSubscriber, taskID string) {
-	d.mu.Lock()
-	record := d.taskHistoryRecordLocked(taskID)
-	d.mu.Unlock()
-
+func (d *Daemon) sendDirectTaskHistory(subscriber *directACPXSubscriber, taskID string, workspacePath string) int {
+	record := d.taskHistoryForRequest(taskID, workspacePath)
 	if record.TaskID == "" {
-		return
+		return 0
 	}
 	record.TaskID = taskID
 	for i := range record.Events {
 		record.Events[i].TaskID = taskID
 	}
+	sent := 0
 	for _, event := range normalizedTaskHistoryEvents(record) {
 		if err := subscriber.writeEnvelope(protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", event)); err != nil {
-			return
+			return sent
 		}
+		sent++
 	}
+	return sent
 }
 
 func (d *Daemon) handleDirectACPXEnvelope(env protocol.Envelope) bool {

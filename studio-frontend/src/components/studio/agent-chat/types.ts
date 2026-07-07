@@ -14,7 +14,7 @@ export interface TaskEvent {
 export interface ChatMessage {
   id: string;
   seq: number;
-  kind: "user_prompt" | "assistant_message" | "thought" | "tool_call";
+  kind: "user_prompt" | "assistant_message" | "thought" | "tool_call" | "run_duration";
   content: string;
   createdAt: string;
   durationMs?: number;

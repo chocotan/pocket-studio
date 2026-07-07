@@ -51,16 +51,6 @@ async function getJSON(path) {
   return res.json();
 }
 
-async function postJSON(path, body) {
-  const res = await fetch(`http://127.0.0.1:${serverPort}${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(`${path} -> ${res.status} ${await res.text()}`);
-  return res.json();
-}
-
 class CDP {
   constructor(url) {
     this.ws = new WebSocket(url);
@@ -144,10 +134,11 @@ function pageScript(projectId, serverPortValue, directPortValue) {
   const directButton = await waitFor(() => [...document.querySelectorAll('button')].find((button) => (button.title || '').includes('终端 WebSocket') || (button.title || '').includes('直连终端') || /中转|直连|保存中/.test(button.innerText)), 'direct mode button');
   directButton.click();
   await waitFor(async () => {
+    const prefs = JSON.parse(localStorage.getItem('pocket-studio-direct-mode') || '{}');
     const res = await fetch('/api/project/list');
     const projects = await res.json();
     const project = Array.isArray(projects) ? projects.find((item) => item.id === ${JSON.stringify(projectId)}) : null;
-    return project && project.direct_mode && project.direct_endpoint && project.direct_endpoint.terminal_ws_url;
+    return prefs[${JSON.stringify(projectId)}] === true && project && project.direct_endpoint && project.direct_endpoint.terminal_ws_url;
   }, 'direct mode enabled');
   await sleep(300);
   window.__wsUrls = [];
@@ -200,7 +191,6 @@ try {
     return Array.isArray(list) && list.find((item) => item.workspace_path === workspace);
   }, 'project appears');
   const projectId = project.id;
-  await postJSON('/api/project/direct-mode', { project_id: projectId, direct_mode: false });
 
   chrome = start('chromium', chromiumBin, [
     '--headless=new',

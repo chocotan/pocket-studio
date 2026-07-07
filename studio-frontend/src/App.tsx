@@ -6,6 +6,7 @@ import type { Device } from "./lib/types";
 import { getJSON, postJSON, loadClientConfig } from "./lib/api";
 import { pocketElectronAPI } from "./lib/electron-api";
 import { loadZoom, saveZoom, type PageZoom } from "./lib/zoom";
+import { applyDirectModePreferences, saveDirectModePreference } from "./lib/direct-mode";
 import { isTerminalKind, terminalType, type TerminalKind } from "./components/studio/terminal-types";
 import { createStudioWebTransport, type StudioWebTransport, type StudioEnvelope } from "./components/studio/web-transport";
 
@@ -153,9 +154,9 @@ export default function App() {
     try {
       const projectData = await getJSON<unknown>("/api/project/list");
       if (Array.isArray(projectData)) {
-        setProjects(projectData.filter(isProject));
+        setProjects(applyDirectModePreferences(projectData.filter(isProject)));
       } else if (isObject(projectData) && Array.isArray(projectData.projects)) {
-        setProjects(projectData.projects);
+        setProjects(applyDirectModePreferences(projectData.projects.filter(isProject)));
       }
     } catch (err) {
       console.error("failed to refresh projects:", err);
@@ -289,6 +290,13 @@ export default function App() {
     });
   }
 
+  function handleDirectModeChange(projectId: string, directMode: boolean) {
+    saveDirectModePreference(projectId, directMode);
+    setProjects((current) => current.map((project) => (
+      project.id === projectId ? { ...project, direct_mode: directMode } : project
+    )));
+  }
+
   function handleMoveFavorite(projectId: string, direction: "up" | "down") {
     setFavorites((current) => {
       const next = moveInList(current, projectId, direction);
@@ -309,6 +317,7 @@ export default function App() {
           favoriteIds={favoriteIdSet}
           onToggleFavorite={handleToggleFavorite}
           onMoveFavorite={handleMoveFavorite}
+          onDirectModeChange={handleDirectModeChange}
           onSelectProject={handleSelectProject}
           onDeleteProject={handleDeleteProject}
           onRefreshProjects={refreshAll}
@@ -329,6 +338,7 @@ export default function App() {
             favoriteIds={favoriteIdSet}
             onToggleFavorite={handleToggleFavorite}
             onMoveFavorite={handleMoveFavorite}
+            onDirectModeChange={handleDirectModeChange}
             devices={devices}
             pageZoom={pageZoom}
             onPageZoomChange={setPageZoom}

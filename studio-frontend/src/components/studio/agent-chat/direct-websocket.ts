@@ -2,8 +2,9 @@ import { directWebsocketURL, websocketURL } from "@/lib/api";
 import type { Project } from "../studio-dashboard";
 
 type AgentChatTransport = "direct" | "relay";
+type AgentChatProjectEndpoint = Pick<Project, "id" | "direct_mode" | "direct_endpoint">;
 
-export function agentChatDirectEndpointURL(project: Project) {
+export function agentChatDirectEndpointURL(project: AgentChatProjectEndpoint) {
   if (!project.direct_mode || !project.direct_endpoint?.terminal_ws_url) {
     return "";
   }
@@ -18,7 +19,7 @@ export function agentChatDirectEndpointURL(project: Project) {
   }
 }
 
-export function agentChatWebSocketURL(project: Project, taskId: string): { url: string; transport: AgentChatTransport } {
+export function agentChatWebSocketURL(project: AgentChatProjectEndpoint, taskId: string): { url: string; transport: AgentChatTransport } {
   const directEndpointURL = agentChatDirectEndpointURL(project);
   if (directEndpointURL) {
     return {
@@ -31,7 +32,7 @@ export function agentChatWebSocketURL(project: Project, taskId: string): { url: 
     };
   }
   return {
-    url: websocketURL("/ws/acpx", new URLSearchParams({ task_id: taskId })),
+    url: websocketURL("/ws/acpx", new URLSearchParams({ task_id: taskId, project_id: project.id })),
     transport: "relay",
   };
 }

@@ -73,11 +73,23 @@ export function WorkingStatus({ elapsedMs }: { elapsedMs: number }) {
 
 export function RunDurationStatus({ elapsedMs }: { elapsedMs: number }) {
   return (
-    <div className="px-1 py-1 text-[11px] font-semibold text-muted-foreground select-none">
-      <span>Worked for</span>
-      <span className="ml-1.5 text-muted-foreground/80">{formatElapsedMs(elapsedMs)}</span>
+    <div className="flex items-center gap-2 px-1 py-2 text-[11px] font-medium text-muted-foreground/70 select-none">
+      <span className="h-px w-3 shrink-0 bg-muted-foreground/35" />
+      <span className="shrink-0">Worked for {formatWorkedDurationMs(elapsedMs)}</span>
+      <span className="h-px min-w-8 flex-1 bg-muted-foreground/35" />
     </div>
   );
+}
+
+function formatWorkedDurationMs(ms: number): string {
+  const safeMs = Math.max(0, ms);
+  const totalSeconds = Math.floor(safeMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${seconds}s`;
 }
 
 export function formatElapsedMs(ms: number): string {

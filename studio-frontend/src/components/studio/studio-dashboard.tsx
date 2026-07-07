@@ -57,6 +57,7 @@ interface StudioDashboardProps {
   favoriteIds: Set<string>;
   onToggleFavorite: (projectId: string) => void;
   onMoveFavorite: (projectId: string, direction: "up" | "down") => void;
+  onDirectModeChange: (projectId: string, directMode: boolean) => void;
   onSelectProject: (projectId: string) => void;
   onRefreshProjects: () => void;
   pageZoom: PageZoom;
@@ -78,6 +79,7 @@ export function StudioDashboard({
   favoriteIds,
   onToggleFavorite,
   onMoveFavorite,
+  onDirectModeChange,
   onSelectProject,
   onRefreshProjects,
   pageZoom,
@@ -291,10 +293,10 @@ export function StudioDashboard({
       className="studio-square theme-light flex h-dvh w-dvw flex-col overflow-hidden bg-background text-foreground font-sans"
       style={{ fontFamily: "var(--font-sans)" }}
     >
-      <header className="shrink-0 h-9 bg-white/95 border-b border-slate-200/70 flex items-center justify-between px-3 z-50 shadow-sm">
-        <div className="flex min-w-0 items-center gap-2">
-          <div className="h-5 w-5 rounded-md bg-indigo-600 flex items-center justify-center shadow-sm shadow-indigo-500/25 flex-shrink-0">
-            <span className="text-white font-black text-[9px] leading-none">P</span>
+      <header className="shrink-0 h-8 bg-white/95 border-b border-slate-200/70 flex items-center justify-between px-3 z-50 shadow-sm">
+        <div className="flex h-6 min-w-0 items-center gap-1.5">
+          <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-indigo-600 shadow-sm shadow-indigo-500/25">
+            <span className="text-white font-black text-[8px] leading-none">P</span>
           </div>
           <span className="font-bold text-slate-800 text-xs tracking-tight">Pocket Studio</span>
         </div>
@@ -315,13 +317,14 @@ export function StudioDashboard({
             onSelectProject={onSelectProject}
             onToggleFavorite={onToggleFavorite}
             onMoveFavorite={onMoveFavorite}
+            onDirectModeChange={onDirectModeChange}
             triggerClassName="hidden sm:flex"
           />
           <ZoomSelect value={pageZoom} onChange={onPageZoomChange} />
           <button
             type="button"
             onClick={onRefreshProjects}
-            className="p-1 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            className="flex h-6 w-6 items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
             title="刷新设备和项目"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -329,7 +332,7 @@ export function StudioDashboard({
           <button
             type="button"
             onClick={() => setShortcutSettingsOpen(true)}
-            className="p-1 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            className="flex h-6 w-6 items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
             title="快捷键设置"
           >
             <Keyboard className="h-3.5 w-3.5" />
@@ -337,7 +340,7 @@ export function StudioDashboard({
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
-            className="p-1 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            className="flex h-6 w-6 items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
             title="配置服务端地址"
           >
             <Settings className="h-3.5 w-3.5" />
