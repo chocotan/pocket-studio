@@ -20,7 +20,7 @@ import { FloatingWindow } from "./floating-window";
 import { ZoomSelect } from "./zoom-select";
 import { NotificationCenter } from "./notification-center";
 import type { PageZoom } from "@/lib/zoom";
-import type { NotificationJumpTarget, TerminalNotification } from "./terminal-notifications";
+import type { NotificationHostTarget, NotificationJumpTarget, TerminalNotification } from "./terminal-notifications";
 import { useWorkspaceLayout } from "./hooks/useWorkspaceLayout";
 import { updateSplitSizes } from "./studio-layout-ops";
 
@@ -40,6 +40,7 @@ interface StudioWorkspaceProps {
   onTerminalFocused?: (projectId: string, tabId: string) => void;
   notificationJumpTarget?: NotificationJumpTarget | null;
   onNotificationJumpHandled?: (nonce: number) => void;
+  onNotificationTargetsChange?: (hostProjectId: string, targets: NotificationHostTarget[]) => void;
   alertProjectIds?: Set<string>;
   alertTerminalIds?: Set<string>;
   notifications?: TerminalNotification[];
@@ -70,6 +71,7 @@ export function StudioWorkspace({
   onTerminalFocused = () => {},
   notificationJumpTarget = null,
   onNotificationJumpHandled = () => {},
+  onNotificationTargetsChange = () => {},
   alertProjectIds = new Set<string>(),
   alertTerminalIds = new Set<string>(),
   notifications = [],
@@ -165,6 +167,7 @@ export function StudioWorkspace({
     onTerminalFocused,
     notificationJumpTarget,
     onNotificationJumpHandled,
+    onNotificationTargetsChange,
   });
   const currentDevice = devices.find((device) => device.id === project.device_id);
 

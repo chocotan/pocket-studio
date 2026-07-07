@@ -289,6 +289,14 @@ function registerAppIPC() {
     clipboard.writeText(text);
     return { ok: true };
   });
+  ipcMain.handle("clipboard:paste", (event) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window || window.isDestroyed()) {
+      return { ok: false, error: "window is not available" };
+    }
+    window.webContents.paste();
+    return { ok: true };
+  });
 }
 
 function spawnManaged(command, args, env) {

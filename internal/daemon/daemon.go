@@ -4551,9 +4551,9 @@ func (d *Daemon) maybeSendAgentCompletionAlert(record protocol.TaskRecord, event
 	if projectID == "" {
 		return
 	}
-	tabID := d.agentNotificationTabID(projectID, record)
+	target := d.agentNotificationTarget(projectID, record)
 	message := agentCompletionMessage(event.EventType)
-	alert := d.agentCompletionAlert(projectID, tabID, record.Agent, record.AgentRuntime, message)
+	alert := d.agentCompletionAlert(projectID, target.hostProjectID, target.panelID, target.tabID, record.Agent, record.AgentRuntime, message)
 	if alert == nil {
 		return
 	}
@@ -4580,32 +4580,92 @@ func agentCompletionMessage(eventType string) string {
 	}
 }
 
-func (d *Daemon) agentNotificationTabID(projectID string, record protocol.TaskRecord) string {
-	taskID := strings.TrimSpace(record.TaskID)
-	sessionName := strings.TrimSpace(record.SessionName)
-	d.mu.Lock()
-	raw := append(json.RawMessage(nil), d.projectStates[projectID]...)
-	d.mu.Unlock()
-	if tabID := agentTabIDFromProjectState(raw, taskID, sessionName); tabID != "" {
-		return tabID
-	}
-	return taskID
+type notificationTabTarget struct {
+	hostProjectID string
+	panelID       string
+	tabID         string
 }
 
-func agentTabIDFromProjectState(raw json.RawMessage, taskID string, sessionName string) string {
+func (d *Daemon) agentNotificationTarget(projectID string, record protocol.TaskRecord) notificationTabTarget {
+	taskID := strings.TrimSpace(record.TaskID)
+	sessionName := strings.TrimSpace(record.SessionName)
+	states := d.projectStateSnapshot()
+	for _, hostProjectID := range orderedProjectStateIDs(states, projectID) {
+		target := agentTabTargetFromProjectState(states[hostProjectID], projectID, taskID, sessionName, hostProjectID == projectID)
+		if target.tabID != "" {
+			target.hostProjectID = hostProjectID
+			return target
+		}
+	}
+	return notificationTabTarget{hostProjectID: projectID, tabID: taskID}
+}
+
+func (d *Daemon) terminalNotificationTarget(projectID string, terminalID string) notificationTabTarget {
+	terminalID = strings.TrimSpace(terminalID)
+	states := d.projectStateSnapshot()
+	for _, hostProjectID := range orderedProjectStateIDs(states, projectID) {
+		target := terminalTabTargetFromProjectState(states[hostProjectID], projectID, terminalID, hostProjectID == projectID)
+		if target.tabID != "" {
+			target.hostProjectID = hostProjectID
+			return target
+		}
+	}
+	return notificationTabTarget{hostProjectID: projectID, tabID: terminalID}
+}
+
+func (d *Daemon) projectStateSnapshot() map[string]json.RawMessage {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	states := make(map[string]json.RawMessage, len(d.projectStates)+len(d.projects))
+	for id, raw := range d.projectStates {
+		if id == "" || len(raw) == 0 {
+			continue
+		}
+		states[id] = append(json.RawMessage(nil), raw...)
+	}
+	for id, project := range d.projects {
+		if id == "" || len(project.StudioState) == 0 {
+			continue
+		}
+		if _, ok := states[id]; !ok {
+			states[id] = append(json.RawMessage(nil), project.StudioState...)
+		}
+	}
+	return states
+}
+
+func orderedProjectStateIDs(states map[string]json.RawMessage, preferred string) []string {
+	ids := make([]string, 0, len(states))
+	if preferred != "" {
+		if _, ok := states[preferred]; ok {
+			ids = append(ids, preferred)
+		}
+	}
+	rest := make([]string, 0, len(states))
+	for id := range states {
+		if id == "" || id == preferred {
+			continue
+		}
+		rest = append(rest, id)
+	}
+	sort.Strings(rest)
+	return append(ids, rest...)
+}
+
+func agentTabTargetFromProjectState(raw json.RawMessage, projectID string, taskID string, sessionName string, allowMissingProjectID bool) notificationTabTarget {
 	if len(raw) == 0 {
-		return ""
+		return notificationTabTarget{}
 	}
 	var state struct {
 		LayoutTree any `json:"layoutTree"`
 	}
 	if json.Unmarshal(raw, &state) != nil {
-		return ""
+		return notificationTabTarget{}
 	}
-	var found string
+	var found notificationTabTarget
 	var walk func(any)
 	walk = func(value any) {
-		if found != "" {
+		if found.tabID != "" {
 			return
 		}
 		obj, ok := value.(map[string]any)
@@ -4623,11 +4683,16 @@ func agentTabIDFromProjectState(raw json.RawMessage, taskID string, sessionName 
 				if kind, _ := tab["kind"].(string); kind != "agent_chat" {
 					continue
 				}
-				agentSessionID, _ := tab["agentSessionId"].(string)
-				if agentSessionID == "" || (agentSessionID != taskID && agentSessionID != sessionName) {
+				if !tabBelongsToProject(tab, projectID, allowMissingProjectID) {
 					continue
 				}
-				found, _ = tab["id"].(string)
+				agentSessionID, _ := tab["agentSessionId"].(string)
+				agentSessionName, _ := tab["agentSessionName"].(string)
+				if !matchesAnyNonEmpty(agentSessionID, taskID, sessionName) && !matchesAnyNonEmpty(agentSessionName, taskID, sessionName) {
+					continue
+				}
+				found.panelID, _ = obj["id"].(string)
+				found.tabID, _ = tab["id"].(string)
 				return
 			}
 			return
@@ -4641,8 +4706,81 @@ func agentTabIDFromProjectState(raw json.RawMessage, taskID string, sessionName 
 	return found
 }
 
-func (d *Daemon) agentCompletionAlert(projectID string, tabID string, agent string, runtime string, message string) *protocol.TerminalStreamAlert {
+func terminalTabTargetFromProjectState(raw json.RawMessage, projectID string, terminalID string, allowMissingProjectID bool) notificationTabTarget {
+	if len(raw) == 0 || terminalID == "" {
+		return notificationTabTarget{}
+	}
+	var state struct {
+		LayoutTree any `json:"layoutTree"`
+	}
+	if json.Unmarshal(raw, &state) != nil {
+		return notificationTabTarget{}
+	}
+	var found notificationTabTarget
+	var walk func(any)
+	walk = func(value any) {
+		if found.tabID != "" {
+			return
+		}
+		obj, ok := value.(map[string]any)
+		if !ok {
+			return
+		}
+		typ, _ := obj["type"].(string)
+		if typ == "panel" {
+			tabs, _ := obj["tabs"].([]any)
+			for _, tabValue := range tabs {
+				tab, ok := tabValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				if kind, _ := tab["kind"].(string); kind != "terminal" {
+					continue
+				}
+				tabID, _ := tab["id"].(string)
+				if tabID != terminalID || !tabBelongsToProject(tab, projectID, allowMissingProjectID) {
+					continue
+				}
+				found.panelID, _ = obj["id"].(string)
+				found.tabID = tabID
+				return
+			}
+			return
+		}
+		children, _ := obj["children"].([]any)
+		for _, child := range children {
+			walk(child)
+		}
+	}
+	walk(state.LayoutTree)
+	return found
+}
+
+func tabBelongsToProject(tab map[string]any, projectID string, allowMissingProjectID bool) bool {
+	tabProjectID, _ := tab["projectId"].(string)
+	if strings.TrimSpace(tabProjectID) == "" {
+		return allowMissingProjectID
+	}
+	return strings.TrimSpace(projectID) == "" || tabProjectID == projectID
+}
+
+func matchesAnyNonEmpty(value string, candidates ...string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, candidate := range candidates {
+		if value == strings.TrimSpace(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Daemon) agentCompletionAlert(projectID string, hostProjectID string, panelID string, tabID string, agent string, runtime string, message string) *protocol.TerminalStreamAlert {
 	projectID = strings.TrimSpace(projectID)
+	hostProjectID = strings.TrimSpace(hostProjectID)
+	panelID = strings.TrimSpace(panelID)
 	tabID = strings.TrimSpace(tabID)
 	agent = strings.TrimSpace(agent)
 	runtime = strings.TrimSpace(runtime)
@@ -4650,10 +4788,13 @@ func (d *Daemon) agentCompletionAlert(projectID string, tabID string, agent stri
 	if projectID == "" || tabID == "" {
 		return nil
 	}
+	if hostProjectID == "" {
+		hostProjectID = projectID
+	}
 	if message == "" {
 		message = "任务已完成"
 	}
-	key := projectID + "::" + tabID + "::" + agent + "::" + runtime + "::" + message
+	key := projectID + "::" + hostProjectID + "::" + tabID + "::" + agent + "::" + runtime + "::" + message
 	now := time.Now()
 	d.termMu.Lock()
 	defer d.termMu.Unlock()
@@ -4667,12 +4808,14 @@ func (d *Daemon) agentCompletionAlert(projectID string, tabID string, agent stri
 		}
 	}
 	return &protocol.TerminalStreamAlert{
-		ProjectID:  projectID,
-		TerminalID: tabID,
-		Reason:     "agent_done",
-		Message:    message,
-		Agent:      agent,
-		Title:      agentNotificationTitle(agent, runtime),
+		ProjectID:     projectID,
+		HostProjectID: hostProjectID,
+		PanelID:       panelID,
+		TerminalID:    tabID,
+		Reason:        "agent_done",
+		Message:       message,
+		Agent:         agent,
+		Title:         agentNotificationTitle(agent, runtime),
 	}
 }
 
@@ -5019,7 +5162,8 @@ func (d *Daemon) terminalHookAlert(event terminalHookEvent) *protocol.TerminalSt
 	if message == "" {
 		message = "任务已完成"
 	}
-	key := projectID + "::" + terminalID + "::" + agent + "::" + message
+	target := d.terminalNotificationTarget(projectID, terminalID)
+	key := projectID + "::" + target.hostProjectID + "::" + target.tabID + "::" + agent + "::" + message
 	now := time.Now()
 	d.termMu.Lock()
 	defer d.termMu.Unlock()
@@ -5033,11 +5177,13 @@ func (d *Daemon) terminalHookAlert(event terminalHookEvent) *protocol.TerminalSt
 		}
 	}
 	return &protocol.TerminalStreamAlert{
-		ProjectID:  projectID,
-		TerminalID: terminalID,
-		Reason:     "agent_done",
-		Message:    message,
-		Agent:      agent,
+		ProjectID:     projectID,
+		HostProjectID: target.hostProjectID,
+		PanelID:       target.panelID,
+		TerminalID:    target.tabID,
+		Reason:        "agent_done",
+		Message:       message,
+		Agent:         agent,
 	}
 }
 

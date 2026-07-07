@@ -1,6 +1,7 @@
 export interface TerminalNotification {
   id: string;
   projectId: string;
+  hostProjectId: string;
   projectName: string;
   deviceName: string;
   panelId: string;
@@ -14,6 +15,8 @@ export interface TerminalNotification {
 }
 
 export interface TerminalAlertEvent {
+  projectId: string;
+  hostProjectId?: string;
   panelId: string;
   tabId: string;
   title: string;
@@ -26,4 +29,12 @@ export interface NotificationJumpTarget {
   panelId: string;
   tabId: string;
   nonce: number;
+}
+
+export interface NotificationHostTarget {
+  sourceProjectId: string;
+  hostProjectId: string;
+  panelId: string;
+  tabId: string;
+  lookupIds: string[];
 }

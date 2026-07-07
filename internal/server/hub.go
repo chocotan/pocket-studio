@@ -300,6 +300,185 @@ func (h *Hub) projectHasOnlineDaemonLocked(project Project) bool {
 	return h.daemons[daemonKey(project.UserID, project.DeviceID)] != nil
 }
 
+type notificationTabTarget struct {
+	hostProjectID string
+	panelID       string
+	tabID         string
+}
+
+func (h *Hub) cacheProjectState(userID string, project Project, state json.RawMessage) {
+	if len(state) == 0 {
+		return
+	}
+	project.UserID = userID
+	project.StudioState = append(json.RawMessage(nil), state...)
+	project.TmuxIDs = collectTerminalTabIDsFromRawState(state)
+	h.mu.Lock()
+	if existing, ok := h.projects[scopedKey(userID, project.ID)]; ok {
+		project.Name = firstNonEmpty(project.Name, existing.Name)
+		project.DeviceID = firstNonEmpty(project.DeviceID, existing.DeviceID)
+		project.WorkspacePath = firstNonEmpty(project.WorkspacePath, existing.WorkspacePath)
+		if project.AgentIDs == nil {
+			project.AgentIDs = existing.AgentIDs
+		}
+		project.DirectMode = existing.DirectMode
+	}
+	h.projects[scopedKey(userID, project.ID)] = project
+	h.mu.Unlock()
+}
+
+func projectStateRequestSucceeded(env protocol.Envelope, err error) bool {
+	if err != nil {
+		return false
+	}
+	result, decodeErr := protocol.DecodePayload[protocol.ProjectResult](env)
+	return decodeErr == nil && result.Error == ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func collectTerminalTabIDsFromRawState(raw json.RawMessage) []string {
+	var state struct {
+		LayoutTree any `json:"layoutTree"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &state) != nil {
+		return nil
+	}
+	return collectTerminalTabIDs(state.LayoutTree)
+}
+
+func (h *Hub) enrichTerminalStreamAlert(userID string, alert protocol.TerminalStreamAlert) (protocol.TerminalStreamAlert, bool) {
+	if strings.TrimSpace(alert.HostProjectID) != "" && strings.TrimSpace(alert.PanelID) != "" {
+		return alert, true
+	}
+	projectID := strings.TrimSpace(alert.ProjectID)
+	terminalID := strings.TrimSpace(alert.TerminalID)
+	if projectID == "" || terminalID == "" {
+		return alert, true
+	}
+	h.mu.RLock()
+	states := make(map[string]json.RawMessage, len(h.projects))
+	for key, project := range h.projects {
+		if project.UserID != userID || len(project.StudioState) == 0 {
+			continue
+		}
+		_, id, ok := strings.Cut(key, "\x00")
+		if !ok || id == "" {
+			id = project.ID
+		}
+		states[id] = append(json.RawMessage(nil), project.StudioState...)
+	}
+	h.mu.RUnlock()
+	for _, hostProjectID := range orderedProjectStateIDs(states, firstNonEmpty(alert.HostProjectID, projectID)) {
+		target := tabTargetFromProjectState(states[hostProjectID], projectID, terminalID, hostProjectID == projectID)
+		if target.tabID == "" {
+			continue
+		}
+		alert.HostProjectID = hostProjectID
+		alert.PanelID = target.panelID
+		alert.TerminalID = target.tabID
+		return alert, true
+	}
+	if alert.HostProjectID == "" {
+		alert.HostProjectID = projectID
+	}
+	return alert, true
+}
+
+func orderedProjectStateIDs(states map[string]json.RawMessage, preferred string) []string {
+	ids := make([]string, 0, len(states))
+	if preferred != "" {
+		if _, ok := states[preferred]; ok {
+			ids = append(ids, preferred)
+		}
+	}
+	rest := make([]string, 0, len(states))
+	for id := range states {
+		if id == "" || id == preferred {
+			continue
+		}
+		rest = append(rest, id)
+	}
+	sort.Strings(rest)
+	return append(ids, rest...)
+}
+
+func tabTargetFromProjectState(raw json.RawMessage, projectID string, terminalID string, allowMissingProjectID bool) notificationTabTarget {
+	if len(raw) == 0 || terminalID == "" {
+		return notificationTabTarget{}
+	}
+	var state struct {
+		LayoutTree any `json:"layoutTree"`
+	}
+	if json.Unmarshal(raw, &state) != nil {
+		return notificationTabTarget{}
+	}
+	var found notificationTabTarget
+	var walk func(any)
+	walk = func(value any) {
+		if found.tabID != "" {
+			return
+		}
+		obj, ok := value.(map[string]any)
+		if !ok {
+			return
+		}
+		typ, _ := obj["type"].(string)
+		if typ == "panel" {
+			tabs, _ := obj["tabs"].([]any)
+			for _, tabValue := range tabs {
+				tab, ok := tabValue.(map[string]any)
+				if !ok {
+					continue
+				}
+				if !tabBelongsToProject(tab, projectID, allowMissingProjectID) || !tabMatchesNotificationID(tab, terminalID) {
+					continue
+				}
+				found.panelID, _ = obj["id"].(string)
+				found.tabID, _ = tab["id"].(string)
+				return
+			}
+			return
+		}
+		children, _ := obj["children"].([]any)
+		for _, child := range children {
+			walk(child)
+		}
+	}
+	walk(state.LayoutTree)
+	return found
+}
+
+func tabBelongsToProject(tab map[string]any, projectID string, allowMissingProjectID bool) bool {
+	tabProjectID, _ := tab["projectId"].(string)
+	if strings.TrimSpace(tabProjectID) == "" {
+		return allowMissingProjectID
+	}
+	return strings.TrimSpace(projectID) == "" || tabProjectID == projectID
+}
+
+func tabMatchesNotificationID(tab map[string]any, terminalID string) bool {
+	if matchesStringField(tab, "id", terminalID) {
+		return true
+	}
+	if kind, _ := tab["kind"].(string); kind != "agent_chat" {
+		return false
+	}
+	return matchesStringField(tab, "agentSessionId", terminalID) || matchesStringField(tab, "agentSessionName", terminalID)
+}
+
+func matchesStringField(obj map[string]any, key string, value string) bool {
+	field, _ := obj[key].(string)
+	return strings.TrimSpace(field) != "" && strings.TrimSpace(field) == strings.TrimSpace(value)
+}
+
 func collectTerminalTabIDs(node any) []string {
 	var ids []string
 	var walk func(any)
@@ -583,7 +762,9 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 				ProjectID:     project.ID,
 				WorkspacePath: project.WorkspacePath,
 			})
-			writeProjectStateResult(w, env, err)
+			writeProjectStateResult(w, env, err, func(state json.RawMessage) {
+				h.cacheProjectState(userID, project, state)
+			})
 			return
 		} else if r.Method == http.MethodPost {
 			var req struct {
@@ -616,6 +797,9 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 				WorkspacePath: project.WorkspacePath,
 				State:         rawState,
 			})
+			if projectStateRequestSucceeded(env, err) {
+				h.cacheProjectState(userID, project, rawState)
+			}
 			writeProjectResult(w, env, err, false, nil)
 			return
 		}
@@ -1423,8 +1607,11 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 			}
 		}
 	case protocol.TypeTerminalStreamAlert:
-		_, err := protocol.DecodePayload[protocol.TerminalStreamAlert](env)
+		alert, err := protocol.DecodePayload[protocol.TerminalStreamAlert](env)
 		if err == nil {
+			if enriched, ok := h.enrichTerminalStreamAlert(dc.userID, alert); ok {
+				env.Payload, _ = json.Marshal(enriched)
+			}
 			forward := env
 			forward.From = "server"
 			h.broadcastToUser(dc.userID, forward)
@@ -2171,7 +2358,7 @@ func writeDeviceAliasResult(w http.ResponseWriter, env protocol.Envelope, err er
 	return true
 }
 
-func writeProjectStateResult(w http.ResponseWriter, env protocol.Envelope, err error) {
+func writeProjectStateResult(w http.ResponseWriter, env protocol.Envelope, err error, onState func(json.RawMessage)) {
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, protocol.ServerError{Code: "daemon_request_failed", Message: err.Error()})
 		return
@@ -2188,6 +2375,9 @@ func writeProjectStateResult(w http.ResponseWriter, env protocol.Envelope, err e
 	if len(result.State) == 0 {
 		writeJSON(w, http.StatusOK, defaultStudioState())
 		return
+	}
+	if onState != nil {
+		onState(result.State)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

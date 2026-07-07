@@ -74,8 +74,58 @@ func TestAgentCompletionAlertMapsTaskToSavedAgentTab(t *testing.T) {
 	if alert.ProjectID != projectID || alert.TerminalID != "chat-1" || alert.Reason != "agent_done" || alert.Message != "任务已完成" {
 		t.Fatalf("agent completion alert = %#v, want saved chat tab completion", alert)
 	}
+	if alert.HostProjectID != projectID || alert.PanelID != "panel-1" {
+		t.Fatalf("alert host = %q panel = %q, want project %q panel-1", alert.HostProjectID, alert.PanelID, projectID)
+	}
 	if alert.Title != "ACPX会话 (opencode)" {
 		t.Fatalf("alert title = %q, want ACPX title", alert.Title)
+	}
+}
+
+func TestAgentCompletionAlertMapsCrossProjectTaskToHostLayout(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := Config{Device: DeviceConfig{ID: "device-1"}}
+	d := New(cfg)
+	taskProjectID := d.projectIDForWorkspacePath(workspace)
+	hostProjectID := "host-project"
+	d.projectStates[hostProjectID] = json.RawMessage(`{
+		"layoutTree": {
+			"type": "panel",
+			"id": "panel-host",
+			"tabs": [
+				{
+					"id": "chat-host",
+					"kind": "agent_chat",
+					"agentSessionId": "acpx-task-cross",
+					"agentRuntime": "acpx",
+					"agentKind": "opencode",
+					"projectId": "` + taskProjectID + `"
+				}
+			]
+		}
+	}`)
+
+	d.history["acpx-task-cross"] = protocol.TaskRecord{
+		TaskID:        "acpx-task-cross",
+		WorkspacePath: workspace,
+		Agent:         "opencode",
+		AgentRuntime:  "acpx",
+		SessionName:   "acpx-task-cross",
+	}
+	d.emitTaskEvent("acpx-task-cross", "task.completed", 0, map[string]any{"exit_code": 0}, nil)
+
+	events := drainEnvelopes(d.send)
+	var alert protocol.TerminalStreamAlert
+	for _, env := range events {
+		if env.Type != protocol.TypeTerminalStreamAlert {
+			continue
+		}
+		if err := json.Unmarshal(env.Payload, &alert); err != nil {
+			t.Fatalf("decode alert: %v", err)
+		}
+	}
+	if alert.ProjectID != taskProjectID || alert.HostProjectID != hostProjectID || alert.PanelID != "panel-host" || alert.TerminalID != "chat-host" {
+		t.Fatalf("agent completion alert = %#v, want task project with host layout target", alert)
 	}
 }
 
@@ -108,6 +158,36 @@ func TestDirectACPCompletionAlertUsesTaskIDWhenNoSavedTab(t *testing.T) {
 	}
 	if alert.Title != "Direct ACP对话 (codex)" {
 		t.Fatalf("alert title = %q, want Direct ACP title", alert.Title)
+	}
+}
+
+func TestTerminalHookAlertMapsCrossProjectTerminalToHostLayout(t *testing.T) {
+	d := New(Config{})
+	d.projectStates["host-project"] = json.RawMessage(`{
+		"layoutTree": {
+			"type": "panel",
+			"id": "panel-host",
+			"tabs": [
+				{
+					"id": "term-cross",
+					"kind": "terminal",
+					"projectId": "task-project"
+				}
+			]
+		}
+	}`)
+
+	alert := d.terminalHookAlert(terminalHookEvent{
+		ProjectID:  "task-project",
+		TerminalID: "term-cross",
+		Agent:      "codex",
+		Event:      "done",
+	})
+	if alert == nil {
+		t.Fatal("terminalHookAlert() = nil, want alert")
+	}
+	if alert.ProjectID != "task-project" || alert.HostProjectID != "host-project" || alert.PanelID != "panel-host" || alert.TerminalID != "term-cross" {
+		t.Fatalf("terminal hook alert = %#v, want cross-project host target", alert)
 	}
 }
 

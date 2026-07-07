@@ -156,7 +156,7 @@ function TerminalPanelViewComponent({
     sky: "bg-sky-100 text-sky-700 ring-1 ring-sky-200/70 dark:bg-sky-400/16 dark:text-sky-200 dark:ring-sky-300/20",
     slate: "bg-slate-100 text-slate-600 ring-1 ring-slate-200/70 dark:bg-slate-400/16 dark:text-slate-200 dark:ring-slate-300/20",
   };
-  const panelAlert = panel.tabs.some((tab) => alertTerminalIds.has(tab.id));
+  const panelAlert = panel.tabs.some((tab) => tabHasAlert(tab, alertTerminalIds));
   const activeProject = projects.find((p) => p.id === projectId) || project;
   const activeDevice = devices.find((d) => d.id === activeProject.device_id);
   function updateScrollState() {
@@ -377,7 +377,7 @@ function TerminalPanelViewComponent({
             const displayTitle = displayTitleForTab(tab);
             const fullTitle = fullTitleForTab(tab);
             const active = tab.id === panel.activeTabId;
-            const alerting = alertTerminalIds.has(tab.id) && !(isFocused && active);
+            const alerting = tabHasAlert(tab, alertTerminalIds) && !(isFocused && active);
             const tabIndex = panel.tabs.indexOf(tab);
 
             const tabProjectId = tab.projectId || projectId;
@@ -775,6 +775,15 @@ function TerminalPanelViewComponent({
 }
 
 export const TerminalPanelView = React.memo(TerminalPanelViewComponent);
+
+function tabHasAlert(tab: StudioTab, alertTerminalIds: Set<string>) {
+  if (alertTerminalIds.has(tab.id)) return true;
+  if (tab.kind !== "agent_chat") return false;
+  return Boolean(
+    (tab.agentSessionId && alertTerminalIds.has(tab.agentSessionId)) ||
+    (tab.agentSessionName && alertTerminalIds.has(tab.agentSessionName))
+  );
+}
 
 export function TerminalTypeMenu({
   align,

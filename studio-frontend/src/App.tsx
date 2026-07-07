@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { StudioDashboard, type Project } from "./components/studio/studio-dashboard";
 import { StudioWorkspace } from "./components/studio/studio-workspace";
-import type { NotificationJumpTarget, TerminalAlertEvent, TerminalNotification } from "./components/studio/terminal-notifications";
+import type { NotificationHostTarget, NotificationJumpTarget, TerminalAlertEvent, TerminalNotification } from "./components/studio/terminal-notifications";
 import type { Device } from "./lib/types";
 import { getJSON, postJSON, loadClientConfig } from "./lib/api";
 import { pocketElectronAPI } from "./lib/electron-api";
@@ -28,6 +28,7 @@ export default function App() {
   const [notificationJumpTarget, setNotificationJumpTarget] = useState<NotificationJumpTarget | null>(null);
   const [clientConfigLoaded, setClientConfigLoaded] = useState(false);
   const notificationDedupRef = useRef<Map<string, number>>(new Map());
+  const notificationTargetsRef = useRef<Map<string, NotificationHostTarget[]>>(new Map());
   const devicesRef = useRef<Device[]>([]);
   const projectsRef = useRef<Project[]>([]);
   const orderedProjectsRef = useRef<Project[]>([]);
@@ -37,9 +38,9 @@ export default function App() {
   const favoriteProjects = useMemo(() => favoriteProjectsFrom(projects, favorites), [favorites, projects]);
   const favoriteIdSet = useMemo(() => new Set(favorites), [favorites]);
   const envelopeHandlerRef = useRef<(envelope: StudioEnvelope) => void>(() => {});
-  const unreadProjectIds = useMemo(() => new Set(terminalNotifications.filter((item) => !item.read).map((item) => item.projectId)), [terminalNotifications]);
+  const unreadProjectIds = useMemo(() => new Set(terminalNotifications.filter((item) => !item.read).map((item) => item.hostProjectId || item.projectId)), [terminalNotifications]);
   const unreadTerminalIds = useMemo(
-    () => new Set(terminalNotifications.filter((item) => !item.read && item.projectId === selectedProjectId).map((item) => item.tabId)),
+    () => new Set(terminalNotifications.filter((item) => !item.read && (item.hostProjectId || item.projectId) === selectedProjectId).map((item) => item.tabId)),
     [selectedProjectId, terminalNotifications]
   );
 
@@ -80,6 +81,7 @@ export default function App() {
         if (typeof alert.project_id !== "string" || typeof alert.terminal_id !== "string") return;
         addTerminalNotification({
           projectId: alert.project_id,
+          hostProjectId: typeof alert.host_project_id === "string" ? alert.host_project_id : alert.project_id,
           tabId: alert.terminal_id,
           panelId: typeof alert.panel_id === "string" ? alert.panel_id : "",
           title: notificationTerminalTitle(alert.title, alert.agent),
@@ -200,10 +202,11 @@ export default function App() {
     }
   }
 
-  function addTerminalNotification(event: TerminalAlertEvent & { projectId: string }) {
+  function addTerminalNotification(event: TerminalAlertEvent) {
+    const hostProjectId = event.hostProjectId || event.projectId;
     const project = orderedProjectsRef.current.find((item) => item.id === event.projectId) || projectsRef.current.find((item) => item.id === event.projectId);
     const device = project ? devicesRef.current.find((item) => item.id === project.device_id) : undefined;
-    const dedupKey = `${event.projectId}:${event.tabId}:${event.reason || ""}:${event.message || ""}`;
+    const dedupKey = `${event.projectId}:${hostProjectId}:${event.tabId}:${event.reason || ""}:${event.message || ""}`;
     const now = Date.now();
     const lastSeen = notificationDedupRef.current.get(dedupKey) || 0;
     if (now - lastSeen < 800) return;
@@ -215,6 +218,7 @@ export default function App() {
       {
         id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
         projectId: event.projectId,
+        hostProjectId,
         projectName: project?.name || event.projectId,
         deviceName: displayDeviceName(device?.name || project?.device_id || ""),
         panelId: event.panelId,
@@ -236,14 +240,34 @@ export default function App() {
         item.id === notification.id && !item.read ? { ...item, read: true, readAt: now } : item
       ));
     });
+    const liveTarget = findNotificationHostTarget(notification);
+    const hostProjectId = liveTarget?.hostProjectId || notification.hostProjectId || notification.projectId;
+    const knownProjects = orderedProjectsRef.current.length > 0 ? orderedProjectsRef.current : projectsRef.current;
+    const targetProjectId = knownProjects.some((project) => project.id === hostProjectId) ? hostProjectId : notification.projectId;
     setNotificationJumpTarget({
-      projectId: notification.projectId,
-      panelId: notification.panelId,
-      tabId: notification.tabId,
+      projectId: targetProjectId,
+      panelId: liveTarget?.panelId || notification.panelId,
+      tabId: liveTarget?.tabId || notification.tabId,
       nonce: Date.now(),
     });
     setNotificationCenterOpen(false);
-    handleSelectProject(notification.projectId);
+    handleSelectProject(targetProjectId);
+  }
+
+  function findNotificationHostTarget(notification: TerminalNotification): NotificationHostTarget | null {
+    const candidates = [notification.tabId].filter(Boolean);
+    const preferredHostProjectId = notification.hostProjectId || "";
+    const allTargets = Array.from(notificationTargetsRef.current.values()).flat();
+    const matches = allTargets.filter((target) => {
+      if (target.sourceProjectId !== notification.projectId) return false;
+      return candidates.some((id) => target.lookupIds.includes(id));
+    });
+    if (matches.length === 0) return null;
+    return matches.find((target) => target.hostProjectId === preferredHostProjectId) || matches[0];
+  }
+
+  function handleNotificationTargetsChange(hostProjectId: string, targets: NotificationHostTarget[]) {
+    notificationTargetsRef.current.set(hostProjectId, targets);
   }
 
   function handleNotificationJumpHandled(nonce: number) {
@@ -255,7 +279,7 @@ export default function App() {
       let changed = false;
       const now = Date.now();
       const next = current.map((item) => {
-        if (item.projectId !== projectId || item.tabId !== tabId || item.read) return item;
+        if ((item.hostProjectId || item.projectId) !== projectId || item.tabId !== tabId || item.read) return item;
         changed = true;
         return { ...item, read: true, readAt: now };
       });
@@ -346,6 +370,7 @@ export default function App() {
             onTerminalFocused={handleTerminalFocused}
             notificationJumpTarget={notificationJumpTarget}
             onNotificationJumpHandled={handleNotificationJumpHandled}
+            onNotificationTargetsChange={handleNotificationTargetsChange}
             alertProjectIds={unreadProjectIds}
             alertTerminalIds={unreadTerminalIds}
             notifications={terminalNotifications}

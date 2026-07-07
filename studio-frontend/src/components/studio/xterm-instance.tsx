@@ -251,6 +251,13 @@ function terminalHomeEndSequence(key: string) {
   return "";
 }
 
+function isEditableOutsideTerminal(target: EventTarget | null, terminalContainer: HTMLElement) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (terminalContainer.contains(target)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return target.isContentEditable || tagName === "input" || tagName === "textarea" || tagName === "select";
+}
+
 interface XtermInstanceProps {
   projectId: string;
   terminalId: string;
@@ -608,23 +615,91 @@ export function XtermInstance({
 
       const safePaste = (text: string) => {
         if (!term) return;
-        if (text.includes("\n") || text.includes("\r")) {
-          const isBracketedPaste = term.modes?.bracketedPasteMode || false;
-          if (!isBracketedPaste) {
-            const confirmPaste = window.confirm(
-              "检测到您粘贴的内容包含多行，直接粘贴可能会导致命令立即执行。\n\n是否确认继续粘贴？"
-            );
-            if (!confirmPaste) {
-              return;
-            }
-          }
-        }
         term.paste(text);
+      };
+
+      const pasteFromClipboardFallback = () => {
+        if (navigator.clipboard?.read) {
+          void navigator.clipboard.read().then((items) => {
+            for (const item of items) {
+              const imageType = item.types.find((t) => t.startsWith("image/"));
+              if (imageType) {
+                const cmd = (currentCommandRef.current || "").toLowerCase();
+                if (cmd.includes("agy") || cmd.includes("antigravity")) {
+                  continue;
+                }
+                void item.getType(imageType).then((blob) => {
+                  const ext = imageType === "image/jpeg" ? "jpg" : "png";
+                  const filename = `pasted_image_${Date.now()}.${ext}`;
+                  const file = new File([blob], filename, { type: imageType });
+                  const reader = new FileReader();
+                  reader.onload = (e) => {
+                    const dataUrl = e.target?.result as string;
+                    if (dataUrl) {
+                      postJSON<{ error?: string }>("/api/project/file/write", {
+                        project_id: projectId,
+                        path: filename,
+                        content: dataUrl,
+                      })
+                        .then((result) => {
+                          if (result.error) {
+                            alert(`Failed to save image to workspace: ${result.error}`);
+                          } else {
+                            term?.paste(getPasteTextForFilename(filename));
+                          }
+                        })
+                        .catch((err) => {
+                          alert(`Failed to upload image: ${err instanceof Error ? err.message : String(err)}`);
+                        });
+                    }
+                  };
+                  reader.readAsDataURL(file);
+                });
+                return;
+              }
+            }
+            if (navigator.clipboard.readText) {
+              void navigator.clipboard.readText().then((text) => {
+                if (text) safePaste(text);
+              }).catch(() => {});
+            }
+          }).catch(() => {
+            if (navigator.clipboard.readText) {
+              void navigator.clipboard.readText().then((text) => {
+                if (text) safePaste(text);
+              }).catch(() => {});
+            }
+          });
+        } else if (navigator.clipboard?.readText) {
+          void navigator.clipboard.readText().then((text) => {
+            if (text) safePaste(text);
+          }).catch(() => {});
+        }
+      };
+
+      const pasteFromSystemClipboard = () => {
+        const terminalTextarea = container.querySelector("textarea") as HTMLTextAreaElement | null;
+        terminalTextarea?.focus();
+        const electronAPI = pocketElectronAPI();
+        if (electronAPI?.pasteClipboard) {
+          void Promise.resolve(electronAPI.pasteClipboard())
+            .then((result) => {
+              if (result && typeof result === "object" && "ok" in result && result.ok === false) {
+                pasteFromClipboardFallback();
+              }
+            })
+            .catch(() => {
+              pasteFromClipboardFallback();
+            });
+          return;
+        }
+        pasteFromClipboardFallback();
       };
 
       const handleCopyPasteShortcut = (event: KeyboardEvent) => {
         if (!isActiveRef.current) return;
         if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
+        if (isEditableOutsideTerminal(event.target, container)) return;
         const key = event.key.toLowerCase();
         if (key === "c") {
           event.preventDefault();
@@ -637,62 +712,7 @@ export function XtermInstance({
           event.preventDefault();
           event.stopPropagation();
           event.stopImmediatePropagation();
-          if (navigator.clipboard?.read) {
-            void navigator.clipboard.read().then((items) => {
-              for (const item of items) {
-                const imageType = item.types.find((t) => t.startsWith("image/"));
-                if (imageType) {
-                  const cmd = (currentCommandRef.current || "").toLowerCase();
-                  if (cmd.includes("agy") || cmd.includes("antigravity")) {
-                    continue;
-                  }
-                  void item.getType(imageType).then((blob) => {
-                    const ext = imageType === "image/jpeg" ? "jpg" : "png";
-                    const filename = `pasted_image_${Date.now()}.${ext}`;
-                    const file = new File([blob], filename, { type: imageType });
-                    const reader = new FileReader();
-                    reader.onload = (e) => {
-                      const dataUrl = e.target?.result as string;
-                      if (dataUrl) {
-                        postJSON<{ error?: string }>("/api/project/file/write", {
-                          project_id: projectId,
-                          path: filename,
-                          content: dataUrl,
-                        })
-                          .then((result) => {
-                            if (result.error) {
-                              alert(`Failed to save image to workspace: ${result.error}`);
-                            } else {
-                              term?.paste(getPasteTextForFilename(filename));
-                            }
-                          })
-                          .catch((err) => {
-                            alert(`Failed to upload image: ${err instanceof Error ? err.message : String(err)}`);
-                          });
-                      }
-                    };
-                    reader.readAsDataURL(file);
-                  });
-                  return;
-                }
-              }
-              if (navigator.clipboard.readText) {
-                void navigator.clipboard.readText().then((text) => {
-                  if (text) safePaste(text);
-                }).catch(() => {});
-              }
-            }).catch(() => {
-              if (navigator.clipboard.readText) {
-                void navigator.clipboard.readText().then((text) => {
-                  if (text) safePaste(text);
-                }).catch(() => {});
-              }
-            });
-          } else if (navigator.clipboard?.readText) {
-            void navigator.clipboard.readText().then((text) => {
-              if (text) safePaste(text);
-            }).catch(() => {});
-          }
+          pasteFromSystemClipboard();
         }
       };
       const handlePaste = (event: ClipboardEvent) => {

@@ -1004,7 +1004,7 @@ export function AgentChatTab({
           </div>
         ) : (
           /* Timeline */
-          <div className="space-y-1.5">
+          <div className="w-full min-w-0 space-y-1.5">
             {(() => {
               const rendered: React.ReactNode[] = [];
               let i = 0;
@@ -1013,7 +1013,7 @@ export function AgentChatTab({
                 if (msg.kind === "user_prompt") {
                   rendered.push(
                     <div key={msg.id} className="flex justify-start select-text">
-                      <div className="max-w-[85%] rounded-xl bg-primary text-primary-foreground px-3 py-1.5 text-[12px] font-medium leading-relaxed shadow-sm whitespace-pre-wrap">
+                      <div className="max-w-full rounded-xl bg-primary text-primary-foreground px-3 py-1.5 text-[12px] font-medium leading-relaxed shadow-sm whitespace-pre-wrap">
                         {msg.content}
                       </div>
                     </div>
@@ -1028,7 +1028,7 @@ export function AgentChatTab({
                   i++;
                 } else if (msg.kind === "assistant_message") {
                   rendered.push(
-                    <div key={msg.id} className="max-w-[90%] rounded-xl border border-border/60 bg-muted/20 px-3 py-2 shadow-sm select-text">
+                    <div key={msg.id} className="w-full max-w-none rounded-xl border border-border/60 bg-muted/20 px-3 py-2 shadow-sm select-text">
                       <Markdown content={msg.content} />
                     </div>
                   );

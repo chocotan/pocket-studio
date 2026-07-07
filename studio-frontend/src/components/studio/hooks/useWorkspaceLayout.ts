@@ -45,12 +45,34 @@ import {
 } from "../studio-layout-ops";
 import { directWebsocketURL, getJSON, postJSON, websocketURL } from "@/lib/api";
 import { agentChatWebSocketURL } from "../agent-chat/direct-websocket";
-import type { NotificationJumpTarget } from "../terminal-notifications";
+import type { NotificationHostTarget, NotificationJumpTarget } from "../terminal-notifications";
 
 function collectAllPanels(node: LayoutNode | null): TerminalPanel[] {
   if (!node) return [];
   if (node.type === "panel") return [node];
   return node.children.flatMap(collectAllPanels);
+}
+
+function collectNotificationTargets(node: LayoutNode, hostProjectId: string): NotificationHostTarget[] {
+  const targets: NotificationHostTarget[] = [];
+  const panels = collectAllPanels(node);
+  for (const panel of panels) {
+    for (const tab of panel.tabs) {
+      if (tab.kind !== "terminal" && tab.kind !== "agent_chat") continue;
+      const sourceProjectId = tab.projectId || hostProjectId;
+      const lookupIds = tab.kind === "agent_chat"
+        ? [tab.id, tab.agentSessionId || "", tab.agentSessionName || ""].filter(Boolean)
+        : [tab.id];
+      targets.push({
+        sourceProjectId,
+        hostProjectId,
+        panelId: panel.id,
+        tabId: tab.id,
+        lookupIds,
+      });
+    }
+  }
+  return targets;
 }
 
 type SavedStudioState = {
@@ -66,6 +88,7 @@ interface UseWorkspaceLayoutProps {
   onTerminalFocused: (projectId: string, tabId: string) => void;
   notificationJumpTarget: NotificationJumpTarget | null;
   onNotificationJumpHandled: (nonce: number) => void;
+  onNotificationTargetsChange: (hostProjectId: string, targets: NotificationHostTarget[]) => void;
 }
 
 export function useWorkspaceLayout({
@@ -76,6 +99,7 @@ export function useWorkspaceLayout({
   onTerminalFocused,
   notificationJumpTarget,
   onNotificationJumpHandled,
+  onNotificationTargetsChange,
 }: UseWorkspaceLayoutProps) {
   const initialState = initialStudioState(project);
   const [layoutTree, setLayoutTree] = useState<LayoutNode | null>(initialState.layoutTree);
@@ -207,6 +231,14 @@ export function useWorkspaceLayout({
   useEffect(() => {
     terminalTitlesRef.current = terminalTitles;
   }, [terminalTitles]);
+
+  useEffect(() => {
+    if (!stateLoaded || loadedProjectId !== projectId || !layoutTree) {
+      onNotificationTargetsChange(projectId, []);
+      return;
+    }
+    onNotificationTargetsChange(projectId, collectNotificationTargets(layoutTree, projectId));
+  }, [layoutTree, loadedProjectId, onNotificationTargetsChange, projectId, stateLoaded]);
 
   useEffect(() => {
     let cancelled = false;

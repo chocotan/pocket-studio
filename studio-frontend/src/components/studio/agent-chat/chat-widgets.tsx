@@ -242,7 +242,7 @@ export function ToolCallGroup({ items, nowMs }: { items: ChatMessage[]; nowMs: n
   ).length;
 
   return (
-    <div className="max-w-[90%]">
+    <div className="w-full max-w-none">
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -309,7 +309,7 @@ export function TodoWidget({ todos }: { todos: Array<{ content: string; status?:
   const [open, setOpen] = useState(true);
   const completed = todos.filter((t) => t.status === "completed" || t.status === "success").length;
   return (
-    <div className="max-w-[90%] my-1">
+    <div className="my-1 w-full max-w-none">
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -377,7 +377,7 @@ export function SubagentEntry({ item, nowMs }: { item: { description: string; su
   }, [item.createdAt, isDone, isFailed, nowMs]);
 
   return (
-    <div className="max-w-[90%] my-1">
+    <div className="my-1 w-full max-w-none">
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -421,7 +421,7 @@ export function CollapsibleSection({ durationMs, children }: { durationMs?: numb
   }, [children]);
 
   return (
-    <div className="max-w-[90%]">
+    <div className="w-full max-w-none">
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -490,7 +490,7 @@ export function ToolCallCard({ item, nowMs }: { item: AgentToolCallItem; nowMs: 
   }, [item.createdAt, item.completedAt, nowMs]);
 
   return (
-    <div className="max-w-[90%]">
+    <div className="w-full max-w-none">
       <button
         type="button"
         onClick={() => setOpen(!open)}

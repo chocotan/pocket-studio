@@ -13,4 +13,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   writeClipboardText(text) {
     return ipcRenderer.invoke("clipboard:write-text", text);
   },
+  pasteClipboard() {
+    return ipcRenderer.invoke("clipboard:paste");
+  },
 });

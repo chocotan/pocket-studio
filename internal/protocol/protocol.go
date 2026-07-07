@@ -437,12 +437,14 @@ type TerminalStreamTitle struct {
 }
 
 type TerminalStreamAlert struct {
-	ProjectID  string `json:"project_id"`
-	TerminalID string `json:"terminal_id"`
-	Title      string `json:"title,omitempty"`
-	Reason     string `json:"reason,omitempty"`
-	Message    string `json:"message,omitempty"`
-	Agent      string `json:"agent,omitempty"`
+	ProjectID     string `json:"project_id"`
+	HostProjectID string `json:"host_project_id,omitempty"`
+	PanelID       string `json:"panel_id,omitempty"`
+	TerminalID    string `json:"terminal_id"`
+	Title         string `json:"title,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	Message       string `json:"message,omitempty"`
+	Agent         string `json:"agent,omitempty"`
 }
 
 type TerminalStreamResize struct {

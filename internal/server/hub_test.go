@@ -212,6 +212,39 @@ func TestTaskSnapshotMapsACPXSessionNameAlias(t *testing.T) {
 	}
 }
 
+func TestEnrichTerminalStreamAlertUsesCachedHostLayout(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	h.cacheProjectState(auth.OwnerAdmin, Project{
+		ID:            "host-project",
+		Name:          "Host",
+		DeviceID:      "device-a",
+		WorkspacePath: "/host",
+	}, json.RawMessage(`{
+		"layoutTree": {
+			"type": "panel",
+			"id": "panel-host",
+			"tabs": [
+				{
+					"id": "chat-host",
+					"kind": "agent_chat",
+					"agentSessionId": "task-b",
+					"agentRuntime": "acpx",
+					"projectId": "task-project"
+				}
+			]
+		}
+	}`))
+
+	alert, _ := h.enrichTerminalStreamAlert(auth.OwnerAdmin, protocol.TerminalStreamAlert{
+		ProjectID:  "task-project",
+		TerminalID: "task-b",
+		Reason:     "agent_done",
+	})
+	if alert.ProjectID != "task-project" || alert.HostProjectID != "host-project" || alert.PanelID != "panel-host" || alert.TerminalID != "chat-host" {
+		t.Fatalf("enriched alert = %#v, want cached host layout target", alert)
+	}
+}
+
 func TestPrepareTaskDispatchRecordAddsUserPromptEvent(t *testing.T) {
 	h := NewHub(auth.NewOpen(""))
 	task := protocol.TaskDispatch{
