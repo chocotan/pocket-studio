@@ -86,6 +86,101 @@ func TestACPXToolUpdateOutputDeltaCarriesAppendMetadata(t *testing.T) {
 	}
 }
 
+func TestACPXAssistantRawMessageCarriesReadableText(t *testing.T) {
+	d := New(Config{})
+	emitter := &taskEmitter{daemon: d, taskID: "task-1"}
+	adapter := newAgentOutputAdapter(emitter, 0, "")
+
+	adapter.handle(json.RawMessage(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"final reply"}]}}`))
+
+	got := drainTaskEvents(d.send)
+	if len(got) != 1 {
+		t.Fatalf("events len = %d, want 1: %#v", len(got), got)
+	}
+	if got[0].EventType != "assistant.message" {
+		t.Fatalf("event type = %q, want assistant.message", got[0].EventType)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(got[0].Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if data["text"] != "final reply" {
+		t.Fatalf("assistant data = %#v, want text", data)
+	}
+}
+
+func TestACPXLiveEventsCarryStableTurnKeys(t *testing.T) {
+	d := New(Config{})
+	emitter := &taskEmitter{daemon: d, taskID: "task-1", acpx: true, acpxTurn: 2}
+	emitter.emit("task.started", map[string]any{"turn_id": "turn-live"}, nil)
+	adapter := newAgentOutputAdapter(emitter, 0, "")
+	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"hello"}}}}`))
+	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":" world"}}}}`))
+	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}`))
+
+	got := drainTaskEvents(d.send)
+	wantKeys := []string{
+		"turn:2:task.started:0",
+		"turn:2:assistant.message:0",
+		"turn:2:assistant.message:0",
+		"turn:2:turn.completed:0",
+	}
+	keyed := make([]protocol.TaskEvent, 0, len(got))
+	for _, event := range got {
+		if event.EventType == "metric.updated" {
+			continue
+		}
+		keyed = append(keyed, event)
+	}
+	if len(keyed) != len(wantKeys) {
+		t.Fatalf("keyed events len = %d, want %d: all=%#v keyed=%#v", len(keyed), len(wantKeys), got, keyed)
+	}
+	for i, event := range keyed {
+		var data map[string]any
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatalf("decode event %d data: %v", i, err)
+		}
+		if data["acpx_event_key"] != wantKeys[i] {
+			t.Fatalf("event %d key = %#v, want %q; event=%#v data=%#v", i, data["acpx_event_key"], wantKeys[i], event, data)
+		}
+		if data["acpx_turn_index"] != float64(2) {
+			t.Fatalf("event %d turn = %#v, want 2; data=%#v", i, data["acpx_turn_index"], data)
+		}
+	}
+}
+
+func TestACPXAdapterSkipsSameTextHistoricalPromptUntilNewPromptOrdinal(t *testing.T) {
+	d := New(Config{})
+	emitter := &taskEmitter{daemon: d, taskID: "task-1", acpx: true, acpxTurn: 1}
+	adapter := newAgentOutputAdapter(emitter, 1, "你好")
+
+	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"text":"你好"}}}}`))
+	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"old answer should be skipped"}}}}`))
+	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"text":"你好"}}}}`))
+	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"new answer"}}}}`))
+
+	got := drainTaskEvents(d.send)
+	messages := make([]protocol.TaskEvent, 0)
+	for _, event := range got {
+		if event.EventType == "assistant.message" {
+			messages = append(messages, event)
+		}
+	}
+	if len(messages) != 1 {
+		t.Fatalf("assistant messages = %#v, want only new prompt response", messages)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(messages[0].Data, &data); err != nil {
+		t.Fatalf("decode assistant data: %v", err)
+	}
+	if data["text"] != "new answer" {
+		t.Fatalf("assistant text = %#v, want new answer; all events=%#v", data["text"], got)
+	}
+	if data["acpx_event_key"] != "turn:1:assistant.message:0" {
+		t.Fatalf("assistant key = %#v, want turn 1 first assistant message", data["acpx_event_key"])
+	}
+}
+
 func TestACPXSessionCreateEmitsModelListFromStatus(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "fake-acpx")
@@ -257,21 +352,33 @@ func TestACPXClaudeAuthenticationErrorFallsBackToClaudeCLI(t *testing.T) {
 	dir := t.TempDir()
 	acpxPath := filepath.Join(dir, "fake-acpx")
 	acpxScript := `#!/bin/sh
-case "$*" in
-  *" sessions ensure "*)
-    printf '{"acpxRecordId":"rec-1","acpxSessionId":"sess-1","name":"agentbridge"}\n'
-    ;;
-  *" status "*)
-    printf '{"action":"status_snapshot","status":"idle","availableModels":["sonnet"],"model":"sonnet"}\n'
-    ;;
-  *" prompt "*)
-    printf '{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"Authentication required"}}\n'
-    exit 1
-    ;;
-  *)
-    printf '{}\n'
-    ;;
-esac
+cmd=""
+last=""
+for arg in "$@"; do
+  if [ "$last" = "sessions" ] && [ "$arg" = "ensure" ]; then
+    cmd="sessions ensure"
+  fi
+  if [ "$last" = "claude" ] && [ "$arg" = "status" ]; then
+    cmd="claude status"
+  fi
+  if [ "$last" = "claude" ] && [ "$arg" = "prompt" ]; then
+    cmd="claude prompt"
+  fi
+  last="$arg"
+done
+if [ "$cmd" = "sessions ensure" ]; then
+  printf '{"acpxRecordId":"rec-1","acpxSessionId":"sess-1","name":"agentbridge"}\n'
+  exit 0
+fi
+if [ "$cmd" = "claude status" ]; then
+  printf '{"action":"status_snapshot","status":"idle","availableModels":["sonnet"],"model":"sonnet"}\n'
+  exit 0
+fi
+if [ "$cmd" = "claude prompt" ]; then
+  printf '{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"Authentication required"}}\n'
+  exit 1
+fi
+printf '{}\n'
 `
 	if err := os.WriteFile(acpxPath, []byte(acpxScript), 0o755); err != nil {
 		t.Fatalf("write fake acpx: %v", err)
@@ -373,6 +480,28 @@ esac
 		}
 		if events[i].Timestamp == 0 {
 			t.Fatalf("event %d timestamp = 0, want parsed snake_case timestamp: %#v", i, events[i])
+		}
+	}
+	wantKeys := map[int]string{
+		1: "turn:0:user.prompt:0",
+		2: "turn:0:assistant.message:0",
+		5: "turn:1:user.prompt:0",
+		6: "turn:1:assistant.message:0",
+	}
+	for index, wantKey := range wantKeys {
+		var data map[string]any
+		if err := json.Unmarshal(events[index].Data, &data); err != nil {
+			t.Fatalf("decode event %d data: %v", index, err)
+		}
+		if data["acpx_event_key"] != wantKey {
+			t.Fatalf("event %d acpx_event_key = %#v, want %q; data=%#v", index, data["acpx_event_key"], wantKey, data)
+		}
+		wantTurn := float64(0)
+		if strings.HasPrefix(wantKey, "turn:1:") {
+			wantTurn = 1
+		}
+		if data["acpx_turn_index"] != wantTurn {
+			t.Fatalf("event %d acpx_turn_index = %#v, want %#v; data=%#v", index, data["acpx_turn_index"], wantTurn, data)
 		}
 	}
 }
@@ -587,7 +716,7 @@ esac
 		Status:        "running",
 		UpdatedAt:     20,
 		Events: []protocol.TaskEvent{
-			userPromptTaskEvent("acpx-ui-task", "turn-new", "new prompt", 20, 1),
+			userPromptTaskEvent("acpx-ui-task", "turn-new", "new prompt", 20, 1, 0),
 		},
 	}
 	d.mu.Unlock()
@@ -617,6 +746,18 @@ esac
 	}
 	if !containsString(prompts, "old prompt") || !containsString(prompts, "new prompt") {
 		t.Fatalf("prompts = %#v, want restored old prompt and existing new prompt; events=%#v", prompts, result.Events)
+	}
+	for _, event := range result.Events {
+		if event.EventType != "user.prompt" {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatalf("decode prompt data: %v", err)
+		}
+		if data["prompt"] == "new prompt" && data["acpx_event_key"] != "turn:1:user.prompt:0" {
+			t.Fatalf("new prompt key = %#v, want turn:1:user.prompt:0; data=%#v events=%#v", data["acpx_event_key"], data, result.Events)
+		}
 	}
 	if taskEventOfType(result.Events, "task.completed").EventType == "" {
 		t.Fatalf("events missing restored task.completed for historical turn: %#v", result.Events)
@@ -652,6 +793,127 @@ func TestMergeTaskEventsDeduplicatesSameEventDataWithDifferentRaw(t *testing.T) 
 	merged := mergeTaskEvents(base, extra)
 	if len(merged) != 1 || merged[0].EventID != "evt-history" {
 		t.Fatalf("merged events = %#v, want one history event", merged)
+	}
+}
+
+func TestMergeTaskEventsDeduplicatesRestoredACPXEventsByStableKey(t *testing.T) {
+	base := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "history-start",
+			EventType: "task.started",
+			Source:    "acpx",
+			Sequence:  1,
+			Data:      json.RawMessage(`{"source":"acpx.history","turn_id":"history-turn-0","acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-user",
+			EventType: "user.prompt",
+			Source:    "acpx",
+			Sequence:  2,
+			Data:      json.RawMessage(`{"prompt":"你好","turn_id":"history-turn-0","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-assistant",
+			EventType: "assistant.message",
+			Source:    "acpx",
+			Sequence:  3,
+			Data:      json.RawMessage(`{"text":"你好，有什么可以帮你？","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-done",
+			EventType: "task.completed",
+			Source:    "acpx",
+			Sequence:  4,
+			Data:      json.RawMessage(`{"exit_code":0,"stop_reason":"history","turn_id":"history-turn-0","acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`),
+		},
+	}
+	extra := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "live-user",
+			EventType: "user.prompt",
+			Source:    "web",
+			Sequence:  5,
+			Data:      json.RawMessage(`{"prompt":"你好","turn_id":"turn-live","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "live-start",
+			EventType: "task.started",
+			Source:    "claude_code",
+			Sequence:  6,
+			Data:      json.RawMessage(`{"turn_id":"turn-live","_seq":6,"_ts":100,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "live-assistant",
+			EventType: "assistant.message",
+			Source:    "claude_code",
+			Sequence:  7,
+			Data:      json.RawMessage(`{"text":"你好，有什么可以帮你？","stream_id":"stream-1","replace":true,"_seq":7,"_ts":101,"acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "live-done",
+			EventType: "task.completed",
+			Source:    "claude_code",
+			Sequence:  8,
+			Data:      json.RawMessage(`{"exit_code":0,"stop_reason":"end_turn","_seq":8,"_ts":102,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`),
+		},
+	}
+
+	merged := mergeTaskEvents(base, extra)
+	if len(merged) != len(base) {
+		t.Fatalf("merged events = %#v, want only restored turn", merged)
+	}
+	for i, event := range merged {
+		if event.EventID != base[i].EventID {
+			t.Fatalf("merged[%d] = %q, want %q; events=%#v", i, event.EventID, base[i].EventID, merged)
+		}
+	}
+}
+
+func TestMergeTaskEventsKeepsRepeatedACPXPromptTurnsWithDifferentStableKeys(t *testing.T) {
+	base := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "history-user-0",
+			EventType: "user.prompt",
+			Sequence:  1,
+			Data:      json.RawMessage(`{"prompt":"你好","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-assistant-0",
+			EventType: "assistant.message",
+			Sequence:  2,
+			Data:      json.RawMessage(`{"text":"你好！","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+		},
+	}
+	extra := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "history-user-1",
+			EventType: "user.prompt",
+			Sequence:  3,
+			Data:      json.RawMessage(`{"prompt":"你好","acpx_turn_index":1,"acpx_event_key":"turn:1:user.prompt:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-assistant-1",
+			EventType: "assistant.message",
+			Sequence:  4,
+			Data:      json.RawMessage(`{"text":"你好！","acpx_turn_index":1,"acpx_event_key":"turn:1:assistant.message:0"}`),
+		},
+	}
+
+	merged := mergeTaskEvents(base, extra)
+	if len(merged) != 4 {
+		t.Fatalf("merged events = %#v, want both repeated prompt turns", merged)
 	}
 }
 

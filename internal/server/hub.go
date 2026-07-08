@@ -1147,6 +1147,12 @@ func (h *Hub) prepareTaskDispatchRecordLocked(userID string, deviceID string, ta
 	}
 	record.Status = "queued"
 	record.UpdatedAt = now
+	data := map[string]any{"prompt": task.Prompt, "turn_id": task.TurnID}
+	if strings.EqualFold(strings.TrimSpace(task.AgentRuntime), "acpx") {
+		turnIndex := nextACPXTurnIndex(record.Events)
+		data["acpx_turn_index"] = turnIndex
+		data["acpx_event_key"] = acpxEventKey(turnIndex, "user.prompt", 0)
+	}
 	userEvent := protocol.TaskEvent{
 		TaskID:    task.TaskID,
 		EventID:   protocol.NewID("evt"),
@@ -1154,7 +1160,7 @@ func (h *Hub) prepareTaskDispatchRecordLocked(userID string, deviceID string, ta
 		Source:    "web",
 		Sequence:  nextTaskEventSequence(record.Events, 0),
 		Timestamp: now,
-		Data:      MarshalPayload(map[string]string{"prompt": task.Prompt, "turn_id": task.TurnID}),
+		Data:      MarshalPayload(data),
 	}
 	record.Events = append(record.Events, userEvent)
 	h.taskRecords[scopedKey(userID, task.TaskID)] = record
@@ -1525,13 +1531,8 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 				taskEvent.Timestamp = record.UpdatedAt
 			}
 			taskEvent.Sequence = nextTaskEventSequence(record.Events, taskEvent.Sequence)
-			if !hasTaskEventSignature(record.Events, taskEvent) {
-				record.Events = append(record.Events, taskEvent)
-				h.taskRecords[taskKey] = record
-			} else {
-				h.taskRecords[taskKey] = record
-				shouldForward = false
-			}
+			record.Events, taskEvent, shouldForward = upsertOrAppendTaskRecordEvent(record.Events, taskEvent)
+			h.taskRecords[taskKey] = record
 			h.mu.Unlock()
 			forward = taskEventEnvelope(taskEvent)
 		}
@@ -1546,22 +1547,42 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 	case protocol.TypeTaskHistoryResult:
 		result, err := protocol.DecodePayload[protocol.TaskHistoryResult](env)
 		if err == nil && result.TaskID != "" {
+			eventsToForward := result.Events
 			if result.Record != nil {
 				h.mu.Lock()
 				taskKey := scopedKey(dc.userID, result.TaskID)
 				record := *result.Record
+				if existing := h.taskRecords[taskKey]; len(existing.Events) > 0 {
+					record.Events = mergeTaskRecordEvents(record.Events, existing.Events)
+					if existing.Status == "running" || existing.Status == "stopping" {
+						record.Status = existing.Status
+					}
+					if existing.UpdatedAt > record.UpdatedAt {
+						record.UpdatedAt = existing.UpdatedAt
+					}
+					if record.SessionID == "" {
+						record.SessionID = existing.SessionID
+					}
+					if record.ModelID == "" {
+						record.ModelID = existing.ModelID
+					}
+					if record.Prompt == "" {
+						record.Prompt = existing.Prompt
+					}
+				}
 				if dc.deviceID != "" {
 					record.DeviceID = dc.deviceID
 					h.taskDevices[taskKey] = dc.deviceID
 				}
 				h.taskRecords[taskKey] = record
+				eventsToForward = append([]protocol.TaskEvent(nil), record.Events...)
 				h.mu.Unlock()
 			}
 			h.mu.Lock()
 			requester := h.acpxHistoryReq[result.RequestID]
 			delete(h.acpxHistoryReq, result.RequestID)
 			h.mu.Unlock()
-			for _, event := range result.Events {
+			for _, event := range eventsToForward {
 				forward := taskEventEnvelope(event)
 				forward.From = "server"
 				if requester != nil {
@@ -1577,7 +1598,7 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 				ready := protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "server", protocol.TaskHistoryReady{
 					RequestID: result.RequestID,
 					TaskID:    result.TaskID,
-					HasEvents: len(result.Events) > 0,
+					HasEvents: len(eventsToForward) > 0,
 				})
 				select {
 				case requester.send <- ready:
@@ -2430,8 +2451,9 @@ func taskEventSequenceExists(events []protocol.TaskEvent, sequence int64) bool {
 
 func mergeTaskRecordEvents(base []protocol.TaskEvent, extra []protocol.TaskEvent) []protocol.TaskEvent {
 	if len(base) == 0 {
-		return append([]protocol.TaskEvent(nil), extra...)
+		return orderTaskRecordEvents(append([]protocol.TaskEvent(nil), extra...))
 	}
+	extra = rebaseACPXEventsAfterBase(base, extra)
 	merged := append([]protocol.TaskEvent(nil), base...)
 	seen := make(map[string]struct{}, len(merged))
 	for _, event := range merged {
@@ -2440,12 +2462,216 @@ func mergeTaskRecordEvents(base []protocol.TaskEvent, extra []protocol.TaskEvent
 	for _, event := range extra {
 		signature := taskEventSignature(event)
 		if _, ok := seen[signature]; ok {
+			if updated, ok := replaceExistingTaskRecordEventByStableKey(merged, event); ok {
+				merged = updated
+			}
 			continue
 		}
 		merged = append(merged, event)
 		seen[signature] = struct{}{}
 	}
-	return merged
+	return orderTaskRecordEvents(merged)
+}
+
+func replaceExistingTaskRecordEventByStableKey(events []protocol.TaskEvent, event protocol.TaskEvent) ([]protocol.TaskEvent, bool) {
+	if key := taskEventACPXEventKey(event); key != "" && shouldReplaceACPXKeyedEvent(event) {
+		for index, existing := range events {
+			if taskEventACPXEventKey(existing) != key {
+				continue
+			}
+			event.EventID = existing.EventID
+			event.Sequence = existing.Sequence
+			event.Timestamp = existing.Timestamp
+			next := append([]protocol.TaskEvent(nil), events...)
+			next[index] = event
+			return next, true
+		}
+	}
+	return events, false
+}
+
+func rebaseACPXEventsAfterBase(base []protocol.TaskEvent, extra []protocol.TaskEvent) []protocol.TaskEvent {
+	if len(base) == 0 || len(extra) == 0 {
+		return extra
+	}
+	if !hasACPXEventKeyedEvents(base) || !hasACPXTurnZero(extra) {
+		return extra
+	}
+	if hasSharedACPXEventKey(base, extra) && !hasConflictingSharedACPXEventKey(base, extra) {
+		return extra
+	}
+	offset := maxACPXTurnIndex(base) + 1
+	if offset <= 0 {
+		return extra
+	}
+	rebased := make([]protocol.TaskEvent, len(extra))
+	for i, event := range extra {
+		rebased[i] = rebaseACPXEvent(event, offset)
+	}
+	return rebased
+}
+
+func hasACPXEventKeyedEvents(events []protocol.TaskEvent) bool {
+	for _, event := range events {
+		if taskEventACPXEventKey(event) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasACPXTurnZero(events []protocol.TaskEvent) bool {
+	for _, event := range events {
+		if turnIndex, ok := taskEventACPXTurnIndex(event); ok && turnIndex == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSharedACPXEventKey(left []protocol.TaskEvent, right []protocol.TaskEvent) bool {
+	keys := make(map[string]struct{})
+	for _, event := range left {
+		if key := taskEventACPXEventKey(event); key != "" {
+			keys[key] = struct{}{}
+		}
+	}
+	for _, event := range right {
+		if key := taskEventACPXEventKey(event); key != "" {
+			if _, ok := keys[key]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasConflictingSharedACPXEventKey(left []protocol.TaskEvent, right []protocol.TaskEvent) bool {
+	byKey := make(map[string]protocol.TaskEvent)
+	for _, event := range left {
+		if key := taskEventACPXEventKey(event); key != "" {
+			byKey[key] = event
+		}
+	}
+	for _, event := range right {
+		key := taskEventACPXEventKey(event)
+		if key == "" {
+			continue
+		}
+		existing, ok := byKey[key]
+		if !ok {
+			continue
+		}
+		if !sameACPXKeyedEvent(existing, event) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameACPXKeyedEvent(left protocol.TaskEvent, right protocol.TaskEvent) bool {
+	if left.EventType != right.EventType {
+		return false
+	}
+	leftText := taskEventComparableText(left)
+	rightText := taskEventComparableText(right)
+	if leftText != "" && rightText != "" {
+		return leftText == rightText
+	}
+	return true
+}
+
+func taskEventComparableText(event protocol.TaskEvent) string {
+	switch event.EventType {
+	case "user.prompt":
+		if text := textFieldFromEventJSON(event.Data, "prompt"); text != "" {
+			return text
+		}
+		return textFieldFromEventJSON(event.Raw, "prompt")
+	case "assistant.message", "assistant.thinking":
+		if text := textFieldFromEventJSON(event.Data, "text", "content"); text != "" {
+			return text
+		}
+		return textFieldFromEventJSON(event.Raw, "text", "content")
+	default:
+		return ""
+	}
+}
+
+func textFieldFromEventJSON(raw json.RawMessage, keys ...string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var data map[string]any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(stringFromMap(data, keys...)), " ")
+}
+
+func maxACPXTurnIndex(events []protocol.TaskEvent) int {
+	maxTurn := -1
+	for _, event := range events {
+		if turnIndex, ok := taskEventACPXTurnIndex(event); ok && turnIndex > maxTurn {
+			maxTurn = turnIndex
+		}
+	}
+	return maxTurn
+}
+
+func rebaseACPXEvent(event protocol.TaskEvent, offset int) protocol.TaskEvent {
+	for _, target := range []*json.RawMessage{&event.Data, &event.Raw} {
+		if target == nil || len(*target) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(*target, &data); err != nil {
+			continue
+		}
+		turnIndex, ok := intFromMap(data, "acpx_turn_index", "acpxTurnIndex")
+		if !ok {
+			continue
+		}
+		newTurnIndex := turnIndex + offset
+		data["acpx_turn_index"] = newTurnIndex
+		if eventKey := stringFromMap(data, "acpx_event_key", "acpxEventKey"); eventKey != "" {
+			data["acpx_event_key"] = rebaseACPXEventKey(eventKey, newTurnIndex)
+			delete(data, "acpxEventKey")
+		}
+		if raw, err := json.Marshal(data); err == nil {
+			*target = raw
+		}
+	}
+	return event
+}
+
+func rebaseACPXEventKey(eventKey string, turnIndex int) string {
+	parts := strings.Split(eventKey, ":")
+	if len(parts) >= 4 && parts[0] == "turn" {
+		parts[1] = strconv.Itoa(turnIndex)
+		return strings.Join(parts, ":")
+	}
+	return eventKey
+}
+
+func orderTaskRecordEvents(events []protocol.TaskEvent) []protocol.TaskEvent {
+	ordered := append([]protocol.TaskEvent(nil), events...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].Timestamp != ordered[j].Timestamp {
+			if ordered[i].Timestamp == 0 {
+				return false
+			}
+			if ordered[j].Timestamp == 0 {
+				return true
+			}
+			return ordered[i].Timestamp < ordered[j].Timestamp
+		}
+		if ordered[i].Sequence != ordered[j].Sequence {
+			return ordered[i].Sequence < ordered[j].Sequence
+		}
+		return ordered[i].EventID < ordered[j].EventID
+	})
+	return ordered
 }
 
 func hasTaskEventSignature(events []protocol.TaskEvent, event protocol.TaskEvent) bool {
@@ -2466,6 +2692,54 @@ func hasTaskEventSignature(events []protocol.TaskEvent, event protocol.TaskEvent
 	return false
 }
 
+func upsertOrAppendTaskRecordEvent(events []protocol.TaskEvent, event protocol.TaskEvent) ([]protocol.TaskEvent, protocol.TaskEvent, bool) {
+	if key := taskEventACPXEventKey(event); key != "" && shouldReplaceACPXKeyedEvent(event) {
+		for index, existing := range events {
+			if taskEventACPXEventKey(existing) != key {
+				continue
+			}
+			event.EventID = existing.EventID
+			event.Sequence = existing.Sequence
+			event.Timestamp = existing.Timestamp
+			next := append([]protocol.TaskEvent(nil), events...)
+			next[index] = event
+			return next, event, true
+		}
+	}
+	if hasTaskEventSignature(events, event) {
+		return events, event, false
+	}
+	return append(events, event), event, true
+}
+
+func shouldReplaceACPXKeyedEvent(event protocol.TaskEvent) bool {
+	switch event.EventType {
+	case "assistant.message", "assistant.thinking":
+		data := taskEventDataMap(event)
+		if streamID := stringFromMap(data, "stream_id", "streamId"); streamID == "" {
+			return false
+		}
+		return true
+	case "tool.call", "tool.output":
+		return true
+	default:
+		return false
+	}
+}
+
+func taskEventDataMap(event protocol.TaskEvent) map[string]any {
+	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
+		if len(raw) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(raw, &data); err == nil {
+			return data
+		}
+	}
+	return nil
+}
+
 func isContentEvent(eventType string) bool {
 	return eventType == "user.prompt" ||
 		eventType == "assistant.message" ||
@@ -2475,6 +2749,9 @@ func isContentEvent(eventType string) bool {
 }
 
 func taskEventSignature(event protocol.TaskEvent) string {
+	if eventKey := taskEventACPXEventKey(event); eventKey != "" {
+		return "acpx:" + eventKey
+	}
 	if event.EventType == "user.prompt" {
 		if turnID := taskEventTurnID(event); turnID != "" {
 			return event.EventType + ":turn:" + turnID
@@ -2490,6 +2767,87 @@ func taskEventSignature(event protocol.TaskEvent) string {
 		return event.EventType + ":" + string(event.Raw)
 	}
 	return fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID)
+}
+
+func taskEventACPXEventKey(event protocol.TaskEvent) string {
+	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
+		if len(raw) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(raw, &data); err != nil {
+			continue
+		}
+		if key := stringFromMap(data, "acpx_event_key", "acpxEventKey"); key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+func acpxEventKey(turnIndex int, eventType string, ordinal int) string {
+	if turnIndex < 0 {
+		turnIndex = 0
+	}
+	if ordinal < 0 {
+		ordinal = 0
+	}
+	return fmt.Sprintf("turn:%d:%s:%d", turnIndex, eventType, ordinal)
+}
+
+func nextACPXTurnIndex(events []protocol.TaskEvent) int {
+	maxTurn := -1
+	promptCount := 0
+	for _, event := range events {
+		if turnIndex, ok := taskEventACPXTurnIndex(event); ok && turnIndex > maxTurn {
+			maxTurn = turnIndex
+		}
+		if event.EventType == "user.prompt" {
+			promptCount++
+		}
+	}
+	if maxTurn >= 0 {
+		return maxTurn + 1
+	}
+	return promptCount
+}
+
+func taskEventACPXTurnIndex(event protocol.TaskEvent) (int, bool) {
+	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
+		if len(raw) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(raw, &data); err != nil {
+			continue
+		}
+		if turnIndex, ok := intFromMap(data, "acpx_turn_index", "acpxTurnIndex"); ok {
+			return turnIndex, true
+		}
+	}
+	return 0, false
+}
+
+func intFromMap(source map[string]any, keys ...string) (int, bool) {
+	for _, key := range keys {
+		switch value := source[key].(type) {
+		case int:
+			return value, true
+		case int64:
+			return int(value), true
+		case float64:
+			return int(value), true
+		case json.Number:
+			if parsed, err := value.Int64(); err == nil {
+				return int(parsed), true
+			}
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func taskEventTurnID(event protocol.TaskEvent) string {

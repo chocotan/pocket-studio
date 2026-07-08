@@ -350,6 +350,174 @@ func TestMergeTaskRecordEventsDeduplicatesSameEventDataWithDifferentRaw(t *testi
 	}
 }
 
+func TestMergeTaskRecordEventsDeduplicatesRestoredACPXEventsByStableKey(t *testing.T) {
+	base := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "history-start",
+			EventType: "task.started",
+			Source:    "acpx",
+			Sequence:  1,
+			Data:      json.RawMessage(`{"source":"acpx.history","turn_id":"history-turn-0","acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-user",
+			EventType: "user.prompt",
+			Source:    "acpx",
+			Sequence:  2,
+			Data:      json.RawMessage(`{"prompt":"你好","turn_id":"history-turn-0","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-assistant",
+			EventType: "assistant.message",
+			Source:    "acpx",
+			Sequence:  3,
+			Data:      json.RawMessage(`{"text":"你好，有什么可以帮你？","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-done",
+			EventType: "task.completed",
+			Source:    "acpx",
+			Sequence:  4,
+			Data:      json.RawMessage(`{"exit_code":0,"stop_reason":"history","turn_id":"history-turn-0","acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`),
+		},
+	}
+	extra := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "live-user",
+			EventType: "user.prompt",
+			Source:    "web",
+			Sequence:  5,
+			Data:      json.RawMessage(`{"prompt":"你好","turn_id":"turn-live","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "live-start",
+			EventType: "task.started",
+			Source:    "claude_code",
+			Sequence:  6,
+			Data:      json.RawMessage(`{"turn_id":"turn-live","_seq":6,"_ts":100,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "live-assistant",
+			EventType: "assistant.message",
+			Source:    "claude_code",
+			Sequence:  7,
+			Data:      json.RawMessage(`{"text":"你好，有什么可以帮你？","stream_id":"stream-1","replace":true,"_seq":7,"_ts":101,"acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "live-done",
+			EventType: "task.completed",
+			Source:    "claude_code",
+			Sequence:  8,
+			Data:      json.RawMessage(`{"exit_code":0,"stop_reason":"end_turn","_seq":8,"_ts":102,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`),
+		},
+	}
+
+	merged := mergeTaskRecordEvents(base, extra)
+	if len(merged) != len(base) {
+		t.Fatalf("merged events = %#v, want only restored turn", merged)
+	}
+	for i, event := range merged {
+		if event.EventID != base[i].EventID {
+			t.Fatalf("merged[%d] = %q, want %q; events=%#v", i, event.EventID, base[i].EventID, merged)
+		}
+	}
+}
+
+func TestMergeTaskRecordEventsKeepsRepeatedACPXPromptTurnsWithDifferentStableKeys(t *testing.T) {
+	base := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "history-user-0",
+			EventType: "user.prompt",
+			Sequence:  1,
+			Data:      json.RawMessage(`{"prompt":"你好","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-assistant-0",
+			EventType: "assistant.message",
+			Sequence:  2,
+			Data:      json.RawMessage(`{"text":"你好！","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+		},
+	}
+	extra := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "history-user-1",
+			EventType: "user.prompt",
+			Sequence:  3,
+			Data:      json.RawMessage(`{"prompt":"你好","acpx_turn_index":1,"acpx_event_key":"turn:1:user.prompt:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-assistant-1",
+			EventType: "assistant.message",
+			Sequence:  4,
+			Data:      json.RawMessage(`{"text":"你好！","acpx_turn_index":1,"acpx_event_key":"turn:1:assistant.message:0"}`),
+		},
+	}
+
+	merged := mergeTaskRecordEvents(base, extra)
+	if len(merged) != 4 {
+		t.Fatalf("merged events = %#v, want both repeated prompt turns", merged)
+	}
+}
+
+func TestMergeTaskRecordEventsRebasesExistingLiveTurnAfterRestoredHistory(t *testing.T) {
+	base := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "history-user",
+			EventType: "user.prompt",
+			Sequence:  1,
+			Data:      json.RawMessage(`{"prompt":"old","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "history-assistant",
+			EventType: "assistant.message",
+			Sequence:  2,
+			Data:      json.RawMessage(`{"text":"old reply","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+		},
+	}
+	extra := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "live-user",
+			EventType: "user.prompt",
+			Sequence:  3,
+			Data:      json.RawMessage(`{"prompt":"new","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:live"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "live-assistant",
+			EventType: "assistant.message",
+			Sequence:  4,
+			Data:      json.RawMessage(`{"text":"new reply","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:live"}`),
+		},
+	}
+
+	merged := mergeTaskRecordEvents(base, extra)
+	if len(merged) != 4 {
+		t.Fatalf("merged events = %#v, want restored plus rebased live turn", merged)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(merged[2].Data, &data); err != nil {
+		t.Fatalf("decode live prompt data: %v", err)
+	}
+	if data["acpx_event_key"] != "turn:1:user.prompt:live" || data["acpx_turn_index"] != float64(1) {
+		t.Fatalf("rebased live prompt data = %#v, want turn 1", data)
+	}
+}
+
 func TestMergeTaskRecordEventsKeepsRepeatedUserPromptsWithoutTurnID(t *testing.T) {
 	data := json.RawMessage(`{"prompt":"again"}`)
 	base := []protocol.TaskEvent{
@@ -436,6 +604,127 @@ func TestHandleDaemonMessageDoesNotBroadcastDuplicateTaskEvent(t *testing.T) {
 	record := h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")]
 	if len(record.Events) != 1 || record.Events[0].EventID != "evt-server" {
 		t.Fatalf("record events = %#v, want original event only", record.Events)
+	}
+}
+
+func TestHandleDaemonHistoryResultMergesExistingLiveTurnWithoutDuplication(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	dc := &daemonConn{userID: auth.OwnerAdmin, deviceID: "device-1"}
+	requester := &acpxConn{userID: auth.OwnerAdmin, taskID: "task-1", send: make(chan protocol.Envelope, 8)}
+	h.acpxHistoryReq["req-1"] = requester
+	taskKey := scopedKey(auth.OwnerAdmin, "task-1")
+	h.taskRecords[taskKey] = protocol.TaskRecord{
+		TaskID: "task-1",
+		Events: []protocol.TaskEvent{
+			{
+				TaskID:    "task-1",
+				EventID:   "live-user",
+				EventType: "user.prompt",
+				Source:    "web",
+				Sequence:  1,
+				Data:      json.RawMessage(`{"prompt":"你好","turn_id":"turn-live","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+			},
+			{
+				TaskID:    "task-1",
+				EventID:   "live-start",
+				EventType: "task.started",
+				Source:    "claude_code",
+				Sequence:  2,
+				Data:      json.RawMessage(`{"turn_id":"turn-live","_seq":2,"_ts":100,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`),
+			},
+			{
+				TaskID:    "task-1",
+				EventID:   "live-assistant",
+				EventType: "assistant.message",
+				Source:    "claude_code",
+				Sequence:  3,
+				Data:      json.RawMessage(`{"text":"你好，有什么可以帮你？","_seq":3,"_ts":101,"acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+			},
+			{
+				TaskID:    "task-1",
+				EventID:   "live-done",
+				EventType: "task.completed",
+				Source:    "claude_code",
+				Sequence:  4,
+				Data:      json.RawMessage(`{"exit_code":0,"stop_reason":"end_turn","_seq":4,"_ts":102,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`),
+			},
+		},
+	}
+
+	h.handleDaemonMessage(dc, protocol.NewEnvelope(protocol.TypeTaskHistoryResult, "daemon", protocol.TaskHistoryResult{
+		RequestID: "req-1",
+		TaskID:    "task-1",
+		Record: &protocol.TaskRecord{
+			TaskID:   "task-1",
+			Agent:    "qwen",
+			Status:   "completed",
+			Prompt:   "你好",
+			DeviceID: "device-1",
+			Events: []protocol.TaskEvent{
+				{
+					TaskID:    "task-1",
+					EventID:   "history-start",
+					EventType: "task.started",
+					Source:    "acpx",
+					Sequence:  1,
+					Data:      json.RawMessage(`{"source":"acpx.history","turn_id":"history-turn-0","acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`),
+				},
+				{
+					TaskID:    "task-1",
+					EventID:   "history-user",
+					EventType: "user.prompt",
+					Source:    "acpx",
+					Sequence:  2,
+					Data:      json.RawMessage(`{"prompt":"你好","turn_id":"history-turn-0","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+				},
+				{
+					TaskID:    "task-1",
+					EventID:   "history-assistant",
+					EventType: "assistant.message",
+					Source:    "acpx",
+					Sequence:  3,
+					Data:      json.RawMessage(`{"text":"你好，有什么可以帮你？","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+				},
+				{
+					TaskID:    "task-1",
+					EventID:   "history-done",
+					EventType: "task.completed",
+					Source:    "acpx",
+					Sequence:  4,
+					Data:      json.RawMessage(`{"exit_code":0,"stop_reason":"history","turn_id":"history-turn-0","acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`),
+				},
+			},
+		},
+		Events: nil,
+	}))
+
+	record := h.taskRecords[taskKey]
+	if len(record.Events) != 4 {
+		t.Fatalf("record events = %#v, want one restored turn without existing duplicate live turn", record.Events)
+	}
+	for _, event := range record.Events {
+		if strings.HasPrefix(event.EventID, "live-") {
+			t.Fatalf("record events kept duplicate live event %#v; all events=%#v", event, record.Events)
+		}
+	}
+	forwarded := make([]protocol.TaskEvent, 0)
+	for {
+		select {
+		case env := <-requester.send:
+			if env.Type == protocol.TypeTaskHistoryReady {
+				if len(forwarded) != 4 {
+					t.Fatalf("forwarded events = %#v, want one restored turn", forwarded)
+				}
+				return
+			}
+			var event protocol.TaskEvent
+			if err := json.Unmarshal(env.Payload, &event); err != nil {
+				t.Fatalf("decode forwarded event: %v", err)
+			}
+			forwarded = append(forwarded, event)
+		default:
+			t.Fatalf("history result did not send ready; forwarded=%#v", forwarded)
+		}
 	}
 }
 

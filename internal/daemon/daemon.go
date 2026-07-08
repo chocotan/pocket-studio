@@ -1099,7 +1099,8 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	defer unlock()
 
 	ctx, cancel := context.WithCancel(parent)
-	emitter := &taskEmitter{daemon: d, taskID: task.TaskID}
+	isACPXTask := d.usesACPXRuntime(task)
+	emitter := &taskEmitter{daemon: d, taskID: task.TaskID, acpx: isACPXTask}
 	turnID := task.TurnID
 	if turnID == "" {
 		turnID = protocol.NewID("turn")
@@ -1112,7 +1113,7 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 		cancel:    cancel,
 		done:      make(chan struct{}),
 		workspace: workspace.Path,
-		acpx:      d.cfg.ACPX.Enabled,
+		acpx:      isACPXTask,
 		agent:     acpxAgentName(task, d.cfg.ACPX.Agent),
 		session:   taskSessionName(task, d.cfg.ACPX.SessionName),
 	}
@@ -1121,7 +1122,7 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	d.mu.Unlock()
 
 	command, args, source := d.buildAgentCommand(task, workspace.Path)
-	if d.cfg.ACPX.Enabled {
+	if isACPXTask {
 		if recordID, sessionName, err := d.ensureACPXSession(ctx, task, workspace.Path, task.TaskID); err != nil {
 			cancel()
 			d.mu.Lock()
@@ -1150,7 +1151,7 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	defer runCancel()
 
 	idleTimeout := time.Duration(0)
-	if d.cfg.ACPX.Enabled {
+	if isACPXTask {
 		idleTimeout = d.acpxCommandTimeout(task.Options.TimeoutSeconds)
 	}
 	activityCh := make(chan struct{}, 1)
@@ -1226,7 +1227,7 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	record.DeviceID = d.cfg.Device.ID
 	record.Prompt = task.Prompt
 	record.ParentTaskID = task.ParentTaskID
-	if d.cfg.ACPX.Enabled {
+	if isACPXTask {
 		if rt.recordID != "" {
 			record.SessionID = rt.recordID
 		}
@@ -1241,7 +1242,12 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	}
 	record.Status = "running"
 	record.UpdatedAt = now
-	userEvent := userPromptTaskEvent(task.TaskID, turnID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events))
+	acpxTurnIndex := -1
+	if isACPXTask {
+		acpxTurnIndex = nextACPXTurnIndex(record.Events)
+		emitter.setACPXTurnIndex(acpxTurnIndex)
+	}
+	userEvent := userPromptTaskEvent(task.TaskID, turnID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events), acpxTurnIndex)
 	if userEvent.TaskID != "" {
 		record.Events = append(record.Events, userEvent)
 	}
@@ -1267,10 +1273,8 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 		d.scanTextOutput(stderr, "stderr", emitter, markActivity)
 	}()
 
-	waitErr := cmd.Wait()
-	stdout.Close()
-	stderr.Close()
 	wg.Wait()
+	waitErr := cmd.Wait()
 	close(rt.done)
 	runCancel()
 	defer cancel()
@@ -1350,6 +1354,20 @@ func (d *Daemon) recordAgentNameForTask(task protocol.TaskDispatch) string {
 
 func isDirectACPRuntime(runtime string) bool {
 	return strings.EqualFold(strings.TrimSpace(runtime), "direct_acp")
+}
+
+func isACPXRuntime(runtime string) bool {
+	return strings.EqualFold(strings.TrimSpace(runtime), "acpx")
+}
+
+func (d *Daemon) usesACPXRuntime(task protocol.TaskDispatch) bool {
+	if isDirectACPRuntime(task.AgentRuntime) {
+		return false
+	}
+	if isACPXRuntime(task.AgentRuntime) {
+		return d.cfg.ACPX.Enabled
+	}
+	return d.cfg.ACPX.Enabled
 }
 
 func (d *Daemon) directACPAgentConfig(agent string) (DirectACPAgentConfig, bool) {
@@ -1677,16 +1695,14 @@ func (d *Daemon) tryClaudeFallback(parent context.Context, task protocol.TaskDis
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		d.scanOutput(stdout, "stdout", emitter, fallbackTask.Prompt, func() {})
+		d.scanOutput(stdout, "stdout", emitter, "", func() {})
 	}()
 	go func() {
 		defer wg.Done()
 		d.scanTextOutput(stderr, "stderr", emitter, func() {})
 	}()
-	waitErr := cmd.Wait()
-	stdout.Close()
-	stderr.Close()
 	wg.Wait()
+	waitErr := cmd.Wait()
 	if waitErr != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			emitter.emit("task.failed", map[string]any{"error": fmt.Sprintf("claude fallback timed out after %s", timeout)}, nil)
@@ -1813,10 +1829,43 @@ type taskEmitter struct {
 	taskID    string
 	endTurn   bool
 	lastError string
+	acpx      bool
+	acpxTurn  int
 }
 
 func (e *taskEmitter) emit(eventType string, data any, raw json.RawMessage) {
+	data = e.acpxEventDataForEmit(eventType, data)
 	e.daemon.emitTaskEventWithNextSequence(e.taskID, eventType, data, raw)
+}
+
+func (e *taskEmitter) acpxEventDataForEmit(eventType string, data any) any {
+	if e == nil || !e.acpx || !isACPXEventKeyedEvent(eventType) {
+		return data
+	}
+	base := mapFromEventData(data)
+	if base == nil {
+		base = map[string]any{}
+	}
+	turnIndex := e.acpxTurnIndex()
+	if _, ok := base["acpx_turn_index"]; !ok {
+		base["acpx_turn_index"] = turnIndex
+	}
+	if stringField(base, "acpx_event_key", "acpxEventKey") == "" && eventType != "assistant.message" && eventType != "assistant.thinking" && eventType != "tool.call" && eventType != "tool.output" {
+		base["acpx_event_key"] = acpxEventKey(turnIndex, eventType, 0)
+	}
+	return base
+}
+
+func (e *taskEmitter) setACPXTurnIndex(turnIndex int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.acpxTurn = turnIndex
+}
+
+func (e *taskEmitter) acpxTurnIndex() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.acpxTurn
 }
 
 func (e *taskEmitter) markEndTurn() {
@@ -2136,11 +2185,17 @@ type agentOutputAdapter struct {
 	assistantRaw       json.RawMessage
 	assistantStreaming bool
 	assistantStreamID  string
+	assistantEventKey  string
 	thinkingText       strings.Builder
 	thinkingRaw        json.RawMessage
 	thinkingStreaming  bool
 	thinkingStreamID   string
+	thinkingEventKey   string
 	streamCounter      int64
+	acpxTurnIndex      int
+	assistantOrdinal   int
+	thinkingOrdinal    int
+	toolOrdinal        int
 	historyUserPrompts int
 	seenUserPrompts    int
 	userStreaming      bool
@@ -2149,9 +2204,14 @@ type agentOutputAdapter struct {
 }
 
 func newAgentOutputAdapter(emitter *taskEmitter, historyUserPrompts int, targetPrompt string) *agentOutputAdapter {
+	acpxTurnIndex := 0
+	if emitter != nil {
+		acpxTurnIndex = emitter.acpxTurnIndex()
+	}
 	return &agentOutputAdapter{
 		emitter:            emitter,
 		streamPrefix:       protocol.NewID("stream"),
+		acpxTurnIndex:      acpxTurnIndex,
 		historyUserPrompts: historyUserPrompts,
 		targetPrompt:       strings.TrimSpace(targetPrompt),
 	}
@@ -2163,12 +2223,23 @@ func (a *agentOutputAdapter) handle(raw json.RawMessage) {
 	}
 	a.flush()
 	if !a.reachedNewPrompt && a.historyUserPrompts > 0 && a.seenUserPrompts <= a.historyUserPrompts {
+		if text := extractACPXErrorText(string(raw)); text != "" {
+			a.emitter.markError(text)
+			a.emitter.emit("task.error", map[string]string{"error": text}, raw)
+		}
 		return
 	}
 	eventType := classifyClaudeEvent(raw)
 	if eventType == "tool.call" || eventType == "tool.output" {
 		if data := claudeToolEventData(raw); data != nil {
+			data = a.acpxEventData(eventType, data, "")
 			a.emitter.emit(eventType, data, raw)
+			return
+		}
+	}
+	if eventType == "assistant.message" {
+		if text := assistantTextFromRawMessage(raw); text != "" {
+			a.emitter.emit(eventType, a.nextAssistantEventData(map[string]any{"text": text}), raw)
 			return
 		}
 	}
@@ -2192,10 +2263,13 @@ func (a *agentOutputAdapter) flushAssistant() {
 	if a.assistantStreaming {
 		a.assistantStreaming = false
 		a.assistantStreamID = ""
+		a.assistantEventKey = ""
 		return
 	}
+	eventKey := a.assistantEventKey
+	a.assistantEventKey = ""
 	a.assistantStreamID = ""
-	a.emitter.emit("assistant.message", map[string]string{"text": text}, raw)
+	a.emitter.emit("assistant.message", a.nextAssistantEventDataWithKey(map[string]any{"text": text}, eventKey), raw)
 }
 
 func (a *agentOutputAdapter) flushThinking() {
@@ -2211,10 +2285,13 @@ func (a *agentOutputAdapter) flushThinking() {
 	if a.thinkingStreaming {
 		a.thinkingStreaming = false
 		a.thinkingStreamID = ""
+		a.thinkingEventKey = ""
 		return
 	}
+	eventKey := a.thinkingEventKey
+	a.thinkingEventKey = ""
 	a.thinkingStreamID = ""
-	a.emitter.emit("assistant.thinking", map[string]string{"text": text}, raw)
+	a.emitter.emit("assistant.thinking", a.nextThinkingEventDataWithKey(map[string]any{"text": text}, eventKey), raw)
 }
 
 func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
@@ -2226,6 +2303,14 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 		return false
 	}
 	method, _ := msg["method"].(string)
+	if method != "session/update" {
+		if text := extractACPXErrorText(string(raw)); text != "" {
+			a.flush()
+			a.emitter.markError(text)
+			a.emitter.emit("task.error", map[string]string{"error": text}, raw)
+			return true
+		}
+	}
 	if method == "session/update" {
 		params, _ := msg["params"].(map[string]any)
 		update, _ := params["update"].(map[string]any)
@@ -2241,12 +2326,8 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 			} else if contentText, _ := update["content"].(string); contentText != "" {
 				chunkText = contentText
 			}
-			if chunkText != "" && a.targetPrompt != "" {
-				ct := strings.TrimSpace(chunkText)
-				tp := strings.TrimSpace(a.targetPrompt)
-				if strings.Contains(tp, ct) || strings.Contains(ct, tp) {
-					a.reachedNewPrompt = true
-				}
+			if chunkText != "" && a.observedPromptIsCurrent(chunkText) {
+				a.reachedNewPrompt = true
 			}
 		} else if updateType != "" {
 			a.userStreaming = false
@@ -2263,12 +2344,8 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 					}
 				}
 			}
-			if promptText != "" && a.targetPrompt != "" {
-				pt := strings.TrimSpace(promptText)
-				tp := strings.TrimSpace(a.targetPrompt)
-				if strings.HasPrefix(pt, tp) || strings.HasPrefix(tp, pt) {
-					a.reachedNewPrompt = true
-				}
+			if promptText != "" && a.observedPromptIsCurrent(promptText) {
+				a.reachedNewPrompt = true
 			}
 		}
 	}
@@ -2278,12 +2355,6 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 	}
 
 	if method != "session/update" {
-		if text := extractACPXErrorText(string(raw)); text != "" {
-			a.flush()
-			a.emitter.markError(text)
-			a.emitter.emit("task.error", map[string]string{"error": text}, raw)
-			return true
-		}
 		if method == "session/request_permission" {
 			a.flush()
 			a.emitter.emit("permission.request", nil, raw)
@@ -2338,6 +2409,28 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 	return true
 }
 
+func (a *agentOutputAdapter) observedPromptIsCurrent(promptText string) bool {
+	if a == nil {
+		return false
+	}
+	if a.historyUserPrompts > 0 && a.seenUserPrompts <= a.historyUserPrompts {
+		return false
+	}
+	if strings.TrimSpace(a.targetPrompt) == "" {
+		return true
+	}
+	return promptTextMatchesTarget(promptText, a.targetPrompt)
+}
+
+func promptTextMatchesTarget(promptText string, targetPrompt string) bool {
+	promptText = strings.TrimSpace(promptText)
+	targetPrompt = strings.TrimSpace(targetPrompt)
+	if promptText == "" || targetPrompt == "" {
+		return false
+	}
+	return strings.Contains(targetPrompt, promptText) || strings.Contains(promptText, targetPrompt)
+}
+
 func (a *agentOutputAdapter) appendAssistantChunk(update map[string]any, raw json.RawMessage) {
 	text := textFromACPXContent(update["content"])
 	if text == "" {
@@ -2350,11 +2443,14 @@ func (a *agentOutputAdapter) appendAssistantChunk(update map[string]any, raw jso
 		a.streamCounter++
 		a.assistantStreamID = fmt.Sprintf("%s-assistant-%d", a.streamPrefix, a.streamCounter)
 	}
-	a.emitter.emit("assistant.message", map[string]any{
+	if a.assistantEventKey == "" {
+		a.assistantEventKey = a.nextAssistantEventKey()
+	}
+	a.emitter.emit("assistant.message", a.acpxEventData("assistant.message", map[string]any{
 		"text":      a.assistantText.String(),
 		"replace":   true,
 		"stream_id": a.assistantStreamID,
-	}, raw)
+	}, a.assistantEventKey), raw)
 }
 
 func (a *agentOutputAdapter) appendThinkingChunk(update map[string]any, raw json.RawMessage) {
@@ -2369,11 +2465,14 @@ func (a *agentOutputAdapter) appendThinkingChunk(update map[string]any, raw json
 		a.streamCounter++
 		a.thinkingStreamID = fmt.Sprintf("%s-thinking-%d", a.streamPrefix, a.streamCounter)
 	}
-	a.emitter.emit("assistant.thinking", map[string]any{
+	if a.thinkingEventKey == "" {
+		a.thinkingEventKey = a.nextThinkingEventKey()
+	}
+	a.emitter.emit("assistant.thinking", a.acpxEventData("assistant.thinking", map[string]any{
 		"text":      a.thinkingText.String(),
 		"replace":   true,
 		"stream_id": a.thinkingStreamID,
-	}, raw)
+	}, a.thinkingEventKey), raw)
 }
 
 func (a *agentOutputAdapter) emitRawToolUpdate(update map[string]any, raw json.RawMessage) {
@@ -2405,7 +2504,52 @@ func (a *agentOutputAdapter) emitRawToolUpdate(update map[string]any, raw json.R
 	} else if status := stringField(update, "status"); statusIndicatesError(status) {
 		eventType = "tool.output"
 	}
+	eventKey := ""
+	if id != "" {
+		eventKey = "turn:" + strconv.Itoa(a.acpxTurnIndex) + ":" + eventType + ":" + id
+	} else {
+		eventKey = acpxEventKey(a.acpxTurnIndex, eventType, a.toolOrdinal)
+		a.toolOrdinal++
+	}
+	data = acpxEventData(data, a.acpxTurnIndex, eventType, eventKey)
 	a.emitter.emit(eventType, data, raw)
+}
+
+func (a *agentOutputAdapter) nextAssistantEventKey() string {
+	eventKey := acpxEventKey(a.acpxTurnIndex, "assistant.message", a.assistantOrdinal)
+	a.assistantOrdinal++
+	return eventKey
+}
+
+func (a *agentOutputAdapter) nextThinkingEventKey() string {
+	eventKey := acpxEventKey(a.acpxTurnIndex, "assistant.thinking", a.thinkingOrdinal)
+	a.thinkingOrdinal++
+	return eventKey
+}
+
+func (a *agentOutputAdapter) nextAssistantEventData(data map[string]any) map[string]any {
+	return a.nextAssistantEventDataWithKey(data, "")
+}
+
+func (a *agentOutputAdapter) nextAssistantEventDataWithKey(data map[string]any, eventKey string) map[string]any {
+	if eventKey == "" {
+		eventKey = a.nextAssistantEventKey()
+	}
+	return a.acpxEventData("assistant.message", data, eventKey)
+}
+
+func (a *agentOutputAdapter) nextThinkingEventDataWithKey(data map[string]any, eventKey string) map[string]any {
+	if eventKey == "" {
+		eventKey = a.nextThinkingEventKey()
+	}
+	return a.acpxEventData("assistant.thinking", data, eventKey)
+}
+
+func (a *agentOutputAdapter) acpxEventData(eventType string, data map[string]any, eventKey string) map[string]any {
+	if a == nil || a.emitter == nil || !a.emitter.acpx {
+		return data
+	}
+	return acpxEventData(data, a.acpxTurnIndex, eventType, eventKey)
 }
 
 func firstPresentValue(values map[string]any, keys ...string) any {
@@ -2477,6 +2621,28 @@ func stringField(source map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func intFieldOK(source map[string]any, keys ...string) (int, bool) {
+	for _, key := range keys {
+		switch value := source[key].(type) {
+		case int:
+			return value, true
+		case int64:
+			return int(value), true
+		case float64:
+			return int(value), true
+		case json.Number:
+			if parsed, err := value.Int64(); err == nil {
+				return int(parsed), true
+			}
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func hasAnyKey(source map[string]any, keys ...string) bool {
@@ -2607,6 +2773,32 @@ func claudeToolEventData(raw json.RawMessage) map[string]any {
 		}
 	}
 	return nil
+}
+
+func assistantTextFromRawMessage(raw json.RawMessage) string {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(textFromAssistantMessageObject(obj))
+}
+
+func textFromAssistantMessageObject(obj map[string]any) string {
+	if text := stringField(obj, "text", "content"); text != "" {
+		return text
+	}
+	if message, _ := obj["message"].(map[string]any); message != nil {
+		if text := stringField(message, "text", "content"); text != "" {
+			return text
+		}
+		if content, ok := message["content"]; ok {
+			return acpxContentText(content)
+		}
+	}
+	if content, ok := obj["content"]; ok {
+		return acpxContentText(content)
+	}
+	return ""
 }
 
 func (d *Daemon) stopTask(taskID string) {
@@ -3625,6 +3817,59 @@ func acpxTaskIDForRecord(recordID string, sessionName string) string {
 	return recordID
 }
 
+func acpxEventKey(turnIndex int, eventType string, ordinal int) string {
+	if turnIndex < 0 {
+		turnIndex = 0
+	}
+	if ordinal < 0 {
+		ordinal = 0
+	}
+	return fmt.Sprintf("turn:%d:%s:%d", turnIndex, eventType, ordinal)
+}
+
+func acpxEventData(data map[string]any, turnIndex int, eventType string, eventKey string) map[string]any {
+	if data == nil {
+		data = map[string]any{}
+	}
+	if eventKey == "" {
+		eventKey = acpxEventKey(turnIndex, eventType, 0)
+	}
+	data["acpx_turn_index"] = turnIndex
+	data["acpx_event_key"] = eventKey
+	return data
+}
+
+func mapFromEventData(data any) map[string]any {
+	switch typed := data.(type) {
+	case nil:
+		return nil
+	case map[string]any:
+		next := make(map[string]any, len(typed))
+		for key, value := range typed {
+			next[key] = value
+		}
+		return next
+	case map[string]string:
+		next := make(map[string]any, len(typed))
+		for key, value := range typed {
+			next[key] = value
+		}
+		return next
+	default:
+		return nil
+	}
+}
+
+func isACPXEventKeyedEvent(eventType string) bool {
+	switch eventType {
+	case "task.started", "user.prompt", "assistant.message", "assistant.thinking", "tool.call", "tool.output",
+		"task.completed", "turn.completed", "task.failed", "turn.failed", "task.killed", "task.stopped":
+		return true
+	default:
+		return false
+	}
+}
+
 func isRunningACPXSessionRecord(record map[string]any) bool {
 	if closed, ok := record["closed"].(bool); ok {
 		return !closed
@@ -3697,6 +3942,7 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 	seq := int64(1)
 	activeTurnStartedAt := int64(0)
 	activeTurnID := ""
+	activeTurnIndex := -1
 	add := func(eventType string, data any, raw any) {
 		timestamp := createdAt
 		if timestamp == 0 {
@@ -3769,9 +4015,13 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 		if activeTurnID != "" {
 			data["turn_id"] = activeTurnID
 		}
+		if activeTurnIndex >= 0 {
+			data = acpxEventData(data, activeTurnIndex, "task.completed", acpxEventKey(activeTurnIndex, "task.completed", 0))
+		}
 		addAt("task.completed", endTimestamp, data, nil)
 		activeTurnStartedAt = 0
 		activeTurnID = ""
+		activeTurnIndex = -1
 	}
 
 	if acpx, _ := record["acpx"].(map[string]any); acpx != nil {
@@ -3784,6 +4034,9 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 	}
 
 	messages, _ := record["messages"].([]any)
+	turnIndex := -1
+	assistantOrdinal := 0
+	thinkingOrdinal := 0
 	for _, item := range messages {
 		message, _ := item.(map[string]any)
 		if message == nil {
@@ -3792,16 +4045,21 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 		if user, _ := message["User"].(map[string]any); user != nil {
 			prompt := acpxContentText(user["content"])
 			if strings.TrimSpace(prompt) != "" {
+				turnIndex++
+				assistantOrdinal = 0
+				thinkingOrdinal = 0
 				promptTimestamp := eventTimestamp(seq - 1)
 				closeActiveTurn(promptTimestamp - 1)
-				activeTurnID = fmt.Sprintf("history-turn-%d", seq)
+				activeTurnID = fmt.Sprintf("history-turn-%d", turnIndex)
+				activeTurnIndex = turnIndex
 				activeTurnStartedAt = promptTimestamp
-				addAt("task.started", activeTurnStartedAt, map[string]any{
-					"agent":      stringField(record, "agent"),
-					"source":     "acpx.history",
-					"turn_id":    activeTurnID,
-					"session_id": stringField(record, "acpxRecordId", "acpx_record_id"),
-				}, nil)
+				addAt("task.started", activeTurnStartedAt, acpxEventData(map[string]any{
+					"agent":           stringField(record, "agent"),
+					"source":          "acpx.history",
+					"turn_id":         activeTurnID,
+					"session_id":      stringField(record, "acpxRecordId", "acpx_record_id"),
+					"acpx_turn_index": turnIndex,
+				}, turnIndex, "task.started", acpxEventKey(turnIndex, "task.started", 0)), nil)
 				raw := map[string]any{
 					"type": "user",
 					"message": map[string]any{
@@ -3809,7 +4067,7 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 						"content": []any{map[string]any{"type": "text", "text": prompt}},
 					},
 				}
-				add("user.prompt", map[string]any{"prompt": prompt, "turn_id": activeTurnID}, raw)
+				add("user.prompt", acpxEventData(map[string]any{"prompt": prompt, "turn_id": activeTurnID}, turnIndex, "user.prompt", acpxEventKey(turnIndex, "user.prompt", 0)), raw)
 			}
 			continue
 		}
@@ -3826,11 +4084,15 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 			if thinking, ok := part["Thinking"]; ok {
 				text := acpxThinkingText(thinking)
 				if strings.TrimSpace(text) != "" {
-					add("assistant.thinking", map[string]any{"text": text}, map[string]any{"type": "thinking", "text": text})
+					eventKey := acpxEventKey(turnIndex, "assistant.thinking", thinkingOrdinal)
+					thinkingOrdinal++
+					add("assistant.thinking", acpxEventData(map[string]any{"text": text}, turnIndex, "assistant.thinking", eventKey), map[string]any{"type": "thinking", "text": text})
 				}
 				continue
 			}
 			if text := acpxTextPart(part["Text"]); strings.TrimSpace(text) != "" {
+				eventKey := acpxEventKey(turnIndex, "assistant.message", assistantOrdinal)
+				assistantOrdinal++
 				raw := map[string]any{
 					"type": "assistant",
 					"message": map[string]any{
@@ -3838,13 +4100,17 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 						"content": []any{map[string]any{"type": "text", "text": text}},
 					},
 				}
-				add("assistant.message", map[string]any{"text": text}, raw)
+				add("assistant.message", acpxEventData(map[string]any{"text": text}, turnIndex, "assistant.message", eventKey), raw)
 				continue
 			}
 			if toolUse, _ := part["ToolUse"].(map[string]any); toolUse != nil {
 				id := stringField(toolUse, "id", "tool_use_id", "toolCallId")
 				name := stringField(toolUse, "name", "title")
 				input := acpxToolInput(toolUse)
+				eventKey := "turn:" + strconv.Itoa(turnIndex) + ":tool.call:" + id
+				if id == "" {
+					eventKey = acpxEventKey(turnIndex, "tool.call", 0)
+				}
 				raw := map[string]any{
 					"type": "assistant",
 					"message": map[string]any{
@@ -3857,7 +4123,7 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 						}},
 					},
 				}
-				add("tool.call", map[string]any{"tool_use_id": id, "name": name, "input": input}, raw)
+				add("tool.call", acpxEventData(map[string]any{"tool_use_id": id, "name": name, "input": input}, turnIndex, "tool.call", eventKey), raw)
 			}
 		}
 		results, _ := agent["tool_results"].(map[string]any)
@@ -3869,6 +4135,10 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 			toolUseID := firstNonEmpty(stringField(result, "tool_use_id", "toolUseId", "id"), id)
 			text := acpxToolResultText(result)
 			isError, _ := result["is_error"].(bool)
+			eventKey := "turn:" + strconv.Itoa(turnIndex) + ":tool.output:" + toolUseID
+			if toolUseID == "" {
+				eventKey = acpxEventKey(turnIndex, "tool.output", 0)
+			}
 			raw := map[string]any{
 				"type": "user",
 				"message": map[string]any{
@@ -3886,7 +4156,7 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 					"is_error": isError,
 				},
 			}
-			add("tool.output", map[string]any{"tool_use_id": toolUseID, "text": text, "is_error": isError}, raw)
+			add("tool.output", acpxEventData(map[string]any{"tool_use_id": toolUseID, "text": text, "is_error": isError}, turnIndex, "tool.output", eventKey), raw)
 		}
 	}
 	closeActiveTurn(updatedAt)
@@ -4190,22 +4460,236 @@ func latestPromptFromEvents(events []protocol.TaskEvent) string {
 
 func mergeTaskEvents(base []protocol.TaskEvent, extra []protocol.TaskEvent) []protocol.TaskEvent {
 	if len(base) == 0 {
-		return compactStreamTaskEvents(append([]protocol.TaskEvent(nil), extra...))
+		return orderTaskEvents(compactStreamTaskEvents(append([]protocol.TaskEvent(nil), extra...)))
 	}
+	base = compactStreamTaskEvents(append([]protocol.TaskEvent(nil), base...))
+	extra = compactStreamTaskEvents(append([]protocol.TaskEvent(nil), extra...))
+	extra = rebaseACPXEventsAfterBase(base, extra)
 	merged := append([]protocol.TaskEvent(nil), base...)
 	seen := make(map[string]struct{}, len(merged))
 	for _, event := range merged {
-		seen[taskEventSignature(event)] = struct{}{}
+		for _, signature := range taskEventSignatures(event) {
+			seen[signature] = struct{}{}
+		}
 	}
 	for _, event := range extra {
-		signature := taskEventSignature(event)
-		if _, ok := seen[signature]; ok {
+		signatures := taskEventSignatures(event)
+		if hasSeenTaskEventSignature(seen, signatures) {
+			if updated, ok := replaceExistingTaskEventByStableKey(merged, event); ok {
+				merged = updated
+			}
 			continue
 		}
 		merged = append(merged, event)
-		seen[signature] = struct{}{}
+		for _, signature := range signatures {
+			seen[signature] = struct{}{}
+		}
 	}
-	return compactStreamTaskEvents(merged)
+	return orderTaskEvents(compactStreamTaskEvents(merged))
+}
+
+func replaceExistingTaskEventByStableKey(events []protocol.TaskEvent, event protocol.TaskEvent) ([]protocol.TaskEvent, bool) {
+	if key := taskEventACPXEventKey(event); key != "" && shouldReplaceACPXKeyedEvent(event) {
+		for index, existing := range events {
+			if taskEventACPXEventKey(existing) != key {
+				continue
+			}
+			event.EventID = existing.EventID
+			event.Sequence = existing.Sequence
+			event.Timestamp = existing.Timestamp
+			next := append([]protocol.TaskEvent(nil), events...)
+			next[index] = event
+			return next, true
+		}
+	}
+	return events, false
+}
+
+func rebaseACPXEventsAfterBase(base []protocol.TaskEvent, extra []protocol.TaskEvent) []protocol.TaskEvent {
+	if len(base) == 0 || len(extra) == 0 {
+		return extra
+	}
+	if !hasACPXEventKeyedEvents(base) || !hasACPXTurnZero(extra) {
+		return extra
+	}
+	if hasSharedACPXEventKey(base, extra) && !hasConflictingSharedACPXEventKey(base, extra) {
+		return extra
+	}
+	offset := maxACPXTurnIndex(base) + 1
+	if offset <= 0 {
+		return extra
+	}
+	rebased := make([]protocol.TaskEvent, len(extra))
+	for i, event := range extra {
+		rebased[i] = rebaseACPXEvent(event, offset)
+	}
+	return rebased
+}
+
+func hasACPXEventKeyedEvents(events []protocol.TaskEvent) bool {
+	for _, event := range events {
+		if taskEventACPXEventKey(event) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasACPXTurnZero(events []protocol.TaskEvent) bool {
+	for _, event := range events {
+		if turnIndex, ok := taskEventACPXTurnIndex(event); ok && turnIndex == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSharedACPXEventKey(left []protocol.TaskEvent, right []protocol.TaskEvent) bool {
+	keys := make(map[string]struct{})
+	for _, event := range left {
+		if key := taskEventACPXEventKey(event); key != "" {
+			keys[key] = struct{}{}
+		}
+	}
+	for _, event := range right {
+		if key := taskEventACPXEventKey(event); key != "" {
+			if _, ok := keys[key]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasConflictingSharedACPXEventKey(left []protocol.TaskEvent, right []protocol.TaskEvent) bool {
+	byKey := make(map[string]protocol.TaskEvent)
+	for _, event := range left {
+		if key := taskEventACPXEventKey(event); key != "" {
+			byKey[key] = event
+		}
+	}
+	for _, event := range right {
+		key := taskEventACPXEventKey(event)
+		if key == "" {
+			continue
+		}
+		existing, ok := byKey[key]
+		if !ok {
+			continue
+		}
+		if !sameACPXKeyedEvent(existing, event) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameACPXKeyedEvent(left protocol.TaskEvent, right protocol.TaskEvent) bool {
+	if left.EventType != right.EventType {
+		return false
+	}
+	leftText := taskEventComparableText(left)
+	rightText := taskEventComparableText(right)
+	if leftText != "" && rightText != "" {
+		return leftText == rightText
+	}
+	return true
+}
+
+func taskEventComparableText(event protocol.TaskEvent) string {
+	switch event.EventType {
+	case "user.prompt":
+		if text := textFieldFromEventJSON(event.Data, "prompt"); text != "" {
+			return text
+		}
+		return textFieldFromEventJSON(event.Raw, "prompt")
+	case "assistant.message", "assistant.thinking":
+		if text := textFieldFromEventJSON(event.Data, "text", "content"); text != "" {
+			return text
+		}
+		if text := assistantTextFromRawMessage(event.Raw); text != "" {
+			return text
+		}
+		return textFieldFromEventJSON(event.Raw, "text", "content")
+	default:
+		return ""
+	}
+}
+
+func textFieldFromEventJSON(raw json.RawMessage, keys ...string) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var data map[string]any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return ""
+	}
+	return strings.Join(strings.Fields(stringField(data, keys...)), " ")
+}
+
+func maxACPXTurnIndex(events []protocol.TaskEvent) int {
+	maxTurn := -1
+	for _, event := range events {
+		if turnIndex, ok := taskEventACPXTurnIndex(event); ok && turnIndex > maxTurn {
+			maxTurn = turnIndex
+		}
+	}
+	return maxTurn
+}
+
+func rebaseACPXEvent(event protocol.TaskEvent, offset int) protocol.TaskEvent {
+	for _, target := range []*json.RawMessage{&event.Data, &event.Raw} {
+		if target == nil || len(*target) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(*target, &data); err != nil {
+			continue
+		}
+		turnIndex, ok := intFieldOK(data, "acpx_turn_index", "acpxTurnIndex")
+		if !ok {
+			continue
+		}
+		newTurnIndex := turnIndex + offset
+		data["acpx_turn_index"] = newTurnIndex
+		if eventKey := stringField(data, "acpx_event_key", "acpxEventKey"); eventKey != "" {
+			data["acpx_event_key"] = rebaseACPXEventKey(eventKey, newTurnIndex)
+			delete(data, "acpxEventKey")
+		}
+		if raw, err := json.Marshal(data); err == nil {
+			*target = raw
+		}
+	}
+	return event
+}
+
+func rebaseACPXEventKey(eventKey string, turnIndex int) string {
+	parts := strings.Split(eventKey, ":")
+	if len(parts) >= 4 && parts[0] == "turn" {
+		parts[1] = strconv.Itoa(turnIndex)
+		return strings.Join(parts, ":")
+	}
+	return eventKey
+}
+
+func orderTaskEvents(events []protocol.TaskEvent) []protocol.TaskEvent {
+	ordered := append([]protocol.TaskEvent(nil), events...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].Timestamp != ordered[j].Timestamp {
+			if ordered[i].Timestamp == 0 {
+				return false
+			}
+			if ordered[j].Timestamp == 0 {
+				return true
+			}
+			return ordered[i].Timestamp < ordered[j].Timestamp
+		}
+		if ordered[i].Sequence != ordered[j].Sequence {
+			return ordered[i].Sequence < ordered[j].Sequence
+		}
+		return ordered[i].EventID < ordered[j].EventID
+	})
+	return ordered
 }
 
 func compactStreamTaskEvents(events []protocol.TaskEvent) []protocol.TaskEvent {
@@ -4264,21 +4748,120 @@ func streamTaskEventKey(event protocol.TaskEvent) (string, map[string]any, bool)
 }
 
 func taskEventSignature(event protocol.TaskEvent) string {
+	signatures := taskEventSignatures(event)
+	if len(signatures) > 0 {
+		return signatures[0]
+	}
+	return fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID)
+}
+
+func taskEventSignatures(event protocol.TaskEvent) []string {
+	signatures := make([]string, 0, 3)
+	if eventKey := taskEventACPXEventKey(event); eventKey != "" {
+		signatures = append(signatures, "acpx:"+eventKey)
+		return signatures
+	}
+	if semantic := semanticTaskEventSignature(event); semantic != "" {
+		signatures = append(signatures, semantic)
+	}
+	if turnID := taskEventTurnID(event); turnID != "" && isTurnScopedTaskEvent(event.EventType) {
+		signatures = append(signatures, event.EventType+":turn:"+turnID)
+	}
 	if event.EventType == "user.prompt" {
+		if event.EventID != "" {
+			signatures = append(signatures, event.EventType+":id:"+event.EventID)
+		}
+		return signatures
+	}
+	if len(event.Data) > 0 {
+		signatures = append(signatures, event.EventType+":"+string(event.Data))
+		return signatures
+	}
+	if len(event.Raw) > 0 {
+		signatures = append(signatures, event.EventType+":"+string(event.Raw))
+		return signatures
+	}
+	signatures = append(signatures, fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID))
+	return signatures
+}
+
+func taskEventACPXEventKey(event protocol.TaskEvent) string {
+	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
+		if len(raw) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(raw, &data); err != nil {
+			continue
+		}
+		if key := stringField(data, "acpx_event_key", "acpxEventKey"); key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+func nextACPXTurnIndex(events []protocol.TaskEvent) int {
+	maxTurn := -1
+	promptCount := 0
+	for _, event := range events {
+		if turnIndex, ok := taskEventACPXTurnIndex(event); ok && turnIndex > maxTurn {
+			maxTurn = turnIndex
+		}
+		if event.EventType == "user.prompt" {
+			promptCount++
+		}
+	}
+	if maxTurn >= 0 {
+		return maxTurn + 1
+	}
+	return promptCount
+}
+
+func taskEventACPXTurnIndex(event protocol.TaskEvent) (int, bool) {
+	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
+		if len(raw) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(raw, &data); err != nil {
+			continue
+		}
+		if turnIndex, ok := intFieldOK(data, "acpx_turn_index", "acpxTurnIndex"); ok {
+			return turnIndex, true
+		}
+	}
+	return 0, false
+}
+
+func hasSeenTaskEventSignature(seen map[string]struct{}, signatures []string) bool {
+	for _, signature := range signatures {
+		if _, ok := seen[signature]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func semanticTaskEventSignature(event protocol.TaskEvent) string {
+	switch event.EventType {
+	case "user.prompt":
+		return ""
+	case "task.completed", "turn.completed", "task.failed", "turn.failed", "task.killed", "task.stopped":
 		if turnID := taskEventTurnID(event); turnID != "" {
 			return event.EventType + ":turn:" + turnID
 		}
-		if event.EventID != "" {
-			return event.EventType + ":id:" + event.EventID
-		}
 	}
-	if len(event.Data) > 0 {
-		return event.EventType + ":" + string(event.Data)
+	return ""
+}
+
+func isTurnScopedTaskEvent(eventType string) bool {
+	switch eventType {
+	case "task.started", "user.prompt", "task.completed", "turn.completed", "task.failed", "turn.failed", "task.killed", "task.stopped":
+		return true
+	default:
+		return false
 	}
-	if len(event.Raw) > 0 {
-		return event.EventType + ":" + string(event.Raw)
-	}
-	return fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID)
 }
 
 func taskEventTurnID(event protocol.TaskEvent) string {
@@ -4370,7 +4953,7 @@ func (d *Daemon) emitTaskEventWithNextSequence(taskID, eventType string, data an
 		record.StartedAt = now
 	}
 	record.UpdatedAt = now
-	record.Events = append(record.Events, event)
+	record.Events = upsertTaskEvent(record.Events, event)
 	d.history[taskID] = record
 	if isDirectACPRecord(record) {
 		if err := d.saveDirectACPStoreLocked(); err != nil {
@@ -4381,6 +4964,51 @@ func (d *Daemon) emitTaskEventWithNextSequence(taskID, eventType string, data an
 
 	d.sendTaskEvent(event)
 	d.maybeSendAgentCompletionAlert(record, event)
+}
+
+func upsertTaskEvent(events []protocol.TaskEvent, event protocol.TaskEvent) []protocol.TaskEvent {
+	if key := taskEventACPXEventKey(event); key != "" && shouldReplaceACPXKeyedEvent(event) {
+		for index, existing := range events {
+			if taskEventACPXEventKey(existing) != key {
+				continue
+			}
+			event.EventID = existing.EventID
+			event.Sequence = existing.Sequence
+			event.Timestamp = existing.Timestamp
+			next := append([]protocol.TaskEvent(nil), events...)
+			next[index] = event
+			return next
+		}
+	}
+	return append(events, event)
+}
+
+func shouldReplaceACPXKeyedEvent(event protocol.TaskEvent) bool {
+	switch event.EventType {
+	case "assistant.message", "assistant.thinking":
+		data := taskEventDataMap(event)
+		if streamID := stringField(data, "stream_id", "streamId"); streamID == "" {
+			return false
+		}
+		return true
+	case "tool.call", "tool.output":
+		return true
+	default:
+		return false
+	}
+}
+
+func taskEventDataMap(event protocol.TaskEvent) map[string]any {
+	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
+		if len(raw) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(raw, &data); err == nil {
+			return data
+		}
+	}
+	return nil
 }
 
 func (d *Daemon) emitTaskEvent(taskID, eventType string, sequence int64, data any, raw json.RawMessage) {
@@ -4433,14 +5061,17 @@ func injectUniqueFields(data any, seq int64) any {
 	return data
 }
 
-func userPromptTaskEvent(taskID, turnID, prompt string, timestamp int64, sequence int64) protocol.TaskEvent {
+func userPromptTaskEvent(taskID, turnID, prompt string, timestamp int64, sequence int64, acpxTurnIndex int) protocol.TaskEvent {
 	prompt = strings.TrimSpace(prompt)
 	if taskID == "" || prompt == "" {
 		return protocol.TaskEvent{}
 	}
-	data := map[string]string{"prompt": prompt}
+	data := map[string]any{"prompt": prompt}
 	if turnID != "" {
 		data["turn_id"] = turnID
+	}
+	if acpxTurnIndex >= 0 {
+		data = acpxEventData(data, acpxTurnIndex, "user.prompt", acpxEventKey(acpxTurnIndex, "user.prompt", 0))
 	}
 	dataRaw, _ := json.Marshal(data)
 	if timestamp == 0 {
@@ -4462,7 +5093,7 @@ func normalizedTaskHistoryEvents(record protocol.TaskRecord) []protocol.TaskEven
 	if strings.TrimSpace(record.Prompt) == "" || hasUserPromptEvent(events) {
 		return events
 	}
-	promptEvent := userPromptTaskEvent(record.TaskID, "", record.Prompt, firstNonZero(record.StartedAt, record.UpdatedAt, protocolNow()), 0)
+	promptEvent := userPromptTaskEvent(record.TaskID, "", record.Prompt, firstNonZero(record.StartedAt, record.UpdatedAt, protocolNow()), 0, -1)
 	if promptEvent.TaskID == "" {
 		return events
 	}

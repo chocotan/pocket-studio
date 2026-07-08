@@ -302,7 +302,7 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 	}
 	record.Status = "running"
 	record.UpdatedAt = now
-	userEvent := userPromptTaskEvent(task.TaskID, turnID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events))
+	userEvent := userPromptTaskEvent(task.TaskID, turnID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events), -1)
 	if userEvent.TaskID != "" {
 		record.Events = append(record.Events, userEvent)
 	}

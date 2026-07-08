@@ -122,9 +122,32 @@ export function sortTaskEventsForDisplay(events: TaskEvent[]) {
 
 export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
   const existingIds = new Set(prev.map((event) => event.event_id));
+  const existingKeys = new Set(prev.map((event) => taskEventStableKey(event)).filter(Boolean));
   const merged = [...prev];
   for (const event of nextEvents) {
+    const stableKey = taskEventStableKey(event);
     if (existingIds.has(event.event_id)) {
+      const existingIndex = merged.findIndex((existing) => existing.event_id === event.event_id);
+      if (existingIndex >= 0) {
+        const oldStableKey = taskEventStableKey(merged[existingIndex]);
+        if (oldStableKey) existingKeys.delete(oldStableKey);
+        merged[existingIndex] = event;
+        if (stableKey) existingKeys.add(stableKey);
+      }
+      continue;
+    }
+    if (stableKey && existingKeys.has(stableKey)) {
+      const existingIndex = merged.findIndex((existing) => taskEventStableKey(existing) === stableKey);
+      if (existingIndex >= 0 && shouldReplaceStableTaskEvent(event)) {
+        existingIds.delete(merged[existingIndex].event_id);
+        merged[existingIndex] = {
+          ...event,
+          event_id: merged[existingIndex].event_id,
+          sequence: merged[existingIndex].sequence,
+          timestamp: merged[existingIndex].timestamp,
+        };
+        existingIds.add(merged[existingIndex].event_id);
+      }
       continue;
     }
     let isDuplicate = false;
@@ -153,10 +176,25 @@ export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
     }
     if (!isDuplicate) {
       existingIds.add(event.event_id);
+      if (stableKey) existingKeys.add(stableKey);
       merged.push(event);
     }
   }
   return merged;
+}
+
+function taskEventStableKey(event: TaskEvent) {
+  const data = getMetadata(event.data);
+  const raw = getMetadata(event.raw);
+  const key = data?.acpx_event_key || data?.acpxEventKey || raw?.acpx_event_key || raw?.acpxEventKey;
+  return typeof key === "string" && key.trim() ? `acpx:${key.trim()}` : "";
+}
+
+function shouldReplaceStableTaskEvent(event: TaskEvent) {
+  if (event.event_type === "tool.call" || event.event_type === "tool.output") return true;
+  if (event.event_type !== "assistant.message" && event.event_type !== "assistant.thinking") return false;
+  const data = getMetadata(event.data);
+  return typeof data?.stream_id === "string" && data.stream_id.trim().length > 0;
 }
 
 export function makeLocalUserPromptEvent(taskID: string, turnID: string, prompt: string, sequence?: number): TaskEvent {
