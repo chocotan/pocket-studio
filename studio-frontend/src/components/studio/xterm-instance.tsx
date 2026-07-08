@@ -626,7 +626,8 @@ export function XtermInstance({
         if (!term) return;
         if (isAntigravityCommand(currentCommandRef.current || "")) {
           const payload = normalizePasteLineFeeds(text);
-          term.input(term.modes.bracketedPasteMode ? `\x1b[200~${payload}\x1b[201~` : payload);
+          const hasLineBreak = payload.includes("\n");
+          term.input(term.modes.bracketedPasteMode || hasLineBreak ? `\x1b[200~${payload}\x1b[201~` : payload);
           if (term.textarea) term.textarea.value = "";
           return;
         }

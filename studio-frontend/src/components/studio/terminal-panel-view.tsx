@@ -438,14 +438,13 @@ function TerminalPanelViewComponent({
                         {isCrossProject && tabProject && (() => {
                           const tabDevice = devices.find((d) => d.id === tabProject.device_id);
                           const devName = deviceDisplayName(tabDevice, tabProject.device_id);
-                          const devInitial = devName.trim().charAt(0).toUpperCase();
-                          const projInitial = tabProject.name.trim().charAt(0).toUpperCase();
+                          const crossProjectLabel = `${devName}/${tabProject.name}`;
                           return (
                             <span
-                              className="relative z-10 shrink-0 bg-indigo-50/80 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 px-1 py-0.5 rounded text-[8px] font-bold border border-indigo-100/50 dark:border-indigo-900/50"
+                              className="relative z-10 flex min-w-0 max-w-[160px] shrink items-center rounded border border-indigo-100/60 bg-indigo-50/80 px-1.5 py-0.5 text-[9px] font-bold text-indigo-700 dark:border-indigo-900/50 dark:bg-indigo-950/40 dark:text-indigo-300"
                               title={`机器: ${devName} | 项目: ${tabProject.name}`}
                             >
-                              {devInitial}:{projInitial}
+                              <span className="min-w-0 truncate">{crossProjectLabel}</span>
                             </span>
                           );
                         })()}

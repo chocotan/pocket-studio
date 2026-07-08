@@ -359,6 +359,9 @@ export function StudioWorkspace({
 
     const isCrossProject = (tab.projectId || projectId) !== projectId;
     const tabProject = projects.find((proj) => proj.id === (tab.projectId || projectId));
+    const tabDevice = tabProject ? devices.find((device) => device.id === tabProject.device_id) : undefined;
+    const tabDeviceName = tabProject ? deviceDisplayName(tabDevice, tabProject.device_id) : "";
+    const crossProjectLabel = tabProject ? `${tabDeviceName}/${tabProject.name}` : "";
 
     return (
       <button
@@ -390,7 +393,7 @@ export function StudioWorkspace({
               ? "bg-muted/40 border-border/40 text-muted-foreground opacity-60 hover:opacity-100"
               : "bg-card border-border text-foreground hover:bg-accent"
         }`}
-        title={tab.title}
+        title={tabProject && isCrossProject ? `${tabDeviceName} / ${tabProject.name}` : tab.title}
       >
         <span className="flex h-3.5 w-3.5 items-center justify-center rounded">
           {isFileExplorer ? (
@@ -413,8 +416,8 @@ export function StudioWorkspace({
         </span>
         
         {isCrossProject && tabProject && (
-          <span className="absolute -top-1.5 -right-1.5 text-[7px] bg-amber-500 text-white rounded px-0.5 border border-amber-600 font-bold scale-90">
-            P
+          <span className="absolute -top-1.5 -right-1.5 max-w-[96px] truncate rounded border border-amber-600 bg-amber-500 px-1 text-[7px] font-bold text-white shadow-sm">
+            {crossProjectLabel}
           </span>
         )}
       </button>
