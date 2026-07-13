@@ -12,6 +12,7 @@ import { FileViewerTab } from "./file-viewer-tab";
 import { SplitBottomIcon, SplitLeftIcon, SplitRightIcon, SplitTopIcon } from "./split-icons";
 import type { TerminalPanel, StudioTab } from "./studio-layout";
 import { AgentChatTab } from "./agent-chat/agent-chat-tab";
+import { GoSDKChatTab } from "./agent-chat/gosdk-chat-tab";
 import type { Project } from "./studio-dashboard";
 import type { Device } from "@/lib/types";
 import { deviceDisplayName } from "./project-switcher";
@@ -741,13 +742,23 @@ function TerminalPanelViewComponent({
                     theme={theme}
                   />
                 ) : tab.kind === "agent_chat" ? (
-                  <AgentChatTab
-                    project={tabProject}
-                    tab={tab}
-                    active={active}
-                    workspacePath={tabWorkspacePath}
-                    onUpdateTabProperties={onUpdateTabProperties}
-                  />
+                  tab.agentRuntime === "gosdk" ? (
+                    <GoSDKChatTab
+                      project={tabProject}
+                      tab={tab}
+                      active={active}
+                      workspacePath={tabWorkspacePath}
+                      onUpdateTabProperties={onUpdateTabProperties}
+                    />
+                  ) : (
+                    <AgentChatTab
+                      project={tabProject}
+                      tab={tab}
+                      active={active}
+                      workspacePath={tabWorkspacePath}
+                      onUpdateTabProperties={onUpdateTabProperties}
+                    />
+                  )
                 ) : (
                   <XtermInstance
                     projectId={tabProjectId}
@@ -809,7 +820,7 @@ export function TerminalTypeMenu({
   onNewFile?: (dirPath: string) => void;
   onNewFolder?: (dirPath: string) => void;
 }) {
-  const [submenu, setSubmenu] = useState<"terminal" | "acpx" | "acp" | null>(null);
+  const [submenu, setSubmenu] = useState<"terminal" | "acpx" | "acp" | "gosdk" | null>(null);
 
   const groupedProjects = useMemo(() => {
     const groups: Array<{ deviceName: string; list: Project[] }> = [];
@@ -903,6 +914,7 @@ export function TerminalTypeMenu({
             <MenuBranch label="ACPX会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="amber" onClick={() => setSubmenu("acpx")} />
           )}
           <MenuBranch label="ACP会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="emerald" onClick={() => setSubmenu("acp")} />
+          <MenuBranch label="GoSDK会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="indigo" onClick={() => setSubmenu("gosdk")} />
           <div className="border-t border-slate-100 my-1" />
           <button
             type="button"
@@ -941,12 +953,25 @@ export function TerminalTypeMenu({
             />
           ))}
         </>
-      ) : (
+      ) : submenu === "acp" ? (
         <>
           <MenuHeader label="ACP会话" onBack={() => setSubmenu(null)} />
           <MenuItem label="opencode" icon={<OpenCode width={14} height={14} />} tone="amber" onClick={() => onAddAgentChat("opencode", "direct_acp", selectedProjId)} />
           <MenuItem label="kilo code" icon={<KiloCode width={14} height={14} />} tone="lime" onClick={() => onAddAgentChat("kilo", "direct_acp", selectedProjId)} />
           <MenuItem label="codex" icon={<Codex width={14} height={14} />} tone="emerald" onClick={() => onAddAgentChat("codex", "direct_acp", selectedProjId)} />
+        </>
+      ) : (
+        <>
+          <MenuHeader label="GoSDK会话" onBack={() => setSubmenu(null)} />
+          {acpxItems.map((item) => (
+            <MenuItem
+              key={item.agent}
+              label={item.label}
+              icon={item.icon}
+              tone={item.tone}
+              onClick={() => onAddAgentChat(item.agent, "gosdk", selectedProjId)}
+            />
+          ))}
         </>
       )}
     </div>

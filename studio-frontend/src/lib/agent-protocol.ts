@@ -58,6 +58,110 @@ type AgentEventLike = {
   metadata?: Record<string, unknown>;
 };
 
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  shell_command: "bash",
+  "functions_shell_command": "bash",
+  exec_command: "exec_command",
+  "functions_exec_command": "exec_command",
+  execute_command: "bash",
+  run_command: "bash",
+  shell: "bash",
+  write_stdin: "bash",
+  read_file: "read",
+  read_text_file: "read",
+  readfile: "read",
+  view: "read",
+  "functions_read": "read",
+  mcp_acp_read: "read",
+  edit_file: "edit",
+  update_file: "edit",
+  replace_in_file: "edit",
+  editfile: "edit",
+  change: "edit",
+  changes: "edit",
+  str_replace: "edit",
+  "functions_edit": "edit",
+  mcp_acp_edit: "edit",
+  write_file: "write",
+  write_to_file: "write",
+  writefile: "write",
+  create_file: "write",
+  "functions_write": "write",
+  mcp_acp_write: "write",
+  apply_patch: "apply_patch",
+  "functions_apply_patch": "apply_patch",
+  todowrite: "todowrite",
+  todo_write: "todowrite",
+  update_todo_list: "todowrite",
+  searchtext: "grep",
+  search_text: "grep",
+  search_files: "grep",
+  grep: "grep",
+  glob: "glob",
+  list_files: "glob",
+  web_fetch: "webfetch",
+  webfetch: "webfetch",
+  fetch: "webfetch",
+  browser_action: "webfetch",
+  web_search: "websearch",
+  websearch: "websearch",
+  agent: "agent",
+  task: "agent",
+  spawn_agent: "agent",
+  delegate_to_agent: "agent",
+};
+
+const IGNORED_TOOL_TYPE_NAMES = new Set([
+  "assistant",
+  "user",
+  "tool",
+  "tool_use",
+  "tool_result",
+  "content",
+  "text",
+]);
+
+function canonicalizeToolName(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^[:：'"`“”‘’\s]+/, "")
+    .replace(/['"`“”‘’\s]+$/, "")
+    .replace(/[().]/g, "_")
+    .replace(/[\s:/-]+/g, "_")
+    .replace(/_+/g, "_");
+}
+
+export function normalizeAgentToolName(value: string) {
+  const canonical = canonicalizeToolName(value);
+  if (!canonical) return "tool";
+  const exact = TOOL_NAME_ALIASES[canonical];
+  if (exact) return exact;
+  if (/^mcp_.+_delegate_to_agent$/.test(canonical)) return "agent";
+  if (/^mcp_.+_ask_user_question$/.test(canonical)) return "question";
+  if (/^mcp_.+_check_user_feedback$/.test(canonical)) return "feedback";
+  if (canonical.includes("apply_patch")) return "apply_patch";
+  if (/\b(?:bash|shell|exec|execute)_?(?:command|cmd)?\b/.test(canonical)) {
+    return "bash";
+  }
+  if (canonical.startsWith("read_") || canonical.endsWith("_read")) return "read";
+  if (canonical.startsWith("write_") || canonical.endsWith("_write")) return "write";
+  if (
+    canonical.startsWith("edit_") ||
+    canonical.endsWith("_edit") ||
+    canonical.includes("replace_in_file")
+  ) {
+    return "edit";
+  }
+  if (canonical.includes("web_search")) return "websearch";
+  if (canonical.includes("web_fetch")) return "webfetch";
+  if (canonical.includes("grep") || canonical.includes("search_files")) return "grep";
+  if (canonical.includes("glob") || canonical.includes("list_files")) return "glob";
+  if (canonical.includes("todo")) return "todowrite";
+  if (canonical.includes("subagent") || canonical.includes("agent")) return "agent";
+  return canonical;
+}
+
 function getProtocolRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object"
     ? (value as Record<string, unknown>)
@@ -364,6 +468,11 @@ export function buildAgentToolCallItems(
     } else if (hasToolValue(output)) {
       if (appendOutput) {
         nextOutput = appendToolOutput(existing?.output, output);
+      } else if (isDiffOutput(existing?.output) && !isDiffOutput(output)) {
+        nextOutput = {
+          ...(existing?.output as Record<string, unknown>),
+          result: output,
+        };
       } else if (typeof existing?.output === "string" && existing.output.trim()) {
         // If we already have terminal output and the new output is just exit_code, append it or keep the terminal output
         if (output && typeof output === "object") {
@@ -405,6 +514,11 @@ export function buildAgentToolCallItems(
     (left, right) =>
       new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()
   );
+}
+
+function isDiffOutput(value: unknown) {
+  const record = getProtocolRecord(value);
+  return record?.type === "diff";
 }
 
 function isTerminalToolStatus(status: unknown) {
@@ -474,9 +588,13 @@ function getToolUpdateFromEvent(
 }
 
 function normalizeToolUpdate(record: Record<string, unknown>) {
-  const toolCallId = record.toolCallId || record.tool_call_id;
+  const toolCallId =
+    record.toolCallId || record.tool_call_id || record.tool_use_id;
+  const title = getToolCardTitle(record, "");
+  const kind = inferAgentToolKind(record, title);
   return {
     ...record,
+    ...(kind ? { kind } : {}),
     ...(toolCallId ? { toolCallId, tool_call_id: toolCallId } : {}),
   };
 }
@@ -485,7 +603,7 @@ function getToolCallId(record: Record<string, unknown> | null) {
   if (!record) {
     return "";
   }
-  return String(record.toolCallId || record.tool_call_id || record.id || "");
+  return String(record.toolCallId || record.tool_call_id || record.tool_use_id || record.id || "");
 }
 
 function getToolCardTitle(
@@ -503,15 +621,32 @@ function getToolCardTitle(
       record.tool ||
       existingTitle ||
       fallback ||
-      displayToolKindForTitle(getToolKind(record)) ||
+      displayToolKindForTitle(getRawToolKind(record)) ||
       "工具调用"
   );
 }
 
+function getRawToolKind(record: Record<string, unknown> | null) {
+  if (!record) {
+    return undefined;
+  }
+  const kind = record.kind || record.type;
+  if (typeof kind !== "string") {
+    return undefined;
+  }
+  const normalized = normalizeAgentToolName(kind);
+  return IGNORED_TOOL_TYPE_NAMES.has(normalized) ? undefined : normalized;
+}
+
 function displayToolKindForTitle(kind?: string) {
   switch (kind) {
+    case "bash":
+    case "exec_command":
     case "execute":
       return "命令执行";
+    case "write":
+      return "文件写入";
+    case "apply_patch":
     case "edit":
       return "文件编辑";
     case "read":
@@ -537,10 +672,30 @@ function getToolCompletionTime(
   if (status === "completed" || status === "success" || status === "failed" || status === "error") {
     return eventCreatedAt;
   }
-  if (hasToolValue(getToolOutput(record))) {
+  if (hasExplicitToolOutput(record)) {
     return eventCreatedAt;
   }
   return undefined;
+}
+
+function hasExplicitToolOutput(record: Record<string, unknown> | null) {
+  if (!record) return false;
+  for (const key of [
+    "rawOutputDelta",
+    "raw_output_delta",
+    "outputDelta",
+    "output_delta",
+    "rawOutput",
+    "raw_output",
+    "output",
+    "result",
+  ]) {
+    if (hasToolValue(record[key])) {
+      return true;
+    }
+  }
+  const content = simplifyToolOutput(record.content);
+  return isToolResultContent(content);
 }
 
 function shouldAppendToolOutput(record: Record<string, unknown> | null) {
@@ -564,8 +719,104 @@ function getToolKind(record: Record<string, unknown> | null) {
   if (!record) {
     return undefined;
   }
-  const kind = record.kind || record.type;
-  return typeof kind === "string" ? kind : undefined;
+  return inferAgentToolKind(record, getToolCardTitle(record, ""));
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function inputRecordFromValue(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "string") {
+    return parseJsonRecord(value);
+  }
+  if (Array.isArray(value)) {
+    return null;
+  }
+  return getProtocolRecord(value);
+}
+
+function hasAnyToolKey(record: Record<string, unknown>, keys: string[]) {
+  return keys.some(
+    (key) => record[key] !== undefined && record[key] !== null && record[key] !== ""
+  );
+}
+
+function getStringFromRecord(record: Record<string, unknown> | null, keys: string[]) {
+  if (!record) return "";
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
+function inferAgentToolKind(
+  record: Record<string, unknown> | null,
+  title: string
+): string | undefined {
+  if (!record) {
+    return undefined;
+  }
+
+  const rawInput = getToolInput(record);
+  if (typeof rawInput === "string" && rawInput.includes("*** Begin Patch")) {
+    return "apply_patch";
+  }
+
+  const input = inputRecordFromValue(rawInput);
+  const rawKind = getRawToolKind(record);
+  const normalizedTitle = normalizeAgentToolName(title);
+  const metaToolName = getClaudeCodeToolName(record);
+  const normalizedMeta = metaToolName ? normalizeAgentToolName(metaToolName) : "";
+
+  if (input) {
+    if (hasAnyToolKey(input, ["subagent_type", "agent_type"])) return "agent";
+    if (hasAnyToolKey(input, ["todos", "todo_list", "items"])) return "todowrite";
+    if (hasAnyToolKey(input, ["command", "cmd", "script", "argv", "command_args"])) {
+      return rawKind === "write" || normalizedTitle === "write" ? "write" : "bash";
+    }
+    if (hasAnyToolKey(input, ["old_string", "new_string", "replace_all", "changes"])) {
+      return "edit";
+    }
+    if (hasAnyToolKey(input, ["content", "new_source", "cell_type", "edit_mode"])) {
+      return "write";
+    }
+    if (hasAnyToolKey(input, ["query"])) return "websearch";
+    if (hasAnyToolKey(input, ["url", "uri", "href"])) return "webfetch";
+    if (hasAnyToolKey(input, ["pattern"])) return "grep";
+    if (hasAnyToolKey(input, ["glob"])) return "glob";
+    if (hasAnyToolKey(input, ["file_path", "filePath", "notebook_path", "path", "filename"])) {
+      if (rawKind && ["read", "write", "edit", "apply_patch"].includes(rawKind)) {
+        return rawKind;
+      }
+      if (["read", "write", "edit", "apply_patch"].includes(normalizedTitle)) {
+        return normalizedTitle;
+      }
+      return "read";
+    }
+  }
+
+  if (rawKind) return rawKind;
+  if (normalizedMeta !== "tool") return normalizedMeta;
+  if (normalizedTitle !== "tool") return normalizedTitle;
+  return undefined;
+}
+
+function getClaudeCodeToolName(record: Record<string, unknown>) {
+  const meta = getNestedRecord(record, "_meta") ?? getNestedRecord(record, "meta");
+  const claudeCode = meta ? getNestedRecord(meta, "claudeCode") : null;
+  const toolName = claudeCode?.toolName;
+  return typeof toolName === "string" && toolName.trim() ? toolName.trim() : "";
 }
 
 function getToolTerminalId(record: Record<string, unknown> | null) {
@@ -665,6 +916,13 @@ function getToolOutput(record: Record<string, unknown> | null): unknown {
   if (!record) {
     return undefined;
   }
+  const kind = getToolKind(record);
+  const input = getToolInput(record);
+  const inputDiff = getInputDiffPreview(kind, input);
+  if (inputDiff) {
+    return inputDiff;
+  }
+
   for (const key of [
     "rawOutputDelta",
     "raw_output_delta",
@@ -686,6 +944,133 @@ function getToolOutput(record: Record<string, unknown> | null): unknown {
     return content;
   }
   return undefined;
+}
+
+function getInputDiffPreview(kind: string | undefined, input: unknown): unknown {
+  if (!kind) return undefined;
+  if (kind === "apply_patch") {
+    const patch = extractPatchText(input);
+    return patch ? { kind: "patch", patch, type: "diff" } : undefined;
+  }
+  const inputRecord = inputRecordFromValue(input);
+  if (!inputRecord) return undefined;
+
+  const changes = normalizeEditChanges(inputRecord);
+  if (changes.length > 0) {
+    return { changes, kind: "modify", type: "diff" };
+  }
+
+  const path = getStringFromRecord(inputRecord, [
+    "file_path",
+    "filePath",
+    "notebook_path",
+    "path",
+    "filename",
+  ]);
+  if (!path) return undefined;
+
+  if (kind === "write") {
+    const newText = getStringFromRecord(inputRecord, [
+      "content",
+      "new_source",
+      "newText",
+      "new_text",
+    ]);
+    if (newText || hasAnyToolKey(inputRecord, ["content", "new_source", "newText", "new_text"])) {
+      return {
+        changes: [{ kind: "create", newText, oldText: "", path }],
+        kind: "create",
+        newText,
+        oldText: "",
+        path,
+        type: "diff",
+      };
+    }
+  }
+
+  if (kind === "edit") {
+    const oldText = getStringFromRecord(inputRecord, ["old_string", "oldText", "old_text"]);
+    const newText = getStringFromRecord(inputRecord, ["new_string", "newText", "new_text"]);
+    if (
+      oldText ||
+      newText ||
+      hasAnyToolKey(inputRecord, ["old_string", "new_string", "oldText", "newText"])
+    ) {
+      return {
+        changes: [{ kind: "modify", newText, oldText, path }],
+        kind: "modify",
+        newText,
+        oldText,
+        path,
+        type: "diff",
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function extractPatchText(input: unknown) {
+  if (typeof input === "string") {
+    const parsed = parseJsonRecord(input);
+    if (!parsed) return input.includes("*** Begin Patch") ? input : "";
+    return extractPatchText(parsed);
+  }
+  const inputRecord = inputRecordFromValue(input);
+  if (!inputRecord) return "";
+  for (const key of ["patch", "input", "content", "text"]) {
+    const value = inputRecord[key];
+    if (typeof value === "string" && value.includes("*** Begin Patch")) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function normalizeEditChanges(input: Record<string, unknown>) {
+  const rawChanges = input.changes;
+  if (!Array.isArray(rawChanges)) {
+    return [];
+  }
+  const normalized: Array<Record<string, string>> = [];
+  for (const raw of rawChanges) {
+    const change = inputRecordFromValue(raw);
+    if (!change) continue;
+    const path = getStringFromRecord(change, [
+      "file_path",
+      "filePath",
+      "path",
+      "filename",
+    ]);
+    const oldText = getStringFromRecord(change, [
+      "old_string",
+      "oldText",
+      "old_text",
+      "before",
+    ]);
+    const newText = getStringFromRecord(change, [
+      "new_string",
+      "newText",
+      "new_text",
+      "content",
+      "after",
+    ]);
+    const patch = getStringFromRecord(change, [
+      "patch",
+      "diff",
+      "unifiedDiff",
+      "unified_diff",
+    ]);
+    if (!path && !patch) continue;
+    normalized.push({
+      kind: getStringFromRecord(change, ["kind", "type", "operation"]) || "modify",
+      newText,
+      oldText,
+      patch,
+      path,
+    });
+  }
+  return normalized;
 }
 
 function isToolResultContent(value: unknown) {

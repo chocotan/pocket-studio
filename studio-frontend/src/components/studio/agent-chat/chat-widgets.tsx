@@ -18,7 +18,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import type { AgentToolCallItem } from "@/lib/agent-protocol";
+import { normalizeAgentToolName, type AgentToolCallItem } from "@/lib/agent-protocol";
 import type { ChatMessage } from "./types";
 
 type MarkdownCodeProps = {
@@ -109,6 +109,16 @@ function getRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function parseRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "string") return getRecord(value);
+  try {
+    const parsed = JSON.parse(value);
+    return getRecord(parsed);
+  } catch {
+    return null;
+  }
+}
+
 function getStringField(record: Record<string, unknown> | null, keys: string[]) {
   if (!record) return "";
   for (const key of keys) {
@@ -127,6 +137,10 @@ function stringifyValue(value: unknown): string {
   const record = getRecord(value);
   if (!record) return "";
   return getStringField(record, ["command", "cmd", "path", "file_path", "filePath", "query", "pattern", "url", "name", "title"]);
+}
+
+function firstLine(value: string) {
+  return value.split(/\r?\n/).find((line) => line.trim())?.trim() || value.trim();
 }
 
 function getArrayField(record: Record<string, unknown> | null, keys: string[]) {
@@ -151,50 +165,87 @@ function diffOutputRecord(output: unknown) {
   return record?.type === "diff" ? record : null;
 }
 
+type DiffChange = {
+  kind?: string;
+  newText?: string;
+  oldText?: string;
+  patch?: string;
+  path?: string;
+};
+
+function diffChanges(outputDiff: Record<string, unknown> | null): DiffChange[] {
+  if (!outputDiff) return [];
+  const changes = Array.isArray(outputDiff.changes) ? outputDiff.changes : [];
+  const normalized: DiffChange[] = [];
+  for (const item of changes) {
+    const record = getRecord(item);
+    if (!record) continue;
+    normalized.push({
+      kind: getStringField(record, ["kind", "type", "operation"]) || undefined,
+      newText: typeof record.newText === "string" ? record.newText : getStringField(record, ["new_text", "new_string", "content"]),
+      oldText: typeof record.oldText === "string" ? record.oldText : getStringField(record, ["old_text", "old_string"]),
+      patch: getStringField(record, ["patch", "diff", "unifiedDiff", "unified_diff"]),
+      path: getStringField(record, ["path", "file_path", "filePath", "filename"]),
+    });
+  }
+  if (normalized.length > 0) return normalized;
+  const path = getStringField(outputDiff, ["path"]);
+  const patch = getStringField(outputDiff, ["patch", "diff", "unifiedDiff", "unified_diff"]);
+  const oldText = typeof outputDiff.oldText === "string" ? outputDiff.oldText : undefined;
+  const newText = typeof outputDiff.newText === "string" ? outputDiff.newText : undefined;
+  if (path || patch || oldText !== undefined || newText !== undefined) {
+    return [{ kind: getStringField(outputDiff, ["kind"]), newText, oldText, patch, path }];
+  }
+  return [];
+}
+
 function extractToolTarget(item: AgentToolCallItem) {
-  const input = getRecord(item.input);
+  const input = parseRecord(item.input);
   const outputDiff = diffOutputRecord(item.output);
-  const outputPath = getStringField(outputDiff, ["path"]);
-  const inputPath = getStringField(input, ["path", "file_path", "filePath", "filename"]);
+  const changes = diffChanges(outputDiff);
+  const outputPath = getStringField(outputDiff, ["path"]) || changes.find((change) => change.path)?.path || "";
+  const inputPath = getStringField(input, ["path", "file_path", "filePath", "notebook_path", "filename"]);
   const paths = getArrayField(input, ["paths", "locations", "files"]);
   const args = getArrayField(input, ["args", "arguments"]);
   const command =
     typeof item.input === "string"
-      ? item.input.trim()
-      : getStringField(input, ["command", "cmd"]);
+      ? firstLine(item.input)
+      : getStringField(input, ["command", "cmd", "script"]);
   const commandWithArgs = [command, args?.map(stringifyValue).filter(Boolean).join(" ")]
     .filter(Boolean)
     .join(" ");
   const query = getStringField(input, ["query", "pattern", "search"]);
   const url = getStringField(input, ["url", "uri", "href"]);
   const target = inputPath || outputPath || (paths ? String(paths[0]) : "") || query || url || "";
-  return { command: commandWithArgs || command, input, inputPath, outputDiff, outputPath, paths, query, url, target };
+  return { changes, command: commandWithArgs || command, input, inputPath, outputDiff, outputPath, paths, query, url, target };
 }
 
 function describeToolCall(item: AgentToolCallItem) {
-  const { command, outputDiff, query, url, target } = extractToolTarget(item);
-  const normalizedTitle = item.title.toLowerCase();
-  const kind = (item.kind || normalizedTitle).toLowerCase();
+  const { changes, command, outputDiff, query, url, target } = extractToolTarget(item);
+  const titleKind = normalizeAgentToolName(item.title || "");
+  const kind = normalizeAgentToolName(item.kind || item.title || "");
+  const effectiveKind = kind !== "tool" ? kind : titleKind;
 
-  if (kind.includes("search") || kind.includes("grep") || kind.includes("glob") || query) {
-    return { icon: Search, accent: "violet", action: kind.includes("glob") ? "匹配文件" : "搜索", target: query || target || "查询匹配项" };
+  if (effectiveKind === "websearch" || effectiveKind === "webfetch" || url) {
+    return { icon: Search, accent: "violet", action: effectiveKind === "websearch" ? "搜索网页" : "获取网页", target: url || query || target || "网页内容" };
   }
-  if (kind.includes("fetch") || kind.includes("web") || url) {
-    return { icon: Search, accent: "violet", action: "获取网页", target: url || target || "网页内容" };
+  if (effectiveKind === "grep" || effectiveKind === "glob" || effectiveKind.includes("search") || query) {
+    return { icon: Search, accent: "violet", action: effectiveKind === "glob" ? "匹配文件" : "搜索", target: query || target || "查询匹配项" };
   }
-  if (kind.includes("execute") || kind.includes("bash") || command) {
+  if (effectiveKind === "bash" || effectiveKind === "exec_command" || command) {
     return { icon: Terminal, accent: "emerald", action: "执行命令", target: command || "命令执行" };
   }
-  if (kind.includes("read")) {
+  if (effectiveKind === "read") {
     return { icon: FileText, accent: "sky", action: "读取文件", target };
   }
-  if (kind.includes("write") || kind.includes("create")) {
+  if (effectiveKind === "write") {
     return { icon: FilePlus, accent: "emerald", action: "创建文件", target };
   }
-  if (kind.includes("edit") || outputDiff) {
-    const diffKind = String(outputDiff?.kind || "");
-    const actionName = diffKind === "create" || diffKind === "add" ? "创建文件" : "修改文件";
-    return { icon: actionName === "创建文件" ? FilePlus : FileEdit, accent: actionName === "创建文件" ? "emerald" : "amber", action: actionName, target };
+  if (effectiveKind === "apply_patch" || effectiveKind === "edit" || outputDiff) {
+    const diffKind = String(outputDiff?.kind || changes[0]?.kind || "");
+    const isCreate = diffKind === "create" || diffKind === "add" || effectiveKind === "write";
+    const actionName = isCreate ? "创建文件" : changes.length > 1 ? `修改 ${changes.length} 个文件` : "修改文件";
+    return { icon: isCreate ? FilePlus : FileEdit, accent: isCreate ? "emerald" : "amber", action: actionName, target };
   }
   let action = item.kind || "工具调用";
   if (action.toLowerCase() === "other") {
@@ -230,10 +281,130 @@ function readableToolOutput(output: AgentToolCallItem["output"]) {
   }
 }
 
+function readableToolInput(input: AgentToolCallItem["input"], kind: string) {
+  if (!input) return "";
+  const inputRecord = parseRecord(input);
+  if (inputRecord && ["edit", "write", "apply_patch", "bash", "exec_command"].includes(kind)) {
+    const compact: Record<string, unknown> = {};
+    for (const key of [
+      "file_path",
+      "filePath",
+      "path",
+      "notebook_path",
+      "filename",
+      "command",
+      "cmd",
+      "description",
+      "query",
+      "pattern",
+      "url",
+    ]) {
+      if (inputRecord[key] !== undefined) compact[key] = inputRecord[key];
+    }
+    if (Object.keys(compact).length > 0) {
+      try {
+        return JSON.stringify(compact, null, 2);
+      } catch {
+        return "";
+      }
+    }
+    return "";
+  }
+  if (typeof input === "string") return input;
+  try {
+    return JSON.stringify(input, null, 2);
+  } catch {
+    return String(input);
+  }
+}
+
+function changePathLabel(change: DiffChange, index: number) {
+  return change.path || `变更 ${index + 1}`;
+}
+
+function DiffChangePreview({ change, index }: { change: DiffChange; index: number }) {
+  const hasPatch = !!change.patch;
+  const hasOldNew = change.oldText !== undefined || change.newText !== undefined;
+  return (
+    <div className="overflow-hidden rounded-md border border-border/60 bg-muted/15">
+      <div className="flex items-center gap-2 border-b border-border/50 px-2.5 py-1.5 text-[10px] text-muted-foreground">
+        <FileEdit className="h-3 w-3 shrink-0" />
+        <span className="min-w-0 truncate font-mono">{changePathLabel(change, index)}</span>
+        {change.kind && (
+          <span className="ml-auto shrink-0 rounded border border-border/60 bg-card/70 px-1.5 py-0.5 text-[9.5px]">
+            {change.kind}
+          </span>
+        )}
+      </div>
+      {hasPatch ? (
+        <pre className="max-h-72 overflow-auto p-2.5 font-mono text-[10px] leading-relaxed text-foreground/85 whitespace-pre-wrap select-text">
+          {change.patch}
+        </pre>
+      ) : hasOldNew ? (
+        <div className="grid gap-0 md:grid-cols-2">
+          <pre className="max-h-64 overflow-auto border-b border-border/50 bg-rose-950/5 p-2.5 font-mono text-[10px] leading-relaxed text-rose-700 dark:text-rose-300 whitespace-pre-wrap select-text md:border-b-0 md:border-r">
+            {change.oldText || "empty"}
+          </pre>
+          <pre className="max-h-64 overflow-auto bg-emerald-950/5 p-2.5 font-mono text-[10px] leading-relaxed text-emerald-700 dark:text-emerald-300 whitespace-pre-wrap select-text">
+            {change.newText || "empty"}
+          </pre>
+        </div>
+      ) : (
+        <div className="px-2.5 py-2 text-[10.5px] text-muted-foreground">无可展示的变更内容</div>
+      )}
+    </div>
+  );
+}
+
+function ToolDiffPreview({ outputDiff }: { outputDiff: Record<string, unknown> }) {
+  const changes = diffChanges(outputDiff);
+  const patch = getStringField(outputDiff, ["patch", "diff", "unifiedDiff", "unified_diff"]);
+  if (patch && changes.length === 0) {
+    return (
+      <div className="space-y-1">
+        <div className="text-[9.5px] font-bold text-muted-foreground/65 uppercase select-none">文件变更</div>
+        <pre className="max-h-80 overflow-auto rounded-md border border-border/60 bg-muted/20 p-2.5 font-mono text-[10px] leading-relaxed text-foreground/85 whitespace-pre-wrap select-text">
+          {patch}
+        </pre>
+      </div>
+    );
+  }
+  if (changes.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2 text-[9.5px] font-bold text-muted-foreground/65 uppercase select-none">
+        <span>文件变更</span>
+        {changes.length > 1 && (
+          <span className="rounded border border-border/60 bg-muted/30 px-1.5 py-0.5 font-mono text-[9px] font-medium normal-case">
+            {changes.length} files
+          </span>
+        )}
+      </div>
+      <div className="space-y-2">
+        {changes.map((change, index) => (
+          <DiffChangePreview key={`${change.path || "change"}-${index}`} change={change} index={index} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ToolCallGroup({ items, nowMs }: { items: ChatMessage[]; nowMs: number }) {
   const [open, setOpen] = useState(false);
   const firstItem = items[0]?.toolCall;
   const firstDesc = useMemo(() => firstItem ? describeToolCall(firstItem) : null, [firstItem]);
+  const summary = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const msg of items) {
+      if (!msg.toolCall) continue;
+      const action = describeToolCall(msg.toolCall).action;
+      counts.set(action, (counts.get(action) || 0) + 1);
+    }
+    const parts = Array.from(counts.entries()).map(([action, count]) =>
+      count > 1 ? `${action} ${count} 次` : action
+    );
+    return parts.join("、") || `${items.length} 项操作`;
+  }, [items]);
   if (!firstItem || !firstDesc) return null;
   const Icon = firstDesc.icon;
   const accent = toolAccentClasses[firstDesc.accent as keyof typeof toolAccentClasses];
@@ -249,8 +420,8 @@ export function ToolCallGroup({ items, nowMs }: { items: ChatMessage[]; nowMs: n
         className="flex items-center gap-1.5 w-full px-1.5 py-0.5 text-left text-[10.5px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer select-none rounded"
       >
         <Icon className={`h-3 w-3 shrink-0 ${accent.icon}`} />
-        <span className="shrink-0 font-medium">{firstDesc.action}</span>
-        <span className="text-muted-foreground/60">{items.length} 项操作</span>
+        <span className="min-w-0 truncate font-medium">{summary}</span>
+        <span className="shrink-0 text-muted-foreground/60">{items.length} 项</span>
         {pendingCount > 0 && (
           <span className="relative flex h-2 w-2 shrink-0">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary/70 opacity-75" />
@@ -466,22 +637,13 @@ export function ToolCallCard({ item, nowMs }: { item: AgentToolCallItem; nowMs: 
     );
   }, [item.status]);
 
-  const readableInput = useMemo(() => {
-    if (!item.input) return "";
-    if (typeof item.input === "string") return item.input;
-    try {
-      return JSON.stringify(item.input, null, 2);
-    } catch {
-      return String(item.input);
-    }
-  }, [item.input]);
-
-  const readableOutput = readableToolOutput(item.output);
-
   const description = useMemo(() => describeToolCall(item), [item]);
   const accent = toolAccentClasses[description.accent as keyof typeof toolAccentClasses];
   const Icon = description.icon;
   const outputDiff = diffOutputRecord(item.output);
+  const kind = normalizeAgentToolName(item.kind || item.title || "");
+  const readableInput = useMemo(() => readableToolInput(item.input, kind), [item.input, kind]);
+  const readableOutput = readableToolOutput(item.output);
   const elapsed = useMemo(() => {
     const start = new Date(item.createdAt).getTime();
     const end = item.completedAt ? new Date(item.completedAt).getTime() : nowMs;
@@ -510,23 +672,7 @@ export function ToolCallCard({ item, nowMs }: { item: AgentToolCallItem; nowMs: 
               $ {description.target}
             </div>
           )}
-          {outputDiff && (
-            <div className="space-y-1">
-              <div className="text-[9.5px] font-bold text-muted-foreground/65 uppercase select-none">文件变更</div>
-              <div className="grid gap-2 md:grid-cols-2">
-                {typeof outputDiff.oldText === "string" && (
-                  <pre className="max-h-52 overflow-auto rounded-md border border-rose-500/20 bg-rose-950/10 p-2 font-mono text-[10px] text-rose-700 dark:text-rose-300 whitespace-pre-wrap select-text">
-                    {outputDiff.oldText || "empty"}
-                  </pre>
-                )}
-                {typeof outputDiff.newText === "string" && (
-                  <pre className="max-h-52 overflow-auto rounded-md border border-emerald-500/20 bg-emerald-950/10 p-2 font-mono text-[10px] text-emerald-700 dark:text-emerald-300 whitespace-pre-wrap select-text">
-                    {outputDiff.newText || "empty"}
-                  </pre>
-                )}
-              </div>
-            </div>
-          )}
+          {outputDiff && <ToolDiffPreview outputDiff={outputDiff} />}
           {readableInput && (
             <div className="space-y-1">
               <div className="text-[9.5px] font-bold text-muted-foreground/65 uppercase select-none">输入参数</div>

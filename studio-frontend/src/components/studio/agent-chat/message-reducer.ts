@@ -98,6 +98,17 @@ function isTerminalToolStatus(status: unknown) {
   return status === "completed" || status === "success" || status === "failed" || status === "error";
 }
 
+function isRunTerminalEvent(eventType: string) {
+  return (
+    eventType === "turn.completed" ||
+    eventType === "turn.failed" ||
+    eventType === "task.completed" ||
+    eventType === "task.failed" ||
+    eventType === "task.killed" ||
+    eventType === "task.stopped"
+  );
+}
+
 function terminalStatusForEvent(eventType: string) {
   return eventType === "turn.completed" || eventType === "task.completed" ? "completed" : "failed";
 }
@@ -354,8 +365,33 @@ export function applyTaskEventToMessageState(prev: MessageState, event: TaskEven
 export function buildMessageStateFromEvents(events: TaskEvent[], taskID: string): MessageState {
   void taskID;
   const state = createMessageState();
-  for (const event of compactStreamEvents(sortTaskEventsForDisplay(events))) {
+  for (const event of orderEventsForMessageState(compactStreamEvents(sortTaskEventsForDisplay(events)))) {
     applyMessageEvent(state, event);
   }
   return state;
+}
+
+function orderEventsForMessageState(events: TaskEvent[]) {
+  const ordered: TaskEvent[] = [];
+  let deferredTerminals: TaskEvent[] = [];
+  const flushTerminals = () => {
+    if (deferredTerminals.length === 0) return;
+    ordered.push(...deferredTerminals);
+    deferredTerminals = [];
+  };
+
+  for (const event of events) {
+    if (event.event_type === "user.prompt" || event.event_type === "task.started") {
+      flushTerminals();
+      ordered.push(event);
+      continue;
+    }
+    if (isRunTerminalEvent(event.event_type)) {
+      deferredTerminals.push(event);
+      continue;
+    }
+    ordered.push(event);
+  }
+  flushTerminals();
+  return ordered;
 }

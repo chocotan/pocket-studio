@@ -22,7 +22,7 @@ export interface StudioTab {
   agentSessionId?: string;
   agentSessionName?: string;
   agentKind?: string;
-  agentRuntime?: "acpx" | "direct_acp";
+  agentRuntime?: "acpx" | "direct_acp" | "gosdk";
   agentModelId?: string;
   projectId?: string;
 }
@@ -102,7 +102,7 @@ export function createAgentChatTab(
   projectId?: string,
   filePath?: string
 ): StudioTab {
-  const runtimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : "Agent";
+  const runtimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : (agentRuntime === "gosdk" ? "GoSDK" : "Agent");
   return {
     id: makeId("chat"),
     kind: "agent_chat",

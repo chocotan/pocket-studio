@@ -55,7 +55,7 @@ export function terminalType(value: TerminalKind) {
   return TERMINAL_TYPES.find((item) => item.value === value) || TERMINAL_TYPES[0];
 }
 
-export function agentNameForRuntime(agentKind: string | undefined, agentRuntime: "acpx" | "direct_acp" | undefined) {
+export function agentNameForRuntime(agentKind: string | undefined, agentRuntime: "acpx" | "direct_acp" | "gosdk" | undefined) {
   const normalized = normalizeAgentKind(agentKind);
   if (agentRuntime === "acpx" && normalized === "kilo") return "kilocode";
   return normalized;

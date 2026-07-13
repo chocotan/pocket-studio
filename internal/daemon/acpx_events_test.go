@@ -109,6 +109,172 @@ func TestACPXAssistantRawMessageCarriesReadableText(t *testing.T) {
 	}
 }
 
+func TestACPXClaudeSignedEmptyThinkingIsNotRenderedAsJSON(t *testing.T) {
+	d := New(Config{})
+	emitter := &taskEmitter{daemon: d, taskID: "task-1"}
+	adapter := newAgentOutputAdapter(emitter, 0, "")
+
+	adapter.handle(json.RawMessage(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"signed-payload"}]}}`))
+	adapter.handle(json.RawMessage(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"final reply"}]}}`))
+
+	got := drainTaskEvents(d.send)
+	if len(got) != 1 {
+		t.Fatalf("events len = %d, want only final assistant text: %#v", len(got), got)
+	}
+	if got[0].EventType != "assistant.message" {
+		t.Fatalf("event type = %q, want assistant.message", got[0].EventType)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(got[0].Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if data["text"] != "final reply" {
+		t.Fatalf("assistant data = %#v, want final reply only", data)
+	}
+}
+
+func TestACPXClaudeSignedThinkingBlockEmitsThoughtText(t *testing.T) {
+	d := New(Config{})
+	emitter := &taskEmitter{daemon: d, taskID: "task-1"}
+	adapter := newAgentOutputAdapter(emitter, 0, "")
+
+	adapter.handle(json.RawMessage(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"real thought","signature":"signed-payload"},{"type":"text","text":"final reply"}]}}`))
+
+	got := drainTaskEvents(d.send)
+	if len(got) != 2 {
+		t.Fatalf("events len = %d, want thought plus final text: %#v", len(got), got)
+	}
+	if got[0].EventType != "assistant.thinking" || got[1].EventType != "assistant.message" {
+		t.Fatalf("event types = %q, %q; want thinking/message", got[0].EventType, got[1].EventType)
+	}
+	var thought map[string]any
+	if err := json.Unmarshal(got[0].Data, &thought); err != nil {
+		t.Fatalf("decode thought data: %v", err)
+	}
+	if thought["text"] != "real thought" {
+		t.Fatalf("thought data = %#v, want real thought", thought)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(got[1].Data, &message); err != nil {
+		t.Fatalf("decode message data: %v", err)
+	}
+	if message["text"] != "final reply" {
+		t.Fatalf("message data = %#v, want final reply", message)
+	}
+}
+
+func TestACPXClaudeSignedThinkingHistoryIsNotRenderedAsJSON(t *testing.T) {
+	events := acpxSessionHistoryEvents("task-1", map[string]any{
+		"acpxRecordId": "rec-1",
+		"messages": []any{
+			map[string]any{"User": map[string]any{"content": []any{map[string]any{"Text": "hello"}}}},
+			map[string]any{"Agent": map[string]any{"content": []any{
+				map[string]any{"Thinking": map[string]any{"type": "thinking", "thinking": "", "signature": "signed-payload"}},
+				map[string]any{"Text": "final reply"},
+			}}},
+		},
+	}, 100, 120)
+
+	for _, event := range events {
+		if event.EventType != "assistant.thinking" {
+			continue
+		}
+		t.Fatalf("unexpected thinking event from signed empty thinking block: %#v", event)
+	}
+	messages := make([]protocol.TaskEvent, 0)
+	for _, event := range events {
+		if event.EventType == "assistant.message" {
+			messages = append(messages, event)
+		}
+	}
+	if len(messages) != 1 {
+		t.Fatalf("assistant messages = %#v, want one final reply", messages)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(messages[0].Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if data["text"] != "final reply" {
+		t.Fatalf("assistant data = %#v, want final reply only", data)
+	}
+}
+
+func TestACPXClaudeLowercaseHistoryRestoresAssistantMessage(t *testing.T) {
+	events := acpxSessionHistoryEvents("task-1", map[string]any{
+		"acpxRecordId": "rec-1",
+		"messages": []any{
+			map[string]any{"User": map[string]any{"content": []any{map[string]any{"Text": "hello"}}}},
+			map[string]any{"Agent": map[string]any{"content": []any{
+				map[string]any{"type": "thinking", "thinking": "", "signature": "signed-payload"},
+				map[string]any{"type": "text", "text": "final reply"},
+				map[string]any{"type": "tool_use", "id": "call-1", "name": "Read", "input": map[string]any{"file_path": "README.md"}},
+			}}},
+		},
+	}, 100, 120)
+
+	if taskEventOfType(events, "assistant.thinking").EventType != "" {
+		t.Fatalf("unexpected empty thinking event: %#v", events)
+	}
+	message := taskEventOfType(events, "assistant.message")
+	if message.EventType == "" {
+		t.Fatalf("missing assistant message: %#v", events)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(message.Data, &data); err != nil {
+		t.Fatalf("decode message data: %v", err)
+	}
+	if data["text"] != "final reply" {
+		t.Fatalf("assistant data = %#v, want final reply", data)
+	}
+	tool := taskEventOfType(events, "tool.call")
+	if tool.EventType == "" {
+		t.Fatalf("missing lowercase tool call: %#v", events)
+	}
+	var toolData map[string]any
+	if err := json.Unmarshal(tool.Data, &toolData); err != nil {
+		t.Fatalf("decode tool data: %v", err)
+	}
+	if toolData["tool_use_id"] != "call-1" || toolData["name"] != "Read" {
+		t.Fatalf("tool data = %#v, want restored call-1 Read", toolData)
+	}
+}
+
+func TestACPXClaudeToolUseWrapperHistoryRestoresToolCall(t *testing.T) {
+	events := acpxSessionHistoryEvents("task-1", map[string]any{
+		"acpxRecordId": "rec-1",
+		"messages": []any{
+			map[string]any{"User": map[string]any{"content": []any{map[string]any{"Text": "disk"}}}},
+			map[string]any{"Agent": map[string]any{"content": []any{
+				map[string]any{"ToolUse": map[string]any{
+					"id":                "call_4dc21bc5d85d4935a904cb04",
+					"name":              "Shell: df -h (查看磁盘剩余空间)",
+					"is_input_complete": true,
+					"raw_input":         `{"command":"df -h","description":"查看磁盘剩余空间"}`,
+				}},
+			}}},
+		},
+	}, 100, 120)
+
+	if message := taskEventOfType(events, "assistant.message"); message.EventType != "" {
+		t.Fatalf("unexpected assistant JSON message for ToolUse wrapper: %#v", message)
+	}
+	tool := taskEventOfType(events, "tool.call")
+	if tool.EventType == "" {
+		t.Fatalf("missing tool.call for ToolUse wrapper: %#v", events)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(tool.Data, &data); err != nil {
+		t.Fatalf("decode tool data: %v", err)
+	}
+	if data["tool_use_id"] != "call_4dc21bc5d85d4935a904cb04" || data["name"] != "Shell: df -h (查看磁盘剩余空间)" {
+		t.Fatalf("tool data = %#v, want restored shell call", data)
+	}
+	input, _ := data["input"].(map[string]any)
+	if input["command"] != "df -h" || input["description"] != "查看磁盘剩余空间" {
+		t.Fatalf("tool input = %#v, want parsed raw_input", input)
+	}
+}
+
 func TestACPXLiveEventsCarryStableTurnKeys(t *testing.T) {
 	d := New(Config{})
 	emitter := &taskEmitter{daemon: d, taskID: "task-1", acpx: true, acpxTurn: 2}
@@ -767,6 +933,100 @@ esac
 	}
 }
 
+func TestTaskHistoryRestoresClaudeACPXAssistantFromLocalStore(t *testing.T) {
+	defaultDir := t.TempDir()
+	projectDir := t.TempDir()
+	t.Setenv("POCKET_STUDIO_DAEMON_CONFIG_DIR", defaultDir)
+	scriptPath := filepath.Join(defaultDir, "fake-acpx")
+	script := `#!/bin/sh
+case "$*" in
+  *" claude sessions list "*)
+    printf '[{"acpxRecordId":"rec-claude","name":"acpx-ui-task","cwd":"%s","createdAt":"2026-01-01T00:00:00Z","lastUsedAt":"2026-01-01T00:00:10Z","messages":[{"User":{"content":[{"Text":"hello"}]}}]}]' "$PWD"
+    ;;
+  *" sessions list "*)
+    printf '[]'
+    ;;
+  *)
+    printf '{}\n'
+    ;;
+esac
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake acpx: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Workspaces = []protocol.Workspace{{ID: "default", Path: defaultDir}, {ID: "project", Path: projectDir}}
+	cfg.ACPX.Enabled = true
+	cfg.ACPX.Command = scriptPath
+	cfg.ACPX.Args = []string{"--project-dir", projectDir}
+	cfg.ACPX.TTLSeconds = 0
+	cfg.ACPX.Agent = "claude"
+
+	live := New(cfg)
+	live.mu.Lock()
+	live.history["rec-claude"] = protocol.TaskRecord{
+		TaskID:        "rec-claude",
+		DeviceID:      "device-1",
+		WorkspacePath: projectDir,
+		Agent:         "claude",
+		AgentRuntime:  "acpx",
+		SessionName:   "acpx-ui-task",
+		SessionID:     "rec-claude",
+		Prompt:        "hello",
+		Status:        "running",
+		StartedAt:     100,
+		UpdatedAt:     110,
+		Events: []protocol.TaskEvent{
+			userPromptTaskEvent("rec-claude", "turn-1", "hello", 100, 1, 0),
+			{
+				TaskID:    "rec-claude",
+				EventID:   "evt-assistant",
+				EventType: "assistant.message",
+				Source:    "claude_code",
+				Sequence:  2,
+				Timestamp: 105,
+				Data:      json.RawMessage(`{"text":"claude answer","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+			},
+		},
+	}
+	if err := live.saveACPXHistoryStoreLocked(); err != nil {
+		t.Fatalf("saveACPXHistoryStoreLocked() error = %v", err)
+	}
+	live.mu.Unlock()
+
+	restored := New(cfg)
+	if err := restored.loadACPXHistoryStore(); err != nil {
+		t.Fatalf("loadACPXHistoryStore() error = %v", err)
+	}
+	restored.sendTaskHistory(protocol.TaskHistoryGet{RequestID: "req-1", TaskID: "rec-claude", WorkspacePath: projectDir})
+	env := <-restored.send
+	if env.Type != protocol.TypeTaskHistoryResult {
+		t.Fatalf("env type = %q, want task.history.result", env.Type)
+	}
+	result, err := protocol.DecodePayload[protocol.TaskHistoryResult](env)
+	if err != nil {
+		t.Fatalf("decode history result: %v", err)
+	}
+	if result.Record == nil {
+		t.Fatal("record is nil, want restored Claude history")
+	}
+	message := taskEventOfType(result.Events, "assistant.message")
+	if message.EventType == "" {
+		t.Fatalf("missing restored assistant message: %#v", result.Events)
+	}
+	var data map[string]any
+	if err := json.Unmarshal(message.Data, &data); err != nil {
+		t.Fatalf("decode assistant data: %v", err)
+	}
+	if data["text"] != "claude answer" {
+		t.Fatalf("assistant data = %#v, want claude answer", data)
+	}
+	if result.Record.Status != "interrupted" {
+		t.Fatalf("record status = %q, want interrupted from local store", result.Record.Status)
+	}
+}
+
 func TestMergeTaskEventsDeduplicatesSameEventDataWithDifferentRaw(t *testing.T) {
 	data := json.RawMessage(`{"text":"same assistant answer"}`)
 	base := []protocol.TaskEvent{
@@ -914,6 +1174,51 @@ func TestMergeTaskEventsKeepsRepeatedACPXPromptTurnsWithDifferentStableKeys(t *t
 	merged := mergeTaskEvents(base, extra)
 	if len(merged) != 4 {
 		t.Fatalf("merged events = %#v, want both repeated prompt turns", merged)
+	}
+}
+
+func TestOrderTaskEventsUsesACPXTurnStructureBeforeTimestamps(t *testing.T) {
+	events := []protocol.TaskEvent{
+		{
+			TaskID:    "task-1",
+			EventID:   "assistant-first-by-time",
+			EventType: "assistant.message",
+			Sequence:  1,
+			Timestamp: 100,
+			Data:      json.RawMessage(`{"text":"answer","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "completed-earliest-by-time",
+			EventType: "task.completed",
+			Sequence:  2,
+			Timestamp: 50,
+			Data:      json.RawMessage(`{"exit_code":0,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "user-latest-by-time",
+			EventType: "user.prompt",
+			Sequence:  3,
+			Timestamp: 200,
+			Data:      json.RawMessage(`{"prompt":"hello","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+		},
+		{
+			TaskID:    "task-1",
+			EventID:   "started-last-by-sequence",
+			EventType: "task.started",
+			Sequence:  4,
+			Timestamp: 150,
+			Data:      json.RawMessage(`{"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`),
+		},
+	}
+
+	ordered := orderTaskEvents(events)
+	wantTypes := []string{"task.started", "user.prompt", "assistant.message", "task.completed"}
+	for i, want := range wantTypes {
+		if ordered[i].EventType != want {
+			t.Fatalf("ordered[%d] = %q, want %q; events=%#v", i, ordered[i].EventType, want, ordered)
+		}
 	}
 }
 

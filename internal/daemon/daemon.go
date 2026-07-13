@@ -55,6 +55,7 @@ type Daemon struct {
 	directACPStarts     map[string]*directACPStart
 	startingTasks       map[string]struct{}
 	taskDispatchMu      map[string]*sync.Mutex
+	goSDKSessions       map[string]*goSDKSession
 }
 
 const (
@@ -114,6 +115,7 @@ func New(cfg Config) *Daemon {
 		directACPStarts:     make(map[string]*directACPStart),
 		startingTasks:       make(map[string]struct{}),
 		taskDispatchMu:      make(map[string]*sync.Mutex),
+		goSDKSessions:       make(map[string]*goSDKSession),
 	}
 }
 
@@ -142,6 +144,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	if err := d.loadDirectACPStore(); err != nil {
 		log.Printf("load direct acp sessions: %v", err)
+	}
+	if err := d.loadACPXHistoryStore(); err != nil {
+		log.Printf("load acpx history: %v", err)
 	}
 	nextDelay := reconnectInitialDelay
 	for {
@@ -519,7 +524,8 @@ func (d *Daemon) saveDirectACPStoreLocked() error {
 }
 
 func isDirectACPRecord(record protocol.TaskRecord) bool {
-	return strings.EqualFold(strings.TrimSpace(record.AgentRuntime), "direct_acp")
+	rt := strings.TrimSpace(record.AgentRuntime)
+	return strings.EqualFold(rt, "direct_acp") || strings.EqualFold(rt, "gosdk")
 }
 
 func (d *Daemon) workspacesSnapshot() []protocol.Workspace {
@@ -864,6 +870,11 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 			d.emitError(session.TaskID, "session_ensure_failed", err.Error())
 			return
 		}
+	} else if isGoSDKRuntime(session.AgentRuntime) {
+		if err := d.ensureGoSDKSession(ctx, task, workspace.Path, session.TaskID); err != nil {
+			d.emitError(session.TaskID, "session_ensure_failed", err.Error())
+			return
+		}
 	} else if d.cfg.ACPX.Enabled {
 		if recordID, sessionName, err := d.ensureACPXSession(ctx, task, workspace.Path, session.TaskID); err != nil {
 			d.emitError(session.TaskID, "session_ensure_failed", err.Error())
@@ -973,7 +984,7 @@ func (d *Daemon) restoreACPXTaskHistory(taskID string, workspacePath string) pro
 	existing := d.taskHistoryRecordLocked(taskID)
 	if len(existing.Events) > 0 {
 		best.Events = compactStreamTaskEvents(mergeTaskEvents(best.Events, existing.Events))
-		if existing.Status == "running" || existing.Status == "stopping" {
+		if existing.Status != "" {
 			best.Status = existing.Status
 		}
 		if existing.UpdatedAt > best.UpdatedAt {
@@ -1092,6 +1103,10 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 
 	if isDirectACPRuntime(task.AgentRuntime) {
 		d.startDirectACPTask(parent, task, workspace)
+		return
+	}
+	if isGoSDKRuntime(task.AgentRuntime) {
+		d.startGoSDKTask(parent, task, workspace)
 		return
 	}
 
@@ -1334,8 +1349,12 @@ func (d *Daemon) supportsTaskAgent(agent string) bool {
 	return agent == "claude_code" || agent == "claude" || agent == "claude-code"
 }
 
+func isGoSDKRuntime(runtime string) bool {
+	return strings.EqualFold(strings.TrimSpace(runtime), "gosdk")
+}
+
 func (d *Daemon) supportsTaskAgentForRuntime(agent string, runtime string) bool {
-	if isDirectACPRuntime(runtime) {
+	if isDirectACPRuntime(runtime) || isGoSDKRuntime(runtime) {
 		_, ok := d.directACPAgentConfig(agent)
 		return ok
 	}
@@ -1961,10 +1980,16 @@ func (d *Daemon) createACPXSession(ctx context.Context, task protocol.TaskDispat
 func (d *Daemon) syncACPXSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string, command string) (string, string, error) {
 	agentName := acpxAgentName(task, d.cfg.ACPX.Agent)
 	var conflictingDirectACPs []string
+	var conflictingGoSDKs []string
 	d.mu.Lock()
 	for id, session := range d.directACP {
 		if normalizeACPXAgentName(session.agent) == agentName {
 			conflictingDirectACPs = append(conflictingDirectACPs, id)
+		}
+	}
+	for id, session := range d.goSDKSessions {
+		if normalizeACPXAgentName(session.agent) == agentName {
+			conflictingGoSDKs = append(conflictingGoSDKs, id)
 		}
 	}
 	d.mu.Unlock()
@@ -1972,6 +1997,10 @@ func (d *Daemon) syncACPXSession(ctx context.Context, task protocol.TaskDispatch
 	for _, id := range conflictingDirectACPs {
 		log.Printf("[Daemon] Stopping conflicting Direct ACP session %q for agent %q because ACPX command %q is starting", id, agentName, command)
 		d.stopDirectACPTask(id)
+	}
+	for _, id := range conflictingGoSDKs {
+		log.Printf("[Daemon] Stopping conflicting GoSDK session %q for agent %q because ACPX command %q is starting", id, agentName, command)
+		d.stopGoSDKTask(id)
 	}
 
 	commandCtx, cancel := d.acpxCommandContext(ctx, task.Options.TimeoutSeconds)
@@ -2238,6 +2267,59 @@ func (a *agentOutputAdapter) handle(raw json.RawMessage) {
 		}
 	}
 	if eventType == "assistant.message" {
+		var obj map[string]any
+		if err := json.Unmarshal(raw, &obj); err == nil && obj != nil {
+			var content []any
+			if message, _ := obj["message"].(map[string]any); message != nil {
+				content, _ = message["content"].([]any)
+			} else {
+				content, _ = obj["content"].([]any)
+			}
+			if len(content) > 0 {
+				hasThinking := false
+				for _, item := range content {
+					part, _ := item.(map[string]any)
+					if part == nil {
+						continue
+					}
+					t, _ := part["type"].(string)
+					if t == "thinking" {
+						hasThinking = true
+						break
+					}
+				}
+				if hasThinking {
+					a.flush()
+					for _, item := range content {
+						part, _ := item.(map[string]any)
+						if part == nil {
+							continue
+						}
+						t, _ := part["type"].(string)
+						if t == "thinking" {
+							text := stringField(part, "thinking", "text")
+							if text == "" {
+								if sig := stringField(part, "signature"); sig != "" {
+									var sigObj map[string]any
+									if json.Unmarshal([]byte(sig), &sigObj) == nil && sigObj != nil {
+										text = stringField(sigObj, "thinking", "text")
+									}
+								}
+							}
+							if text != "" {
+								a.emitter.emit("assistant.thinking", a.acpxEventData("assistant.thinking", map[string]any{"text": text}, ""), raw)
+							}
+						} else if t == "text" {
+							text := stringField(part, "text")
+							if text != "" {
+								a.emitter.emit("assistant.message", a.nextAssistantEventData(map[string]any{"text": text}), raw)
+							}
+						}
+					}
+					return
+				}
+			}
+		}
 		if text := assistantTextFromRawMessage(raw); text != "" {
 			a.emitter.emit(eventType, a.nextAssistantEventData(map[string]any{"text": text}), raw)
 			return
@@ -2805,6 +2887,9 @@ func (d *Daemon) stopTask(taskID string) {
 	if d.stopDirectACPTask(taskID) {
 		return
 	}
+	if d.stopGoSDKTask(taskID) {
+		return
+	}
 	d.mu.Lock()
 	rt := d.tasks[taskID]
 	d.mu.Unlock()
@@ -2989,6 +3074,8 @@ func (d *Daemon) deleteSession(parent context.Context, remove protocol.SessionDe
 	}
 	if isDirectACPRuntime(firstNonEmpty(remove.AgentRuntime, record.AgentRuntime)) {
 		d.deleteDirectACPSession(taskID)
+	} else if isGoSDKRuntime(firstNonEmpty(remove.AgentRuntime, record.AgentRuntime)) {
+		d.deleteGoSDKSession(taskID)
 	} else if d.cfg.ACPX.Enabled && workspacePath != "" {
 		if err := d.deleteACPXSession(parent, rt, workspacePath, agent, sessionName); err != nil {
 			text := strings.TrimSpace(err.Error())
@@ -4081,8 +4168,24 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 			if part == nil {
 				continue
 			}
-			if thinking, ok := part["Thinking"]; ok {
-				text := acpxThinkingText(thinking)
+			t, _ := part["type"].(string)
+			if t == "thinking" || part["Thinking"] != nil {
+				thinkingVal := part["Thinking"]
+				if thinkingVal == nil {
+					thinkingVal = part["thinking"]
+				}
+				if thinkingVal == nil {
+					thinkingVal = part
+				}
+				text := acpxThinkingText(thinkingVal)
+				if text == "" {
+					if sig := stringField(part, "signature"); sig != "" {
+						var sigObj map[string]any
+						if json.Unmarshal([]byte(sig), &sigObj) == nil && sigObj != nil {
+							text = stringField(sigObj, "thinking", "text")
+						}
+					}
+				}
 				if strings.TrimSpace(text) != "" {
 					eventKey := acpxEventKey(turnIndex, "assistant.thinking", thinkingOrdinal)
 					thinkingOrdinal++
@@ -4090,40 +4193,60 @@ func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt in
 				}
 				continue
 			}
-			if text := acpxTextPart(part["Text"]); strings.TrimSpace(text) != "" {
-				eventKey := acpxEventKey(turnIndex, "assistant.message", assistantOrdinal)
-				assistantOrdinal++
-				raw := map[string]any{
-					"type": "assistant",
-					"message": map[string]any{
-						"role":    "assistant",
-						"content": []any{map[string]any{"type": "text", "text": text}},
-					},
+			if t == "text" || part["Text"] != nil {
+				textVal := part["Text"]
+				if textVal == nil {
+					textVal = part["text"]
 				}
-				add("assistant.message", acpxEventData(map[string]any{"text": text}, turnIndex, "assistant.message", eventKey), raw)
+				text := acpxTextPart(textVal)
+				if strings.TrimSpace(text) != "" {
+					eventKey := acpxEventKey(turnIndex, "assistant.message", assistantOrdinal)
+					assistantOrdinal++
+					raw := map[string]any{
+						"type": "assistant",
+						"message": map[string]any{
+							"role":    "assistant",
+							"content": []any{map[string]any{"type": "text", "text": text}},
+						},
+					}
+					add("assistant.message", acpxEventData(map[string]any{"text": text}, turnIndex, "assistant.message", eventKey), raw)
+				}
 				continue
 			}
-			if toolUse, _ := part["ToolUse"].(map[string]any); toolUse != nil {
-				id := stringField(toolUse, "id", "tool_use_id", "toolCallId")
-				name := stringField(toolUse, "name", "title")
-				input := acpxToolInput(toolUse)
-				eventKey := "turn:" + strconv.Itoa(turnIndex) + ":tool.call:" + id
-				if id == "" {
-					eventKey = acpxEventKey(turnIndex, "tool.call", 0)
+			if t == "tool_use" || t == "tool_call" || part["ToolUse"] != nil {
+				toolUse := part["ToolUse"]
+				if toolUse == nil {
+					toolUse = part["tool_use"]
 				}
-				raw := map[string]any{
-					"type": "assistant",
-					"message": map[string]any{
-						"role": "assistant",
-						"content": []any{map[string]any{
-							"type":  "tool_use",
-							"id":    id,
-							"name":  name,
-							"input": input,
-						}},
-					},
+				if toolUse == nil {
+					toolUse = part["tool_call"]
 				}
-				add("tool.call", acpxEventData(map[string]any{"tool_use_id": id, "name": name, "input": input}, turnIndex, "tool.call", eventKey), raw)
+				if toolUse == nil {
+					toolUse = part
+				}
+				toolUseMap, _ := toolUse.(map[string]any)
+				if toolUseMap != nil {
+					id := stringField(toolUseMap, "id", "tool_use_id", "toolCallId")
+					name := stringField(toolUseMap, "name", "title")
+					input := acpxToolInput(toolUseMap)
+					eventKey := "turn:" + strconv.Itoa(turnIndex) + ":tool.call:" + id
+					if id == "" {
+						eventKey = acpxEventKey(turnIndex, "tool.call", 0)
+					}
+					raw := map[string]any{
+						"type": "assistant",
+						"message": map[string]any{
+							"role": "assistant",
+							"content": []any{map[string]any{
+								"type":  "tool_use",
+								"id":    id,
+								"name":  name,
+								"input": input,
+							}},
+						},
+					}
+					add("tool.call", acpxEventData(map[string]any{"tool_use_id": id, "name": name, "input": input}, turnIndex, "tool.call", eventKey), raw)
+				}
 			}
 		}
 		results, _ := agent["tool_results"].(map[string]any)
@@ -4672,9 +4795,45 @@ func rebaseACPXEventKey(eventKey string, turnIndex int) string {
 	return eventKey
 }
 
+
+
+func taskEventTypeRank(eventType string) int {
+	switch eventType {
+	case "task.started":
+		return 0
+	case "user.prompt", "permission.request":
+		return 1
+	case "assistant.thinking":
+		return 2
+	case "assistant.message":
+		return 3
+	case "tool.call":
+		return 4
+	case "tool.output":
+		return 5
+	case "task.completed", "task.failed", "task.killed", "task.error":
+		return 6
+	default:
+		return 7
+	}
+}
+
 func orderTaskEvents(events []protocol.TaskEvent) []protocol.TaskEvent {
 	ordered := append([]protocol.TaskEvent(nil), events...)
 	sort.SliceStable(ordered, func(i, j int) bool {
+		turnI, okI := taskEventACPXTurnIndex(ordered[i])
+		turnJ, okJ := taskEventACPXTurnIndex(ordered[j])
+		if okI && okJ {
+			if turnI != turnJ {
+				return turnI < turnJ
+			}
+			rankI := taskEventTypeRank(ordered[i].EventType)
+			rankJ := taskEventTypeRank(ordered[j].EventType)
+			if rankI != rankJ {
+				return rankI < rankJ
+			}
+		}
+
 		if ordered[i].Timestamp != ordered[j].Timestamp {
 			if ordered[i].Timestamp == 0 {
 				return false
