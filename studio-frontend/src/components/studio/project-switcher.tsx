@@ -75,6 +75,12 @@ export function ProjectSwitcher({
     [devices, favoriteIds, favoriteOrder, filteredProjects]
   );
 
+  const totalGroupsCount = useMemo(() => {
+    if (projects.length === 0) return 1;
+    const uniqueDeviceIds = new Set(projects.map((p) => p.device_id || "__unknown__"));
+    return uniqueDeviceIds.size;
+  }, [projects]);
+
   function setOpen(nextOpen: boolean) {
     setUncontrolledOpen(nextOpen);
     onOpenChange?.(nextOpen);
@@ -199,7 +205,11 @@ export function ProjectSwitcher({
       </button>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="w-[calc(100dvw-4rem)] sm:max-w-4xl overflow-hidden p-0 border-slate-200/80 dark:border-slate-800/80 shadow-2xl rounded-2xl animate-scale-in">
+        <DialogContent className={cn(
+          "w-[calc(100dvw-4rem)] overflow-hidden p-0 border-slate-200/80 dark:border-slate-800/80 shadow-2xl rounded-2xl animate-scale-in",
+          totalGroupsCount <= 1 ? "sm:max-w-2xl" :
+          totalGroupsCount === 2 ? "sm:max-w-4xl" : "sm:max-w-6xl"
+        )}>
           <DialogHeader className="px-5 py-4 bg-slate-50/50 dark:bg-slate-900/50 border-b border-slate-150 dark:border-slate-800/80 backdrop-blur-md">
             <DialogTitle className="text-sm font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2">
               <span className="h-7 w-7 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center dark:bg-indigo-950/40 dark:border-indigo-900/60">
@@ -237,7 +247,7 @@ export function ProjectSwitcher({
               ) : (
                 <div className={cn(
                   "grid gap-4",
-                  groupedProjects.length === 1 && "grid-cols-1 max-w-xl mx-auto w-full",
+                  groupedProjects.length === 1 && "grid-cols-1 w-full",
                   groupedProjects.length === 2 && "grid-cols-1 md:grid-cols-2",
                   groupedProjects.length >= 3 && "grid-cols-1 md:grid-cols-2 xl:grid-cols-3"
                 )}>
