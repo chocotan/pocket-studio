@@ -198,7 +198,28 @@ func normalizeDirectACPAgents(agents map[string]DirectACPAgentConfig) map[string
 		if path, err := exec.LookPath("codex-acp"); err == nil {
 			out["codex"] = DirectACPAgentConfig{Command: path, Args: []string{}}
 		} else {
-			out["codex"] = DirectACPAgentConfig{Command: "npx", Args: []string{"@zed-industries/codex-acp@latest"}}
+			out["codex"] = DirectACPAgentConfig{Command: "npx", Args: []string{"-y", "@agentclientprotocol/codex-acp@latest"}}
+		}
+	}
+	if _, ok := out["claude"]; !ok {
+		if path, err := exec.LookPath("claude-agent-acp"); err == nil {
+			out["claude"] = DirectACPAgentConfig{Command: path, Args: []string{}}
+		} else {
+			out["claude"] = DirectACPAgentConfig{Command: "npx", Args: []string{"-y", "@agentclientprotocol/claude-agent-acp@latest"}}
+		}
+	}
+	if _, ok := out["pi"]; !ok {
+		if path, err := exec.LookPath("pi-acp"); err == nil {
+			out["pi"] = DirectACPAgentConfig{Command: path, Args: []string{}}
+		} else {
+			out["pi"] = DirectACPAgentConfig{Command: "npx", Args: []string{"-y", "pi-acp@latest"}}
+		}
+	}
+	if _, ok := out["qwen"]; !ok {
+		if path, err := exec.LookPath("qwen"); err == nil {
+			out["qwen"] = DirectACPAgentConfig{Command: path, Args: []string{"--acp"}}
+		} else {
+			out["qwen"] = DirectACPAgentConfig{Command: "npx", Args: []string{"-y", "@qwen-code/qwen-code@latest", "--acp"}}
 		}
 	}
 	if _, ok := out["opencode"]; !ok {

@@ -53,6 +53,7 @@ type Daemon struct {
 	hookAlerts          map[string]time.Time
 	directACP           map[string]*directACPSession
 	directACPStarts     map[string]*directACPStart
+	goSDKStarts         map[string]*directACPStart
 	startingTasks       map[string]struct{}
 	taskDispatchMu      map[string]*sync.Mutex
 	goSDKSessions       map[string]*goSDKSession
@@ -113,6 +114,7 @@ func New(cfg Config) *Daemon {
 		hookAlerts:          make(map[string]time.Time),
 		directACP:           make(map[string]*directACPSession),
 		directACPStarts:     make(map[string]*directACPStart),
+		goSDKStarts:         make(map[string]*directACPStart),
 		startingTasks:       make(map[string]struct{}),
 		taskDispatchMu:      make(map[string]*sync.Mutex),
 		goSDKSessions:       make(map[string]*goSDKSession),
@@ -4794,8 +4796,6 @@ func rebaseACPXEventKey(eventKey string, turnIndex int) string {
 	}
 	return eventKey
 }
-
-
 
 func taskEventTypeRank(eventType string) int {
 	switch eventType {

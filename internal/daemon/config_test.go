@@ -156,6 +156,18 @@ func TestNormalizeDirectACPAgentsLocalFallback(t *testing.T) {
 	if !ok {
 		t.Fatalf("DefaultConfig() direct ACP agents missing 'kilo'")
 	}
+	claudeAgent, ok := cfg.DirectACP.Agents["claude"]
+	if !ok {
+		t.Fatalf("DefaultConfig() direct ACP agents missing 'claude'")
+	}
+	piAgent, ok := cfg.DirectACP.Agents["pi"]
+	if !ok {
+		t.Fatalf("DefaultConfig() direct ACP agents missing 'pi'")
+	}
+	qwenAgent, ok := cfg.DirectACP.Agents["qwen"]
+	if !ok {
+		t.Fatalf("DefaultConfig() direct ACP agents missing 'qwen'")
+	}
 
 	if path, err := exec.LookPath("opencode"); err == nil {
 		if opencodeAgent.Command != path {
@@ -181,6 +193,9 @@ func TestNormalizeDirectACPAgentsLocalFallback(t *testing.T) {
 		if codexAgent.Command != "npx" {
 			t.Errorf("codex Agent Command = %q, want \"npx\"", codexAgent.Command)
 		}
+		if strings.Join(codexAgent.Args, " ") != "-y @agentclientprotocol/codex-acp@latest" {
+			t.Errorf("codex Agent Args = %v, want official codex-acp fallback", codexAgent.Args)
+		}
 	}
 
 	if path, err := exec.LookPath("kilo"); err == nil {
@@ -192,6 +207,29 @@ func TestNormalizeDirectACPAgentsLocalFallback(t *testing.T) {
 	}
 	if len(kiloAgent.Args) != 1 || kiloAgent.Args[0] != "acp" {
 		t.Errorf("kilo Agent Args = %v, want [\"acp\"]", kiloAgent.Args)
+	}
+
+	assertDirectACPAdapter(t, "claude", claudeAgent, "claude-agent-acp", []string{"-y", "@agentclientprotocol/claude-agent-acp@latest"})
+	assertDirectACPAdapter(t, "pi", piAgent, "pi-acp", []string{"-y", "pi-acp@latest"})
+	if path, err := exec.LookPath("qwen"); err == nil {
+		if qwenAgent.Command != path || strings.Join(qwenAgent.Args, " ") != "--acp" {
+			t.Errorf("qwen Agent = %q %v, want %q [--acp]", qwenAgent.Command, qwenAgent.Args, path)
+		}
+	} else if qwenAgent.Command != "npx" || strings.Join(qwenAgent.Args, " ") != "-y @qwen-code/qwen-code@latest --acp" {
+		t.Errorf("qwen Agent = %q %v, want qwen-code npx fallback", qwenAgent.Command, qwenAgent.Args)
+	}
+}
+
+func assertDirectACPAdapter(t *testing.T, agent string, got DirectACPAgentConfig, executable string, fallbackArgs []string) {
+	t.Helper()
+	if path, err := exec.LookPath(executable); err == nil {
+		if got.Command != path || len(got.Args) != 0 {
+			t.Errorf("%s Agent = %q %v, want %q with no args", agent, got.Command, got.Args, path)
+		}
+		return
+	}
+	if got.Command != "npx" || strings.Join(got.Args, " ") != strings.Join(fallbackArgs, " ") {
+		t.Errorf("%s Agent = %q %v, want npx %v", agent, got.Command, got.Args, fallbackArgs)
 	}
 }
 

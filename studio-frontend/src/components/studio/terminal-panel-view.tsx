@@ -854,6 +854,7 @@ export function TerminalTypeMenu({
     }))
     .sort((left, right) => terminalMenuOrder(left.value) - terminalMenuOrder(right.value));
   const acpxItems = acpxMenuItems(selectedDevice);
+  const directACPItems = directACPMenuItems(selectedDevice);
 
   return (
     <div
@@ -913,8 +914,12 @@ export function TerminalTypeMenu({
           {acpxItems.length > 0 && (
             <MenuBranch label="ACPX会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="amber" onClick={() => setSubmenu("acpx")} />
           )}
-          <MenuBranch label="ACP会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="emerald" onClick={() => setSubmenu("acp")} />
-          <MenuBranch label="GoSDK会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="indigo" onClick={() => setSubmenu("gosdk")} />
+          {directACPItems.length > 0 && (
+            <MenuBranch label="ACP会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="emerald" onClick={() => setSubmenu("acp")} />
+          )}
+          {directACPItems.length > 0 && (
+            <MenuBranch label="GoSDK会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="indigo" onClick={() => setSubmenu("gosdk")} />
+          )}
           <div className="border-t border-slate-100 my-1" />
           <button
             type="button"
@@ -956,14 +961,20 @@ export function TerminalTypeMenu({
       ) : submenu === "acp" ? (
         <>
           <MenuHeader label="ACP会话" onBack={() => setSubmenu(null)} />
-          <MenuItem label="opencode" icon={<OpenCode width={14} height={14} />} tone="amber" onClick={() => onAddAgentChat("opencode", "direct_acp", selectedProjId)} />
-          <MenuItem label="kilo code" icon={<KiloCode width={14} height={14} />} tone="lime" onClick={() => onAddAgentChat("kilo", "direct_acp", selectedProjId)} />
-          <MenuItem label="codex" icon={<Codex width={14} height={14} />} tone="emerald" onClick={() => onAddAgentChat("codex", "direct_acp", selectedProjId)} />
+          {directACPItems.map((item) => (
+            <MenuItem
+              key={item.agent}
+              label={item.label}
+              icon={item.icon}
+              tone={item.tone}
+              onClick={() => onAddAgentChat(item.agent, "direct_acp", selectedProjId)}
+            />
+          ))}
         </>
       ) : (
         <>
           <MenuHeader label="GoSDK会话" onBack={() => setSubmenu(null)} />
-          {acpxItems.map((item) => (
+          {directACPItems.map((item) => (
             <MenuItem
               key={item.agent}
               label={item.label}
@@ -1005,6 +1016,15 @@ function terminalMenuLabel(kind: TerminalKind) {
 
 function acpxMenuItems(device: Device | undefined) {
   if (!isACPXDevice(device)) return [];
+  return agentMenuItems(device);
+}
+
+function directACPMenuItems(device: Device | undefined) {
+  const supported = new Set(["opencode", "claude", "codex", "kilo", "qwen", "pi"]);
+  return agentMenuItems(device).filter((item) => supported.has(item.agent));
+}
+
+function agentMenuItems(device: Device | undefined) {
   const items = [
     { agent: "opencode", capability: "opencode", label: "opencode", icon: <OpenCode width={14} height={14} />, tone: "amber" },
     { agent: "claude", capability: "claude", label: "claude code", icon: <ClaudeCode width={14} height={14} />, tone: "violet" },

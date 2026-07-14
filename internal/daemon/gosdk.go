@@ -16,8 +16,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"remote-agent/internal/protocol"
 	acp "github.com/coder/acp-go-sdk"
+	"remote-agent/internal/protocol"
 )
 
 type goSDKSession struct {
@@ -33,17 +33,30 @@ type goSDKSession struct {
 }
 
 type goSDKClient struct {
-	cmd             *exec.Cmd
-	conn            *acp.ClientSideConnection
-	emitter         *taskEmitter
-	workspace       string
-	done            chan struct{}
-	session         string
-	terminals       sync.Map
-	nextTerm        atomic.Int64
-	mu              sync.Mutex
-	assistantText   strings.Builder
-	thinkingText    strings.Builder
+	cmd           *exec.Cmd
+	conn          *acp.ClientSideConnection
+	emitter       *taskEmitter
+	workspace     string
+	done          chan struct{}
+	session       string
+	terminals     sync.Map
+	nextTerm      atomic.Int64
+	mu            sync.Mutex
+	assistantText strings.Builder
+	thinkingText  strings.Builder
+	toolCalls     map[string]*goSDKToolCallState
+}
+
+type goSDKToolCallState struct {
+	id        string
+	title     string
+	kind      acp.ToolKind
+	status    acp.ToolCallStatus
+	content   []acp.ToolCallContent
+	locations []acp.ToolCallLocation
+	input     any
+	output    any
+	meta      map[string]any
 }
 
 type goSDKTerminal struct {
@@ -264,9 +277,9 @@ func (c *goSDKClient) SessionUpdate(ctx context.Context, n acp.SessionNotificati
 
 			data := map[string]any{
 				"text":            fullText,
-				"stream_id":       fmt.Sprintf("gosdk_stream_assistant_%s", n.SessionId),
+				"stream_id":       fmt.Sprintf("gosdk_stream_assistant_%s_%d", n.SessionId, acpxTurnIndex),
 				"acpx_turn_index": acpxTurnIndex,
-				"acpx_event_key":  fmt.Sprintf("turn:%d:assistant.message:%s", acpxTurnIndex, n.SessionId),
+				"acpx_event_key":  acpxEventKey(acpxTurnIndex, "assistant.message", 0),
 				"replace":         true,
 			}
 			c.emitter.emit("assistant.message", data, raw)
@@ -281,34 +294,20 @@ func (c *goSDKClient) SessionUpdate(ctx context.Context, n acp.SessionNotificati
 
 			data := map[string]any{
 				"text":            fullText,
-				"stream_id":       fmt.Sprintf("gosdk_stream_thinking_%s", n.SessionId),
+				"stream_id":       fmt.Sprintf("gosdk_stream_thinking_%s_%d", n.SessionId, acpxTurnIndex),
 				"acpx_turn_index": acpxTurnIndex,
-				"acpx_event_key":  fmt.Sprintf("turn:%d:assistant.thinking:%s", acpxTurnIndex, n.SessionId),
+				"acpx_event_key":  acpxEventKey(acpxTurnIndex, "assistant.thinking", 0),
 				"replace":         true,
 			}
 			c.emitter.emit("assistant.thinking", data, raw)
 		}
 	case u.ToolCall != nil:
 		tc := u.ToolCall
-		data := map[string]any{
-			"tool_use_id":     tc.ToolCallId,
-			"name":            tc.Title,
-			"status":          tc.Status,
-			"acpx_turn_index": acpxTurnIndex,
-			"acpx_event_key":  fmt.Sprintf("turn:%d:tool.call:%s", acpxTurnIndex, tc.ToolCallId),
-		}
+		data := c.startToolCall(tc, acpxTurnIndex, "tool.call")
 		c.emitter.emit("tool.call", data, raw)
 	case u.ToolCallUpdate != nil:
 		tcu := u.ToolCallUpdate
-		data := map[string]any{
-			"tool_use_id":     tcu.ToolCallId,
-			"status":          tcu.Status,
-			"acpx_turn_index": acpxTurnIndex,
-			"acpx_event_key":  fmt.Sprintf("turn:%d:tool.output:%s", acpxTurnIndex, tcu.ToolCallId),
-		}
-		if tcu.RawOutput != nil {
-			data["output"] = tcu.RawOutput
-		}
+		data := c.updateToolCall(tcu, acpxTurnIndex, "tool.output")
 		c.emitter.emit("tool.output", data, raw)
 	case u.ConfigOptionUpdate != nil:
 		c.emitter.emit("config.updated", nil, raw)
@@ -318,6 +317,130 @@ func (c *goSDKClient) SessionUpdate(ctx context.Context, n acp.SessionNotificati
 		c.emitter.emit("metric.updated", nil, raw)
 	}
 	return nil
+}
+
+func (c *goSDKClient) startToolCall(tc *acp.SessionUpdateToolCall, turnIndex int, eventType string) map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.toolCalls == nil {
+		c.toolCalls = make(map[string]*goSDKToolCallState)
+	}
+	state := &goSDKToolCallState{
+		id:        string(tc.ToolCallId),
+		title:     tc.Title,
+		kind:      tc.Kind,
+		status:    tc.Status,
+		content:   tc.Content,
+		locations: tc.Locations,
+		input:     tc.RawInput,
+		output:    tc.RawOutput,
+		meta:      cloneGoSDKMeta(tc.Meta),
+	}
+	c.toolCalls[state.id] = state
+	return state.eventData(turnIndex, eventType)
+}
+
+func (c *goSDKClient) updateToolCall(update *acp.SessionToolCallUpdate, turnIndex int, eventType string) map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.toolCalls == nil {
+		c.toolCalls = make(map[string]*goSDKToolCallState)
+	}
+	id := string(update.ToolCallId)
+	state := c.toolCalls[id]
+	if state == nil {
+		state = &goSDKToolCallState{id: id}
+		c.toolCalls[id] = state
+	}
+	if update.Title != nil {
+		state.title = *update.Title
+	}
+	if update.Kind != nil {
+		state.kind = *update.Kind
+	}
+	if update.Status != nil {
+		state.status = *update.Status
+	}
+	if update.Content != nil {
+		state.content = update.Content
+	}
+	if update.Locations != nil {
+		state.locations = update.Locations
+	}
+	if update.RawInput != nil {
+		state.input = update.RawInput
+	}
+	if update.RawOutput != nil {
+		state.output = update.RawOutput
+	}
+	state.mergeMeta(update.Meta)
+	return state.eventData(turnIndex, eventType)
+}
+
+func (s *goSDKToolCallState) eventData(turnIndex int, eventType string) map[string]any {
+	data := map[string]any{
+		"tool_use_id":     s.id,
+		"acpx_turn_index": turnIndex,
+		"acpx_event_key":  fmt.Sprintf("turn:%d:%s:%s", turnIndex, eventType, s.id),
+	}
+	if s.title != "" {
+		data["name"] = s.title
+		data["title"] = s.title
+	}
+	if s.kind != "" {
+		data["kind"] = s.kind
+	}
+	if s.status != "" {
+		data["status"] = s.status
+	}
+	if s.input != nil {
+		data["input"] = s.input
+	}
+	if s.output != nil {
+		data["output"] = s.output
+	}
+	if s.content != nil {
+		data["content"] = s.content
+	}
+	if s.locations != nil {
+		data["locations"] = s.locations
+	}
+	if len(s.meta) > 0 {
+		data["_meta"] = s.meta
+	}
+	return data
+}
+
+func (s *goSDKToolCallState) mergeMeta(meta map[string]any) {
+	if len(meta) == 0 {
+		return
+	}
+	if s.meta == nil {
+		s.meta = make(map[string]any, len(meta))
+	}
+	for key, value := range meta {
+		s.meta[key] = value
+	}
+}
+
+func cloneGoSDKMeta(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(meta))
+	for key, value := range meta {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func (c *goSDKClient) startTurn(turnIndex int) {
+	c.emitter.setACPXTurnIndex(turnIndex)
+	c.mu.Lock()
+	c.assistantText.Reset()
+	c.thinkingText.Reset()
+	c.toolCalls = make(map[string]*goSDKToolCallState)
+	c.mu.Unlock()
 }
 
 func (c *goSDKClient) close() {
@@ -579,7 +702,8 @@ func (d *Daemon) startGoSDKTask(parent context.Context, task protocol.TaskDispat
 	record.SessionName = sessionName
 	record.Status = "running"
 	record.UpdatedAt = now
-	userEvent := userPromptTaskEvent(task.TaskID, turnID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events), -1)
+	acpxTurnIndex := nextACPXTurnIndex(record.Events)
+	userEvent := userPromptTaskEvent(task.TaskID, turnID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events), acpxTurnIndex)
 	if userEvent.TaskID != "" {
 		record.Events = append(record.Events, userEvent)
 	}
@@ -600,6 +724,7 @@ func (d *Daemon) startGoSDKTask(parent context.Context, task protocol.TaskDispat
 	d.mu.Unlock()
 
 	emitter := client.emitter
+	client.startTurn(acpxTurnIndex)
 	if userEvent.TaskID != "" {
 		d.sendTaskEvent(userEvent)
 	}
@@ -611,11 +736,6 @@ func (d *Daemon) startGoSDKTask(parent context.Context, task protocol.TaskDispat
 		"agent":         record.Agent,
 		"agent_runtime": "gosdk",
 	}, nil)
-
-	client.mu.Lock()
-	client.assistantText.Reset()
-	client.thinkingText.Reset()
-	client.mu.Unlock()
 
 	_, err := client.conn.Prompt(ctx, acp.PromptRequest{
 		SessionId: acp.SessionId(client.session),
@@ -666,9 +786,29 @@ func (d *Daemon) ensureGoSDKSession(ctx context.Context, task protocol.TaskDispa
 			}
 			continue
 		}
+		if start := d.goSDKStarts[taskID]; start != nil {
+			done := start.done
+			d.mu.Unlock()
+			select {
+			case <-done:
+				return start.err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		start := &directACPStart{done: make(chan struct{})}
+		d.goSDKStarts[taskID] = start
+		d.startingTasks[taskID] = struct{}{}
 		d.mu.Unlock()
 
 		err := d.createGoSDKSession(ctx, task, workspacePath, taskID)
+
+		d.mu.Lock()
+		start.err = err
+		delete(d.goSDKStarts, taskID)
+		delete(d.startingTasks, taskID)
+		close(start.done)
+		d.mu.Unlock()
 		return err
 	}
 }
@@ -688,7 +828,7 @@ func (d *Daemon) stopGoSDKTask(taskID string) bool {
 		rt.markStopping()
 		d.emitTaskEvent(taskID, "task.stopping", 0, map[string]string{"reason": "user_requested"}, nil)
 	}
-	
+
 	_ = session.client.conn.Cancel(context.Background(), acp.CancelNotification{
 		SessionId: acp.SessionId(session.client.session),
 	})

@@ -157,16 +157,19 @@ export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
       if (eventTurnId) {
         for (let index = 0; index < merged.length; index++) {
           const existing = merged[index];
-          if (existing.event_type === "user.prompt" && existing.event_id.startsWith("local-user.prompt-")) {
+          if (existing.event_type === "user.prompt") {
             const existingData = getMetadata(existing.data);
             const existingTurnId = typeof existingData?.turn_id === "string" ? existingData.turn_id : "";
             if (existingTurnId === eventTurnId) {
+              const oldStableKey = taskEventStableKey(existing);
+              if (oldStableKey) existingKeys.delete(oldStableKey);
               merged[index] = {
                 ...event,
                 timestamp: existing.timestamp,
               };
               existingIds.add(event.event_id);
               existingIds.delete(existing.event_id);
+              if (stableKey) existingKeys.add(stableKey);
               isDuplicate = true;
               break;
             }

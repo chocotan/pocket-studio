@@ -214,7 +214,7 @@ function extractToolTarget(item: AgentToolCallItem) {
   const commandWithArgs = [command, args?.map(stringifyValue).filter(Boolean).join(" ")]
     .filter(Boolean)
     .join(" ");
-  const query = getStringField(input, ["query", "pattern", "search"]);
+  const query = getStringField(input, ["query", "search_query", "searchQuery", "pattern", "search"]);
   const url = getStringField(input, ["url", "uri", "href"]);
   const target = inputPath || outputPath || (paths ? String(paths[0]) : "") || query || url || "";
   return { changes, command: commandWithArgs || command, input, inputPath, outputDiff, outputPath, paths, query, url, target };
@@ -296,6 +296,8 @@ function readableToolInput(input: AgentToolCallItem["input"], kind: string) {
       "cmd",
       "description",
       "query",
+      "search_query",
+      "searchQuery",
       "pattern",
       "url",
     ]) {

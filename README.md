@@ -285,8 +285,20 @@ go build -trimpath -ldflags="-s -w" -o ./daemon ./cmd/daemon
     "enabled": true,
     "agents": {
       "codex": {
+        "command": "codex-acp",
+        "args": []
+      },
+      "claude": {
+        "command": "claude-agent-acp",
+        "args": []
+      },
+      "pi": {
         "command": "npx",
-        "args": ["@zed-industries/codex-acp@latest"]
+        "args": ["-y", "pi-acp@latest"]
+      },
+      "qwen": {
+        "command": "qwen",
+        "args": ["--acp"]
       },
       "opencode": {
         "command": "opencode",

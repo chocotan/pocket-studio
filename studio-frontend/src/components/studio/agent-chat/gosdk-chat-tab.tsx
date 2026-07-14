@@ -331,12 +331,7 @@ export function GoSDKChatTab({
           if (taskEvent.sequence > lastEventSeqRef.current) {
             lastEventSeqRef.current = taskEvent.sequence;
           }
-          setEvents((prev) => {
-            if (prev.some((event) => event.event_id === taskEvent.event_id)) {
-              return prev;
-            }
-            return mergeTaskEvents(prev, [taskEvent]);
-          });
+          setEvents((prev) => mergeTaskEvents(prev, [taskEvent]));
           if (isTerminalTaskEvent(taskEvent, agentRuntime)) {
             if (taskEvent.event_type === "task.failed") {
               const meta = getMetadata(taskEvent.data) || {};

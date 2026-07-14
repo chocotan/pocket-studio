@@ -791,7 +791,7 @@ function inferAgentToolKind(
     if (hasAnyToolKey(input, ["content", "new_source", "cell_type", "edit_mode"])) {
       return "write";
     }
-    if (hasAnyToolKey(input, ["query"])) return "websearch";
+    if (hasAnyToolKey(input, ["query", "search_query", "searchQuery"])) return "websearch";
     if (hasAnyToolKey(input, ["url", "uri", "href"])) return "webfetch";
     if (hasAnyToolKey(input, ["pattern"])) return "grep";
     if (hasAnyToolKey(input, ["glob"])) return "glob";
