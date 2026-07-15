@@ -193,8 +193,9 @@ type TaskHistoryReady struct {
 }
 
 type TaskSnapshot struct {
-	DeviceID string       `json:"device_id"`
-	Tasks    []TaskRecord `json:"tasks"`
+	DeviceID       string       `json:"device_id"`
+	Tasks          []TaskRecord `json:"tasks"`
+	DeletedTaskIDs []string     `json:"deleted_task_ids,omitempty"`
 }
 
 type TaskStop struct {

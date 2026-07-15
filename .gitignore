@@ -12,3 +12,5 @@ user-frontend/tsconfig.tsbuildinfo
 .omo
 .tmp
 pasted*
+/.learnings/
+__pycache__/

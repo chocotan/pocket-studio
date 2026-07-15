@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -74,20 +75,27 @@ func protocolProjectFromProject(project Project) protocol.Project {
 }
 
 type Hub struct {
-	auth           *auth.Manager
-	mu             sync.RWMutex
-	daemons        map[string]*daemonConn
-	webs           map[*webConn]struct{}
-	taskAliases    map[string]string
-	taskDevices    map[string]string
-	taskEvents     map[string][]protocol.Envelope
-	taskRecords    map[string]protocol.TaskRecord
-	pending        map[string]chan protocol.Envelope
-	projects       map[string]Project
-	termMu         sync.RWMutex
-	terminalConns  map[string]map[*terminalConn]struct{}
-	acpxConns      map[string]map[*acpxConn]struct{}
-	acpxHistoryReq map[string]*acpxConn
+	auth                *auth.Manager
+	mu                  sync.RWMutex
+	daemons             map[string]*daemonConn
+	webs                map[*webConn]struct{}
+	taskAliases         map[string]string
+	taskDevices         map[string]string
+	taskEvents          map[string][]protocol.Envelope
+	taskRecords         map[string]protocol.TaskRecord
+	pending             map[string]chan protocol.Envelope
+	projects            map[string]Project
+	termMu              sync.RWMutex
+	terminalConns       map[string]map[*terminalConn]struct{}
+	agentChatConns      map[string]map[*agentChatConn]struct{}
+	agentChatHistoryReq map[string]agentChatHistoryRequest
+	daemonSwitchHook    func(stage string)
+}
+
+type agentChatHistoryRequest struct {
+	requester *agentChatConn
+	deviceID  string
+	envelope  protocol.Envelope
 }
 
 type daemonConn struct {
@@ -100,16 +108,74 @@ type daemonConn struct {
 	workspaces     []protocol.Workspace
 	conn           *websocket.Conn
 	send           chan protocol.Envelope
+	done           chan struct{}
+	closeOnce      sync.Once
+	closed         atomic.Bool
 	mu             sync.Mutex
 	terminalBinary bool
 	directEndpoint *protocol.DirectEndpoint
 	lastSeen       time.Time
 }
 
+func (dc *daemonConn) enqueue(env protocol.Envelope) bool {
+	if dc == nil || dc.send == nil || dc.closed.Load() {
+		return false
+	}
+	if dc.done == nil {
+		dc.send <- env
+		return !dc.closed.Load()
+	}
+	select {
+	case dc.send <- env:
+		return !dc.closed.Load()
+	case <-dc.done:
+		return false
+	}
+}
+
+func (dc *daemonConn) shutdown() {
+	dc.closeOnce.Do(func() {
+		dc.closed.Store(true)
+		if dc.done != nil {
+			close(dc.done)
+		}
+		if dc.conn != nil {
+			_ = dc.conn.Close()
+		}
+	})
+}
+
+func (dc *daemonConn) writeEnvelopeDirect(env protocol.Envelope) bool {
+	if dc == nil || dc.conn == nil || dc.closed.Load() {
+		return false
+	}
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+	if dc.closed.Load() {
+		return false
+	}
+	return writeEnvelope(dc.conn, env) == nil
+}
+
+func (dc *daemonConn) writeMessageDirect(messageType int, data []byte) bool {
+	if dc == nil || dc.conn == nil || dc.closed.Load() {
+		return false
+	}
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+	if dc.closed.Load() {
+		return false
+	}
+	return dc.conn.WriteMessage(messageType, data) == nil
+}
+
 type webConn struct {
-	userID string
-	conn   *websocket.Conn
-	send   chan protocol.Envelope
+	userID    string
+	conn      *websocket.Conn
+	send      chan protocol.Envelope
+	done      chan struct{}
+	closeOnce sync.Once
+	closed    atomic.Bool
 }
 
 type terminalConn struct {
@@ -117,12 +183,107 @@ type terminalConn struct {
 	mu   sync.Mutex
 }
 
-type acpxConn struct {
+type agentChatConn struct {
 	userID    string
 	taskID    string
 	projectID string
 	conn      *websocket.Conn
 	send      chan protocol.Envelope
+	done      chan struct{}
+	closeOnce sync.Once
+	closed    atomic.Bool
+}
+
+func enqueueClientEnvelope(send chan protocol.Envelope, done <-chan struct{}, closed *atomic.Bool, env protocol.Envelope, wait bool) bool {
+	if send == nil || closed.Load() {
+		return false
+	}
+	if done == nil {
+		if wait {
+			send <- env
+			return !closed.Load()
+		}
+		select {
+		case send <- env:
+			return !closed.Load()
+		default:
+			return false
+		}
+	}
+	if wait {
+		select {
+		case send <- env:
+			return !closed.Load()
+		case <-done:
+			return false
+		}
+	}
+	select {
+	case send <- env:
+		return !closed.Load()
+	case <-done:
+		return false
+	default:
+		return false
+	}
+}
+
+func (wc *webConn) enqueue(env protocol.Envelope) bool {
+	if wc == nil {
+		return false
+	}
+	return enqueueClientEnvelope(wc.send, wc.done, &wc.closed, env, true)
+}
+
+func (wc *webConn) tryEnqueue(env protocol.Envelope) bool {
+	if wc == nil {
+		return false
+	}
+	return enqueueClientEnvelope(wc.send, wc.done, &wc.closed, env, false)
+}
+
+func (wc *webConn) shutdown() {
+	if wc == nil {
+		return
+	}
+	wc.closeOnce.Do(func() {
+		wc.closed.Store(true)
+		if wc.done != nil {
+			close(wc.done)
+		}
+		if wc.conn != nil {
+			_ = wc.conn.Close()
+		}
+	})
+}
+
+func (ac *agentChatConn) enqueue(env protocol.Envelope) bool {
+	if ac == nil {
+		return false
+	}
+	return enqueueClientEnvelope(ac.send, ac.done, &ac.closed, env, true)
+}
+
+func (ac *agentChatConn) tryEnqueue(env protocol.Envelope) bool {
+	if ac == nil {
+		return false
+	}
+	return enqueueClientEnvelope(ac.send, ac.done, &ac.closed, env, false)
+}
+
+func (ac *agentChatConn) shutdown() {
+	if ac == nil {
+		return
+	}
+	ac.closeOnce.Do(func() {
+		ac.closed.Store(true)
+		if ac.done != nil {
+			close(ac.done)
+		}
+		if ac.conn != nil {
+			_ = ac.conn.Close()
+		}
+	})
 }
 
 type DeviceView struct {
@@ -144,18 +305,18 @@ type StateView struct {
 
 func NewHub(authManager *auth.Manager) *Hub {
 	h := &Hub{
-		auth:           authManager,
-		daemons:        make(map[string]*daemonConn),
-		webs:           make(map[*webConn]struct{}),
-		taskAliases:    make(map[string]string),
-		taskDevices:    make(map[string]string),
-		taskEvents:     make(map[string][]protocol.Envelope),
-		taskRecords:    make(map[string]protocol.TaskRecord),
-		pending:        make(map[string]chan protocol.Envelope),
-		projects:       make(map[string]Project),
-		terminalConns:  make(map[string]map[*terminalConn]struct{}),
-		acpxConns:      make(map[string]map[*acpxConn]struct{}),
-		acpxHistoryReq: make(map[string]*acpxConn),
+		auth:                authManager,
+		daemons:             make(map[string]*daemonConn),
+		webs:                make(map[*webConn]struct{}),
+		taskAliases:         make(map[string]string),
+		taskDevices:         make(map[string]string),
+		taskEvents:          make(map[string][]protocol.Envelope),
+		taskRecords:         make(map[string]protocol.TaskRecord),
+		pending:             make(map[string]chan protocol.Envelope),
+		projects:            make(map[string]Project),
+		terminalConns:       make(map[string]map[*terminalConn]struct{}),
+		agentChatConns:      make(map[string]map[*agentChatConn]struct{}),
+		agentChatHistoryReq: make(map[string]agentChatHistoryRequest),
 	}
 	return h
 }
@@ -173,6 +334,55 @@ func (h *Hub) resolveTaskIDLocked(userID string, taskID string) string {
 		return taskID
 	}
 	return resolved
+}
+
+func (h *Hub) deleteTaskStateLocked(userID, taskID, deviceID string) (string, bool) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return "", false
+	}
+	canonicalID := h.resolveTaskIDLocked(userID, taskID)
+	taskKey := scopedKey(userID, taskID)
+	canonicalKey := scopedKey(userID, canonicalID)
+	ownerDeviceID := h.taskDevices[canonicalKey]
+	if ownerDeviceID == "" {
+		ownerDeviceID = h.taskDevices[taskKey]
+	}
+	if ownerDeviceID == "" {
+		ownerDeviceID = h.taskRecords[canonicalKey].DeviceID
+	}
+	if ownerDeviceID == "" {
+		ownerDeviceID = h.taskRecords[taskKey].DeviceID
+	}
+	if deviceID != "" && ownerDeviceID != "" && ownerDeviceID != deviceID {
+		return canonicalID, false
+	}
+	keys := map[string]struct{}{
+		taskKey:      {},
+		canonicalKey: {},
+	}
+	userPrefix := scopedKey(userID, "")
+	for aliasKey, targetID := range h.taskAliases {
+		if strings.HasPrefix(aliasKey, userPrefix) && (targetID == taskID || targetID == canonicalID) {
+			keys[aliasKey] = struct{}{}
+		}
+	}
+	for key := range keys {
+		delete(h.taskDevices, key)
+		delete(h.taskRecords, key)
+		delete(h.taskEvents, key)
+		delete(h.taskAliases, key)
+	}
+	return canonicalID, true
+}
+
+func taskRecordExplicitlyDeleted(record protocol.TaskRecord, deletedIDs map[string]struct{}) bool {
+	for _, id := range []string{record.TaskID, record.SessionName, record.SessionID} {
+		if _, deleted := deletedIDs[strings.TrimSpace(id)]; deleted {
+			return true
+		}
+	}
+	return false
 }
 
 func taskAliasIDs(record protocol.TaskRecord) []string {
@@ -578,13 +788,22 @@ func (h *Hub) ServeWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("upgrade web: %v", err)
 		return
 	}
-	wc := &webConn{userID: userID, conn: conn, send: make(chan protocol.Envelope, 64)}
+	wc := &webConn{userID: userID, conn: conn, send: make(chan protocol.Envelope, 64), done: make(chan struct{})}
 	h.mu.Lock()
 	h.webs[wc] = struct{}{}
 	h.mu.Unlock()
 
-	go writeLoop(conn, wc.send)
-	wc.send <- protocol.NewEnvelope("server.state", "server", h.stateView(userID))
+	go func() {
+		writeLoop(conn, wc.send, wc.done)
+		wc.shutdown()
+	}()
+	if !wc.enqueue(protocol.NewEnvelope("server.state", "server", h.stateView(userID))) {
+		h.mu.Lock()
+		delete(h.webs, wc)
+		h.mu.Unlock()
+		wc.shutdown()
+		return
+	}
 	h.readWebLoop(wc)
 }
 
@@ -600,12 +819,12 @@ func (h *Hub) ServeDaemonSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	enableTCPNoDelay(conn)
 
-	dc := &daemonConn{userID: userID, conn: conn, send: make(chan protocol.Envelope, 64), lastSeen: time.Now()}
-	go writeLoop(conn, dc.send, &dc.mu)
+	dc := &daemonConn{userID: userID, conn: conn, send: make(chan protocol.Envelope, 64), done: make(chan struct{}), lastSeen: time.Now()}
+	go writeDaemonLoop(dc)
 	h.readDaemonLoop(dc)
 }
 
-func (h *Hub) ServeACPXWebSocket(w http.ResponseWriter, r *http.Request) {
+func (h *Hub) ServeAgentChatWebSocket(w http.ResponseWriter, r *http.Request) {
 	userID, ok := h.authenticate(w, r)
 	if !ok {
 		return
@@ -618,21 +837,24 @@ func (h *Hub) ServeACPXWebSocket(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("upgrade acpx: %v", err)
+		log.Printf("upgrade agent chat: %v", err)
 		return
 	}
-	ac := &acpxConn{userID: userID, taskID: taskID, projectID: projectID, conn: conn, send: make(chan protocol.Envelope, 128)}
+	ac := &agentChatConn{userID: userID, taskID: taskID, projectID: projectID, conn: conn, send: make(chan protocol.Envelope, 128), done: make(chan struct{})}
 	key := scopedKey(userID, taskID)
 	h.mu.Lock()
-	if h.acpxConns[key] == nil {
-		h.acpxConns[key] = make(map[*acpxConn]struct{})
+	if h.agentChatConns[key] == nil {
+		h.agentChatConns[key] = make(map[*agentChatConn]struct{})
 	}
-	h.acpxConns[key][ac] = struct{}{}
+	h.agentChatConns[key][ac] = struct{}{}
 	h.mu.Unlock()
 
-	go writeLoop(conn, ac.send)
-	h.requestTaskHistoryForACPX(ac)
-	h.readACPXLoop(ac)
+	go func() {
+		writeLoop(conn, ac.send, ac.done)
+		ac.shutdown()
+	}()
+	h.requestTaskHistoryForAgentChat(ac)
+	h.readAgentChatLoop(ac)
 }
 
 func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
@@ -966,7 +1188,7 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol.Envelope, bool) {
+func (h *Hub) forwardAgentChatCommand(userID string, env protocol.Envelope) (protocol.Envelope, bool) {
 	switch env.Type {
 	case protocol.TypeSessionCreate:
 		session, err := protocol.DecodePayload[protocol.SessionCreate](env)
@@ -986,6 +1208,7 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 			if record.TaskID == "" {
 				record.TaskID = session.TaskID
 				record.StartedAt = now
+				record.Status = "created"
 			}
 			record.DeviceID = deviceID
 			record.WorkspaceID = session.WorkspaceID
@@ -993,8 +1216,6 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 			record.Agent = session.Agent
 			record.AgentRuntime = session.AgentRuntime
 			record.SessionName = session.SessionName
-			record.Prompt = ""
-			record.Status = "created"
 			record.UpdatedAt = now
 			h.taskRecords[scopedKey(userID, session.TaskID)] = record
 		}
@@ -1007,7 +1228,9 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 		if forward.ID == "" {
 			forward.ID = protocol.NewID("msg")
 		}
-		dc.send <- forward
+		if !dc.enqueue(forward) {
+			return serverErrorForSessionCreate(session, "device_offline", "target device is offline"), false
+		}
 		return protocol.Envelope{}, true
 	case protocol.TypeTaskDispatch:
 		task, err := protocol.DecodePayload[protocol.TaskDispatch](env)
@@ -1042,7 +1265,9 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 		if forward.ID == "" {
 			forward.ID = protocol.NewID("msg")
 		}
-		dc.send <- forward
+		if !dc.enqueue(forward) {
+			return serverErrorForTaskDispatch(task, "device_offline", "target device is offline"), false
+		}
 		return protocol.Envelope{}, true
 	case protocol.TypeTaskStop:
 		stop, err := protocol.DecodePayload[protocol.TaskStop](env)
@@ -1058,7 +1283,9 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 		}
 		forward := env
 		forward.From = "server"
-		dc.send <- forward
+		if !dc.enqueue(forward) {
+			return serverErrorForTaskStop(stop, "task_not_routable", "task has no connected daemon"), false
+		}
 		return protocol.Envelope{}, true
 	case protocol.TypeTaskSetModel:
 		change, err := protocol.DecodePayload[protocol.TaskSetModel](env)
@@ -1077,7 +1304,9 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 		}
 		forward := env
 		forward.From = "server"
-		dc.send <- forward
+		if !dc.enqueue(forward) {
+			return serverErrorForTaskSetModel(change, "task_not_routable", "task has no connected daemon"), false
+		}
 		return protocol.Envelope{}, true
 	case protocol.TypeTaskSetConfigOption:
 		change, err := protocol.DecodePayload[protocol.TaskSetConfigOption](env)
@@ -1096,7 +1325,9 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 		}
 		forward := env
 		forward.From = "server"
-		dc.send <- forward
+		if !dc.enqueue(forward) {
+			return serverErrorForTaskSetConfigOption(change, "task_not_routable", "task has no connected daemon"), false
+		}
 		return protocol.Envelope{}, true
 	case protocol.TypeSessionDelete:
 		remove, err := protocol.DecodePayload[protocol.SessionDelete](env)
@@ -1118,10 +1349,12 @@ func (h *Hub) forwardACPXCommand(userID string, env protocol.Envelope) (protocol
 		}
 		forward := env
 		forward.From = "server"
-		dc.send <- forward
+		if !dc.enqueue(forward) {
+			return serverErrorForSessionDelete(remove, "task_not_routable", "session has no connected daemon"), false
+		}
 		return protocol.Envelope{}, true
 	default:
-		return serverError("unsupported_type", "unsupported ACPX command type"), false
+		return serverError("unsupported_type", "unsupported agent chat command type"), false
 	}
 }
 
@@ -1148,11 +1381,6 @@ func (h *Hub) prepareTaskDispatchRecordLocked(userID string, deviceID string, ta
 	record.Status = "queued"
 	record.UpdatedAt = now
 	data := map[string]any{"prompt": task.Prompt, "turn_id": task.TurnID}
-	if strings.EqualFold(strings.TrimSpace(task.AgentRuntime), "acpx") {
-		turnIndex := nextACPXTurnIndex(record.Events)
-		data["acpx_turn_index"] = turnIndex
-		data["acpx_event_key"] = acpxEventKey(turnIndex, "user.prompt", 0)
-	}
 	userEvent := protocol.TaskEvent{
 		TaskID:    task.TaskID,
 		EventID:   protocol.NewID("evt"),
@@ -1172,8 +1400,7 @@ func (h *Hub) readWebLoop(wc *webConn) {
 		h.mu.Lock()
 		delete(h.webs, wc)
 		h.mu.Unlock()
-		close(wc.send)
-		_ = wc.conn.Close()
+		wc.shutdown()
 	}()
 
 	for {
@@ -1183,20 +1410,28 @@ func (h *Hub) readWebLoop(wc *webConn) {
 		}
 		switch env.Type {
 		case "ping":
-			wc.send <- protocol.NewEnvelope("pong", "server", nil)
+			if !wc.enqueue(protocol.NewEnvelope("pong", "server", nil)) {
+				return
+			}
 		case protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeSessionDelete:
-			wc.send <- serverError("unsupported_type", "agent chat commands require /ws/acpx")
+			if !wc.enqueue(serverError("unsupported_type", "agent chat commands require /ws/agent")) {
+				return
+			}
 		case protocol.TypeWorkspaceList, protocol.TypeWorkspaceRead, protocol.TypeWorkspaceWrite, protocol.TypeTerminalRun:
 			deviceID := env.To.DeviceID
 			if deviceID == "" {
-				wc.send <- serverError("missing_device", env.Type+" requires to.device_id")
+				if !wc.enqueue(serverError("missing_device", env.Type+" requires to.device_id")) {
+					return
+				}
 				continue
 			}
 			h.mu.RLock()
 			dc := h.daemons[daemonKey(wc.userID, deviceID)]
 			h.mu.RUnlock()
 			if dc == nil {
-				wc.send <- serverError("device_offline", "target device is offline")
+				if !wc.enqueue(serverError("device_offline", "target device is offline")) {
+					return
+				}
 				continue
 			}
 			forward := env
@@ -1204,31 +1439,36 @@ func (h *Hub) readWebLoop(wc *webConn) {
 			if forward.ID == "" {
 				forward.ID = protocol.NewID("msg")
 			}
-			dc.send <- forward
+			if !dc.enqueue(forward) {
+				if !wc.enqueue(serverError("device_offline", "target device is offline")) {
+					return
+				}
+			}
 		default:
-			wc.send <- serverError("unsupported_type", "unsupported web message type")
+			if !wc.enqueue(serverError("unsupported_type", "unsupported web message type")) {
+				return
+			}
 		}
 	}
 }
 
-func (h *Hub) readACPXLoop(ac *acpxConn) {
+func (h *Hub) readAgentChatLoop(ac *agentChatConn) {
 	defer func() {
 		key := scopedKey(ac.userID, ac.taskID)
 		h.mu.Lock()
-		if conns := h.acpxConns[key]; conns != nil {
+		if conns := h.agentChatConns[key]; conns != nil {
 			delete(conns, ac)
 			if len(conns) == 0 {
-				delete(h.acpxConns, key)
+				delete(h.agentChatConns, key)
 			}
 		}
-		for requestID, requester := range h.acpxHistoryReq {
-			if requester == ac {
-				delete(h.acpxHistoryReq, requestID)
+		for requestID, request := range h.agentChatHistoryReq {
+			if request.requester == ac {
+				delete(h.agentChatHistoryReq, requestID)
 			}
 		}
 		h.mu.Unlock()
-		close(ac.send)
-		_ = ac.conn.Close()
+		ac.shutdown()
 	}()
 
 	for {
@@ -1240,24 +1480,32 @@ func (h *Hub) readACPXLoop(ac *acpxConn) {
 			env.From = "web"
 		}
 		if env.Type == "ping" {
-			ac.send <- protocol.NewEnvelope("pong", "server", nil)
+			if !ac.enqueue(protocol.NewEnvelope("pong", "server", nil)) {
+				return
+			}
 			continue
 		}
-		if !isACPXCommandType(env.Type) {
-			ac.send <- serverError("unsupported_type", "unsupported ACPX websocket message type")
+		if !isAgentChatCommandType(env.Type) {
+			if !ac.enqueue(serverError("unsupported_type", "unsupported agent chat websocket message type")) {
+				return
+			}
 			continue
 		}
 		if !envelopeMatchesTask(env, ac.taskID) {
-			ac.send <- serverError("task_mismatch", "message task_id does not match websocket task_id")
+			if !ac.enqueue(serverError("task_mismatch", "message task_id does not match websocket task_id")) {
+				return
+			}
 			continue
 		}
-		if errEnv, ok := h.forwardACPXCommand(ac.userID, env); !ok {
-			ac.send <- errEnv
+		if errEnv, ok := h.forwardAgentChatCommand(ac.userID, env); !ok {
+			if !ac.enqueue(errEnv) {
+				return
+			}
 		}
 	}
 }
 
-func (h *Hub) requestTaskHistoryForACPX(ac *acpxConn) {
+func (h *Hub) requestTaskHistoryForAgentChat(ac *agentChatConn) {
 	h.mu.RLock()
 	resolvedTaskID := h.resolveTaskIDLocked(ac.userID, ac.taskID)
 	record := h.taskRecords[scopedKey(ac.userID, resolvedTaskID)]
@@ -1281,27 +1529,57 @@ func (h *Hub) requestTaskHistoryForACPX(ac *acpxConn) {
 	if dc == nil {
 		sent := 0
 		for _, event := range h.taskHistory(ac.userID, ac.taskID) {
-			ac.send <- taskEventEnvelope(event)
+			if !ac.enqueue(taskEventEnvelope(event)) {
+				return
+			}
 			sent++
 		}
-		ac.send <- protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "server", protocol.TaskHistoryReady{
+		ac.enqueue(protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "server", protocol.TaskHistoryReady{
 			TaskID:    ac.taskID,
 			HasEvents: sent > 0,
-		})
+		}))
 		return
 	}
 
 	requestID := protocol.NewID("req")
-	h.mu.Lock()
-	h.acpxHistoryReq[requestID] = ac
-	h.mu.Unlock()
 	env := protocol.NewEnvelope(protocol.TypeTaskHistoryGet, "server", protocol.TaskHistoryGet{
 		RequestID:     requestID,
 		TaskID:        ac.taskID,
 		WorkspacePath: workspacePath,
 	})
 	env.To.TaskID = ac.taskID
-	dc.send <- env
+	h.mu.Lock()
+	h.agentChatHistoryReq[requestID] = agentChatHistoryRequest{requester: ac, deviceID: deviceID, envelope: env}
+	h.mu.Unlock()
+	if !dc.enqueue(env) {
+		h.mu.Lock()
+		delete(h.agentChatHistoryReq, requestID)
+		h.mu.Unlock()
+		sent := 0
+		for _, event := range h.taskHistory(ac.userID, ac.taskID) {
+			if !ac.enqueue(taskEventEnvelope(event)) {
+				return
+			}
+			sent++
+		}
+		ac.enqueue(protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "server", protocol.TaskHistoryReady{
+			TaskID:    ac.taskID,
+			HasEvents: sent > 0,
+		}))
+	}
+}
+
+func (h *Hub) pendingAgentChatHistoryRequests(userID, deviceID string) []protocol.Envelope {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	requests := make([]protocol.Envelope, 0)
+	for _, request := range h.agentChatHistoryReq {
+		if request.requester == nil || request.requester.userID != userID || request.deviceID != deviceID {
+			continue
+		}
+		requests = append(requests, request.envelope)
+	}
+	return requests
 }
 
 func (h *Hub) closeTerminal(userID string, projectID string, terminalID string) {
@@ -1326,32 +1604,17 @@ func (h *Hub) closeTerminal(userID string, projectID string, terminalID string) 
 	h.mu.RUnlock()
 
 	if dc != nil {
-		dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", protocol.TerminalStreamExit{
+		dc.enqueue(protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", protocol.TerminalStreamExit{
 			ProjectID:    projectID,
 			TerminalID:   terminalID,
 			CloseSession: true,
-		})
+		}))
 		return
 	}
 }
 
 func (h *Hub) readDaemonLoop(dc *daemonConn) {
-	defer func() {
-		h.mu.Lock()
-		if dc.deviceID != "" && h.daemons[daemonKey(dc.userID, dc.deviceID)] == dc {
-			delete(h.daemons, daemonKey(dc.userID, dc.deviceID))
-		}
-		h.mu.Unlock()
-		// Daemon connection lost: it is no longer monitoring any run, so treat
-		// every task still marked active on this device as interrupted. Without
-		// this, the task stays "running" forever and a reloaded page is stuck on
-		// "Working". nil running set + no grace window = mark all active.
-		reconciled := h.reconcileRunningTasks(dc.userID, dc.deviceID, nil, 0)
-		h.broadcastReconciled(dc.userID, reconciled)
-		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
-		close(dc.send)
-		_ = dc.conn.Close()
-	}()
+	defer h.disconnectDaemon(dc)
 
 	for {
 		msgType, raw, err := dc.conn.ReadMessage()
@@ -1381,12 +1644,36 @@ func (h *Hub) readDaemonLoop(dc *daemonConn) {
 	}
 }
 
+func (h *Hub) disconnectDaemon(dc *daemonConn) {
+	current := false
+	var reconciled []protocol.Envelope
+	h.mu.Lock()
+	if dc.deviceID != "" && h.daemons[daemonKey(dc.userID, dc.deviceID)] == dc {
+		reconciled = h.reconcileRunningTasksLocked(dc.userID, dc.deviceID, nil, 0)
+		delete(h.daemons, daemonKey(dc.userID, dc.deviceID))
+		current = true
+		if h.daemonSwitchHook != nil {
+			h.daemonSwitchHook("disconnect-current")
+		}
+	}
+	h.mu.Unlock()
+
+	if current {
+		// Only the connection that still owns this device may reconcile its
+		// active tasks. A replaced connection can finish its read loop after the
+		// new daemon has already started another turn.
+		h.broadcastReconciled(dc.userID, reconciled)
+		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
+	}
+	dc.shutdown()
+}
+
 func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 	switch env.Type {
 	case protocol.TypeDaemonHello:
 		hello, err := protocol.DecodePayload[protocol.DaemonHello](env)
 		if err != nil {
-			dc.send <- serverError("bad_payload", err.Error())
+			dc.enqueue(serverError("bad_payload", err.Error()))
 			return
 		}
 		dc.deviceID = hello.DeviceID
@@ -1400,15 +1687,27 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 		dc.lastSeen = time.Now()
 		h.mu.Lock()
 		key := daemonKey(dc.userID, hello.DeviceID)
-		if old := h.daemons[key]; old != nil && old != dc {
-			_ = old.conn.Close()
+		old := h.daemons[key]
+		var reconciled []protocol.Envelope
+		if old != nil && old != dc {
+			reconciled = h.reconcileRunningTasksLocked(dc.userID, hello.DeviceID, nil, 0)
 		}
 		h.daemons[key] = dc
+		if old != nil && old != dc && h.daemonSwitchHook != nil {
+			h.daemonSwitchHook("replacement")
+		}
 		h.mu.Unlock()
+		if old != nil && old != dc {
+			old.shutdown()
+			h.broadcastReconciled(dc.userID, reconciled)
+		}
+		for _, request := range h.pendingAgentChatHistoryRequests(dc.userID, hello.DeviceID) {
+			dc.enqueue(request)
+		}
 		if dc.terminalBinary {
-			dc.send <- protocol.NewEnvelope(protocol.TypeServerHello, "server", protocol.ServerHello{
+			dc.enqueue(protocol.NewEnvelope(protocol.TypeServerHello, "server", protocol.ServerHello{
 				Features: []string{protocol.FeatureTerminalBinaryV1},
-			})
+			}))
 		}
 		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
 	case protocol.TypeDaemonHeartbeat, protocol.TypeDaemonSnapshot:
@@ -1432,24 +1731,47 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 	case protocol.TypeTaskSnapshot:
 		snapshot, err := protocol.DecodePayload[protocol.TaskSnapshot](env)
 		if err != nil {
-			dc.send <- serverError("bad_payload", err.Error())
+			dc.enqueue(serverError("bad_payload", err.Error()))
+			return
+		}
+		snapshotDeviceID := dc.deviceID
+		if snapshotDeviceID == "" {
+			snapshotDeviceID = snapshot.DeviceID
+		}
+		if snapshot.DeviceID != "" && snapshotDeviceID != "" && snapshot.DeviceID != snapshotDeviceID {
 			return
 		}
 		h.mu.Lock()
+		if current := h.daemons[daemonKey(dc.userID, snapshotDeviceID)]; current != nil && current != dc {
+			h.mu.Unlock()
+			return
+		}
+		deletedIDs := make(map[string]struct{}, len(snapshot.DeletedTaskIDs)*2)
+		for _, taskID := range snapshot.DeletedTaskIDs {
+			canonicalID, removed := h.deleteTaskStateLocked(dc.userID, taskID, snapshotDeviceID)
+			if removed {
+				deletedIDs[strings.TrimSpace(taskID)] = struct{}{}
+				deletedIDs[strings.TrimSpace(canonicalID)] = struct{}{}
+			}
+		}
 		seen := make(map[string]struct{}, len(snapshot.Tasks))
 		for _, record := range snapshot.Tasks {
+			if taskRecordExplicitlyDeleted(record, deletedIDs) {
+				continue
+			}
 			taskKey := scopedKey(dc.userID, record.TaskID)
 			seen[taskKey] = struct{}{}
-			h.taskDevices[taskKey] = snapshot.DeviceID
-			record.DeviceID = snapshot.DeviceID
+			h.taskDevices[taskKey] = snapshotDeviceID
+			record.DeviceID = snapshotDeviceID
 			for _, aliasID := range taskAliasIDs(record) {
 				aliasKey := scopedKey(dc.userID, aliasID)
 				h.taskAliases[aliasKey] = record.TaskID
-				if existing := h.taskRecords[aliasKey]; len(existing.Events) > 0 {
-					record.Events = mergeTaskRecordEvents(record.Events, existing.Events)
-					if existing.Status == "running" || existing.Status == "stopping" {
-						record.Status = existing.Status
+				if existing, ok := h.taskRecords[aliasKey]; ok {
+					incoming := record
+					if len(existing.Events) > 0 {
+						record.Events = mergeDaemonTaskRecordEvents(record.Events, existing.Events, record.AgentRuntime)
 					}
+					record.Status = mergedTaskRecordStatus(existing, incoming, record.Events)
 					if existing.UpdatedAt > record.UpdatedAt {
 						record.UpdatedAt = existing.UpdatedAt
 					}
@@ -1460,14 +1782,15 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 						record.Prompt = existing.Prompt
 					}
 				}
-				h.taskDevices[aliasKey] = snapshot.DeviceID
+				h.taskDevices[aliasKey] = snapshotDeviceID
 				seen[aliasKey] = struct{}{}
 			}
-			if existing := h.taskRecords[taskKey]; len(existing.Events) > 0 {
-				record.Events = mergeTaskRecordEvents(record.Events, existing.Events)
-				if existing.Status == "running" || existing.Status == "stopping" {
-					record.Status = existing.Status
+			if existing, ok := h.taskRecords[taskKey]; ok {
+				incoming := record
+				if len(existing.Events) > 0 {
+					record.Events = mergeDaemonTaskRecordEvents(record.Events, existing.Events, record.AgentRuntime)
 				}
+				record.Status = mergedTaskRecordStatus(existing, incoming, record.Events)
 				if existing.UpdatedAt > record.UpdatedAt {
 					record.UpdatedAt = existing.UpdatedAt
 				}
@@ -1484,7 +1807,7 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 			if !strings.HasPrefix(taskID, dc.userID+"\x00") {
 				continue
 			}
-			if deviceID != snapshot.DeviceID {
+			if deviceID != snapshotDeviceID {
 				continue
 			}
 			if _, ok := seen[taskID]; ok {
@@ -1495,6 +1818,10 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 					seen[taskID] = struct{}{}
 					continue
 				}
+			}
+			existing := h.taskRecords[taskID]
+			if isActiveTaskStatus(existing.Status) && existing.UpdatedAt > time.Now().Add(-20*time.Second).Unix() {
+				continue
 			}
 			delete(h.taskDevices, taskID)
 			delete(h.taskRecords, taskID)
@@ -1552,11 +1879,12 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 				h.mu.Lock()
 				taskKey := scopedKey(dc.userID, result.TaskID)
 				record := *result.Record
-				if existing := h.taskRecords[taskKey]; len(existing.Events) > 0 {
-					record.Events = mergeTaskRecordEvents(record.Events, existing.Events)
-					if existing.Status == "running" || existing.Status == "stopping" {
-						record.Status = existing.Status
+				if existing, ok := h.taskRecords[taskKey]; ok {
+					incoming := record
+					if len(existing.Events) > 0 {
+						record.Events = mergeDaemonTaskRecordEvents(record.Events, existing.Events, record.AgentRuntime)
 					}
+					record.Status = mergedTaskRecordStatus(existing, incoming, record.Events)
 					if existing.UpdatedAt > record.UpdatedAt {
 						record.UpdatedAt = existing.UpdatedAt
 					}
@@ -1579,17 +1907,14 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 				h.mu.Unlock()
 			}
 			h.mu.Lock()
-			requester := h.acpxHistoryReq[result.RequestID]
-			delete(h.acpxHistoryReq, result.RequestID)
+			requester := h.agentChatHistoryReq[result.RequestID].requester
+			delete(h.agentChatHistoryReq, result.RequestID)
 			h.mu.Unlock()
 			for _, event := range eventsToForward {
 				forward := taskEventEnvelope(event)
 				forward.From = "server"
 				if requester != nil {
-					select {
-					case requester.send <- forward:
-					default:
-					}
+					requester.tryEnqueue(forward)
 				} else {
 					h.broadcastToTask(dc.userID, result.TaskID, forward)
 				}
@@ -1600,10 +1925,7 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 					TaskID:    result.TaskID,
 					HasEvents: len(eventsToForward) > 0,
 				})
-				select {
-				case requester.send <- ready:
-				default:
-				}
+				requester.tryEnqueue(ready)
 			}
 		}
 	case protocol.TypeTerminalStreamData:
@@ -1755,6 +2077,8 @@ func taskRecordPromptEvent(record protocol.TaskRecord) protocol.TaskEvent {
 	if timestamp == 0 {
 		timestamp = record.UpdatedAt
 	}
+	turnID := taskRecordPromptTurnID(record)
+	data := map[string]any{"prompt": record.Prompt, "turn_id": turnID}
 	return protocol.TaskEvent{
 		TaskID:    record.TaskID,
 		EventID:   "history-user-prompt-" + record.TaskID,
@@ -1762,8 +2086,24 @@ func taskRecordPromptEvent(record protocol.TaskRecord) protocol.TaskEvent {
 		Source:    "server",
 		Sequence:  0,
 		Timestamp: timestamp,
-		Data:      MarshalPayload(map[string]string{"prompt": record.Prompt}),
+		Data:      MarshalPayload(data),
 	}
+}
+
+func taskRecordPromptTurnID(record protocol.TaskRecord) string {
+	turnID := ""
+	for index := len(record.Events) - 1; index >= 0; index-- {
+		event := record.Events[index]
+		if event.EventType != "task.started" {
+			continue
+		}
+		turnID = taskEventTurnID(event)
+		break
+	}
+	if turnID == "" {
+		turnID = "history-turn-0"
+	}
+	return turnID
 }
 
 func promptEventInsertIndex(events []protocol.TaskEvent) int {
@@ -1802,6 +2142,17 @@ func taskEventEnvelope(event protocol.TaskEvent) protocol.Envelope {
 //
 // Caller must NOT hold h.mu. Returns the envelopes to broadcast.
 func (h *Hub) reconcileRunningTasks(userID, deviceID string, runningIDs []string, graceWindow time.Duration) []protocol.Envelope {
+	h.mu.Lock()
+	envs := h.reconcileRunningTasksLocked(userID, deviceID, runningIDs, graceWindow)
+	h.mu.Unlock()
+	return envs
+}
+
+// reconcileRunningTasksLocked performs the state transition while the caller
+// holds h.mu. Daemon replacement/disconnect uses this to make reconciliation
+// and connection ownership changes one indivisible operation with respect to
+// task dispatch.
+func (h *Hub) reconcileRunningTasksLocked(userID, deviceID string, runningIDs []string, graceWindow time.Duration) []protocol.Envelope {
 	if deviceID == "" {
 		return nil
 	}
@@ -1815,7 +2166,6 @@ func (h *Hub) reconcileRunningTasks(userID, deviceID string, runningIDs []string
 	now := time.Now().Unix()
 	cutoff := now - int64(graceWindow.Seconds())
 
-	h.mu.Lock()
 	var synthesized []protocol.TaskEvent
 	for taskKey, record := range h.taskRecords {
 		if !strings.HasPrefix(taskKey, userID+"\x00") {
@@ -1840,13 +2190,20 @@ func (h *Hub) reconcileRunningTasks(userID, deviceID string, runningIDs []string
 			continue // too fresh; daemon may not have reported it yet
 		}
 
+		failureData := map[string]any{
+			"error":  "task interrupted: daemon no longer running this task",
+			"reason": "interrupted",
+		}
+		if turnID := latestUserPromptTurnID(record.Events); turnID != "" {
+			failureData["turn_id"] = turnID
+		}
 		evt := protocol.TaskEvent{
 			TaskID:    record.TaskID,
 			EventID:   protocol.NewID("evt"),
 			EventType: "task.failed",
 			Source:    "server",
 			Timestamp: now,
-			Data:      json.RawMessage(`{"error":"task interrupted: daemon no longer running this task","reason":"interrupted"}`),
+			Data:      MarshalPayload(failureData),
 		}
 		evt.Sequence = nextTaskEventSequence(record.Events, 0)
 		record.Status = statusFromEvent(evt.EventType, record.Status)
@@ -1856,8 +2213,6 @@ func (h *Hub) reconcileRunningTasks(userID, deviceID string, runningIDs []string
 		h.taskEvents[taskKey] = append(h.taskEvents[taskKey], taskEventEnvelope(evt))
 		synthesized = append(synthesized, evt)
 	}
-	h.mu.Unlock()
-
 	if len(synthesized) == 0 {
 		return nil
 	}
@@ -1908,10 +2263,194 @@ func isRunningTaskStatus(status string) bool {
 
 func isTerminalTaskStatus(status string) bool {
 	switch strings.ToLower(status) {
-	case "completed", "failed", "killed", "cancelled", "stopped":
+	case "completed", "failed", "killed", "cancelled", "stopped", "closed", "interrupted":
 		return true
 	default:
 		return false
+	}
+}
+
+type taskLifecycleState struct {
+	status     string
+	turn       int
+	hasTurn    bool
+	order      int64
+	hasOrder   bool
+	timestamp  int64
+	sequence   int64
+	eventIndex int
+}
+
+func mergedTaskRecordStatus(existing, incoming protocol.TaskRecord, mergedEvents []protocol.TaskEvent) string {
+	merged, hasMerged := latestTaskLifecycleState(mergedEvents)
+	existingLifecycle, hasExistingLifecycle := latestTaskLifecycleState(existing.Events)
+	incomingLifecycle, hasIncomingLifecycle := latestTaskLifecycleState(incoming.Events)
+	if !hasMerged && latestTaskTurnHasPrompt(mergedEvents) {
+		if isActiveTaskStatus(existing.Status) {
+			return existing.Status
+		}
+		if isActiveTaskStatus(incoming.Status) {
+			return incoming.Status
+		}
+	}
+
+	if isTerminalTaskStatus(existing.Status) {
+		if hasIncomingLifecycle && taskLifecycleStartsNewTurn(incomingLifecycle, existingLifecycle, hasExistingLifecycle, existing.UpdatedAt) {
+			if hasMerged {
+				return merged.status
+			}
+			return incoming.Status
+		}
+		return existing.Status
+	}
+	if hasMerged {
+		return merged.status
+	}
+	if isRunningTaskStatus(existing.Status) {
+		return existing.Status
+	}
+	if incoming.Status != "" {
+		return incoming.Status
+	}
+	return existing.Status
+}
+
+func taskLifecycleStartsNewTurn(incoming, existing taskLifecycleState, hasExisting bool, existingUpdatedAt int64) bool {
+	if hasExisting {
+		if incoming.hasTurn && existing.hasTurn {
+			return incoming.turn > existing.turn
+		}
+		if incoming.timestamp != existing.timestamp {
+			return incoming.timestamp > existing.timestamp
+		}
+		if incoming.sequence != existing.sequence {
+			return incoming.sequence > existing.sequence
+		}
+		return false
+	}
+	return incoming.timestamp > 0 && incoming.timestamp > existingUpdatedAt
+}
+
+func latestTaskLifecycleState(events []protocol.TaskEvent) (taskLifecycleState, bool) {
+	ordered := orderTaskRecordEvents(events)
+	turn, hasTurn := latestTaskTurn(ordered)
+	var latest taskLifecycleState
+	found := false
+	for index, event := range ordered {
+		status, ok := taskLifecycleStatus(event.EventType)
+		if !ok {
+			continue
+		}
+		if hasTurn && !taskEventMatchesTurn(event, index, turn) {
+			continue
+		}
+		state := taskLifecycleState{
+			status:     status,
+			timestamp:  event.Timestamp,
+			sequence:   event.Sequence,
+			eventIndex: index,
+		}
+		state.turn, state.hasTurn = taskEventACPXTurnIndex(event)
+		state.order, state.hasOrder = taskEventLogicalSequence(event)
+		if !found || taskLifecycleAfter(state, latest) {
+			latest = state
+			found = true
+		}
+	}
+	return latest, found
+}
+
+type taskTurn struct {
+	index      int
+	hasIndex   bool
+	id         string
+	startIndex int
+	hasPrompt  bool
+}
+
+func latestTaskTurn(ordered []protocol.TaskEvent) (taskTurn, bool) {
+	maxTurn := -1
+	lastExplicitIndex := -1
+	for index, event := range ordered {
+		if turn, ok := taskEventACPXTurnIndex(event); ok {
+			if turn > maxTurn {
+				maxTurn = turn
+				lastExplicitIndex = index
+			} else if turn == maxTurn {
+				lastExplicitIndex = index
+			}
+		}
+	}
+	if maxTurn >= 0 {
+		selected := taskTurn{index: maxTurn, hasIndex: true, startIndex: lastExplicitIndex}
+		for index, event := range ordered {
+			if event.EventType == "user.prompt" {
+				if turn, ok := taskEventACPXTurnIndex(event); ok && turn == maxTurn {
+					selected.id = taskEventTurnID(event)
+					selected.hasPrompt = true
+				}
+				if _, ok := taskEventACPXTurnIndex(event); !ok && index > lastExplicitIndex {
+					selected = taskTurn{id: taskEventTurnID(event), startIndex: index, hasPrompt: true}
+					lastExplicitIndex = index
+				}
+			}
+		}
+		return selected, true
+	}
+	for index := len(ordered) - 1; index >= 0; index-- {
+		if ordered[index].EventType == "user.prompt" {
+			return taskTurn{id: taskEventTurnID(ordered[index]), startIndex: index, hasPrompt: true}, true
+		}
+	}
+	return taskTurn{}, false
+}
+
+func taskEventMatchesTurn(event protocol.TaskEvent, eventIndex int, turn taskTurn) bool {
+	if turn.hasIndex {
+		if index, ok := taskEventACPXTurnIndex(event); ok {
+			return index == turn.index
+		}
+	}
+	if turn.id != "" {
+		return taskEventTurnID(event) == turn.id
+	}
+	return eventIndex >= turn.startIndex
+}
+
+func latestTaskTurnHasPrompt(events []protocol.TaskEvent) bool {
+	turn, ok := latestTaskTurn(orderTaskRecordEvents(events))
+	return ok && turn.hasPrompt
+}
+
+func taskLifecycleAfter(left, right taskLifecycleState) bool {
+	if left.hasOrder && right.hasOrder && left.order != right.order {
+		return left.order > right.order
+	}
+	if left.timestamp != right.timestamp {
+		return left.timestamp > right.timestamp
+	}
+	if left.sequence != right.sequence {
+		return left.sequence > right.sequence
+	}
+	return left.eventIndex > right.eventIndex
+}
+
+func taskLifecycleStatus(eventType string) (string, bool) {
+	switch eventType {
+	case "task.started":
+		return "running", true
+	case "task.stopping":
+		return "stopping", true
+	case "task.completed", "turn.completed":
+		return "completed", true
+	case "task.failed", "turn.failed", "task.error":
+		return "failed", true
+	case "task.killed":
+		return "killed", true
+	case "task.stopped":
+		return "stopped", true
+	default:
+		return "", false
 	}
 }
 
@@ -2028,7 +2567,9 @@ func (h *Hub) requestDaemonForDevice(r *http.Request, deviceID string, messageTy
 	}()
 	env := protocol.NewEnvelope(messageType, "server", payload)
 	env.To.DeviceID = deviceID
-	dc.send <- env
+	if !dc.enqueue(env) {
+		return protocol.Envelope{}, errors.New("target device is offline")
+	}
 	select {
 	case result := <-response:
 		return result, nil
@@ -2095,31 +2636,31 @@ func (h *Hub) broadcastToUser(userID string, env protocol.Envelope) {
 	}
 	h.mu.RUnlock()
 	for _, wc := range webs {
-		select {
-		case wc.send <- env:
-		default:
-		}
+		wc.tryEnqueue(env)
 	}
 }
 
 func (h *Hub) broadcastToTask(userID string, taskID string, env protocol.Envelope) {
 	key := scopedKey(userID, taskID)
 	h.mu.RLock()
-	conns := make([]*acpxConn, 0, len(h.acpxConns[key]))
-	for conn := range h.acpxConns[key] {
+	conns := make([]*agentChatConn, 0, len(h.agentChatConns[key]))
+	for conn := range h.agentChatConns[key] {
 		conns = append(conns, conn)
 	}
 	h.mu.RUnlock()
 	for _, conn := range conns {
-		select {
-		case conn.send <- env:
-		default:
-		}
+		conn.tryEnqueue(env)
 	}
 }
 
-func writeLoop(conn *websocket.Conn, ch <-chan protocol.Envelope, writeMu ...*sync.Mutex) {
-	for env := range ch {
+func writeLoop(conn *websocket.Conn, ch <-chan protocol.Envelope, done <-chan struct{}, writeMu ...*sync.Mutex) {
+	for {
+		var env protocol.Envelope
+		select {
+		case <-done:
+			return
+		case env = <-ch:
+		}
 		if len(writeMu) > 0 && writeMu[0] != nil {
 			writeMu[0].Lock()
 		}
@@ -2129,6 +2670,23 @@ func writeLoop(conn *websocket.Conn, ch <-chan protocol.Envelope, writeMu ...*sy
 		}
 		if err != nil {
 			return
+		}
+	}
+}
+
+func writeDaemonLoop(dc *daemonConn) {
+	defer dc.shutdown()
+	for {
+		select {
+		case <-dc.done:
+			return
+		case env := <-dc.send:
+			dc.mu.Lock()
+			err := writeEnvelope(dc.conn, env)
+			dc.mu.Unlock()
+			if err != nil {
+				return
+			}
 		}
 	}
 }
@@ -2152,7 +2710,7 @@ func enableTCPNoDelay(conn *websocket.Conn) {
 	}
 }
 
-func isACPXCommandType(messageType string) bool {
+func isAgentChatCommandType(messageType string) bool {
 	switch messageType {
 	case protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete:
 		return true
@@ -2457,37 +3015,71 @@ func mergeTaskRecordEvents(base []protocol.TaskEvent, extra []protocol.TaskEvent
 	merged := append([]protocol.TaskEvent(nil), base...)
 	seen := make(map[string]struct{}, len(merged))
 	for _, event := range merged {
-		seen[taskEventSignature(event)] = struct{}{}
+		for _, signature := range taskEventSignatures(event) {
+			seen[signature] = struct{}{}
+		}
 	}
 	for _, event := range extra {
-		signature := taskEventSignature(event)
-		if _, ok := seen[signature]; ok {
+		signatures := taskEventSignatures(event)
+		duplicate := false
+		for _, signature := range signatures {
+			if _, ok := seen[signature]; ok {
+				duplicate = true
+				break
+			}
+		}
+		if duplicate {
 			if updated, ok := replaceExistingTaskRecordEventByStableKey(merged, event); ok {
 				merged = updated
 			}
 			continue
 		}
 		merged = append(merged, event)
-		seen[signature] = struct{}{}
+		for _, signature := range signatures {
+			seen[signature] = struct{}{}
+		}
 	}
 	return orderTaskRecordEvents(merged)
 }
 
+func mergeDaemonTaskRecordEvents(daemonEvents, serverEvents []protocol.TaskEvent, agentRuntime string) []protocol.TaskEvent {
+	return mergeTaskRecordEvents(serverEvents, daemonEvents)
+}
+
 func replaceExistingTaskRecordEventByStableKey(events []protocol.TaskEvent, event protocol.TaskEvent) ([]protocol.TaskEvent, bool) {
-	if key := taskEventACPXEventKey(event); key != "" && shouldReplaceACPXKeyedEvent(event) {
+	if key := taskEventACPXEventKey(event); key != "" {
 		for index, existing := range events {
 			if taskEventACPXEventKey(existing) != key {
 				continue
 			}
-			event.EventID = existing.EventID
-			event.Sequence = existing.Sequence
-			event.Timestamp = existing.Timestamp
+			replacement, replace := preferredMergedACPXKeyedEvent(existing, event)
+			if !replace {
+				return events, false
+			}
+			replacement.EventID = existing.EventID
+			replacement.Sequence = existing.Sequence
+			replacement.Timestamp = existing.Timestamp
 			next := append([]protocol.TaskEvent(nil), events...)
-			next[index] = event
+			next[index] = replacement
 			return next, true
 		}
 	}
 	return events, false
+}
+
+func preferredMergedACPXKeyedEvent(existing, incoming protocol.TaskEvent) (protocol.TaskEvent, bool) {
+	if assistantStreamVersionsCompatible(existing, incoming) {
+		existingText := taskEventComparableText(existing)
+		incomingText := taskEventComparableText(incoming)
+		if len(incomingText) > len(existingText) {
+			return incoming, true
+		}
+		return existing, false
+	}
+	if shouldReplaceACPXKeyedEvent(incoming) {
+		return incoming, true
+	}
+	return existing, false
 }
 
 func rebaseACPXEventsAfterBase(base []protocol.TaskEvent, extra []protocol.TaskEvent) []protocol.TaskEvent {
@@ -2576,9 +3168,29 @@ func sameACPXKeyedEvent(left protocol.TaskEvent, right protocol.TaskEvent) bool 
 	leftText := taskEventComparableText(left)
 	rightText := taskEventComparableText(right)
 	if leftText != "" && rightText != "" {
-		return leftText == rightText
+		return leftText == rightText || assistantStreamVersionsCompatible(left, right)
 	}
 	return true
+}
+
+func assistantStreamVersionsCompatible(left protocol.TaskEvent, right protocol.TaskEvent) bool {
+	if left.EventType != right.EventType || (left.EventType != "assistant.message" && left.EventType != "assistant.thinking") {
+		return false
+	}
+	leftText := taskEventComparableText(left)
+	rightText := taskEventComparableText(right)
+	if leftText == "" || rightText == "" {
+		return false
+	}
+	if !taskEventHasAssistantStreamID(left) && !taskEventHasAssistantStreamID(right) {
+		return false
+	}
+	return strings.HasPrefix(leftText, rightText) || strings.HasPrefix(rightText, leftText)
+}
+
+func taskEventHasAssistantStreamID(event protocol.TaskEvent) bool {
+	data := taskEventDataMap(event)
+	return stringFromMap(data, "stream_id", "streamId") != ""
 }
 
 func taskEventComparableText(event protocol.TaskEvent) string {
@@ -2657,6 +3269,18 @@ func rebaseACPXEventKey(eventKey string, turnIndex int) string {
 func orderTaskRecordEvents(events []protocol.TaskEvent) []protocol.TaskEvent {
 	ordered := append([]protocol.TaskEvent(nil), events...)
 	sort.SliceStable(ordered, func(i, j int) bool {
+		turnI, hasTurnI := taskEventACPXTurnIndex(ordered[i])
+		turnJ, hasTurnJ := taskEventACPXTurnIndex(ordered[j])
+		if hasTurnI && hasTurnJ && turnI != turnJ {
+			return turnI < turnJ
+		}
+		if (!hasTurnI && !hasTurnJ) || (hasTurnI && hasTurnJ) {
+			orderI, hasOrderI := taskEventLogicalSequence(ordered[i])
+			orderJ, hasOrderJ := taskEventLogicalSequence(ordered[j])
+			if hasOrderI && hasOrderJ && orderI != orderJ {
+				return orderI < orderJ
+			}
+		}
 		if ordered[i].Timestamp != ordered[j].Timestamp {
 			if ordered[i].Timestamp == 0 {
 				return false
@@ -2683,16 +3307,30 @@ func hasTaskEventSignature(events []protocol.TaskEvent, event protocol.TaskEvent
 		}
 		return false
 	}
-	signature := taskEventSignature(event)
+	signatures := taskEventSignatures(event)
 	for _, existing := range events {
-		if taskEventSignature(existing) == signature {
-			return true
+		existingSignatures := taskEventSignatures(existing)
+		for _, signature := range signatures {
+			for _, existingSignature := range existingSignatures {
+				if signature == existingSignature {
+					return true
+				}
+			}
 		}
 	}
 	return false
 }
 
 func upsertOrAppendTaskRecordEvent(events []protocol.TaskEvent, event protocol.TaskEvent) ([]protocol.TaskEvent, protocol.TaskEvent, bool) {
+	if event.EventType == "user.prompt" {
+		if turnID := taskEventTurnID(event); turnID != "" {
+			for _, existing := range events {
+				if existing.EventType == "user.prompt" && taskEventTurnID(existing) == turnID {
+					return events, existing, false
+				}
+			}
+		}
+	}
 	if key := taskEventACPXEventKey(event); key != "" && shouldReplaceACPXKeyedEvent(event) {
 		for index, existing := range events {
 			if taskEventACPXEventKey(existing) != key {
@@ -2749,24 +3387,35 @@ func isContentEvent(eventType string) bool {
 }
 
 func taskEventSignature(event protocol.TaskEvent) string {
-	if eventKey := taskEventACPXEventKey(event); eventKey != "" {
-		return "acpx:" + eventKey
-	}
+	return taskEventSignatures(event)[0]
+}
+
+func taskEventSignatures(event protocol.TaskEvent) []string {
 	if event.EventType == "user.prompt" {
+		signatures := make([]string, 0, 2)
 		if turnID := taskEventTurnID(event); turnID != "" {
-			return event.EventType + ":turn:" + turnID
+			signatures = append(signatures, event.EventType+":turn:"+turnID)
+		}
+		if eventKey := taskEventACPXEventKey(event); eventKey != "" {
+			signatures = append(signatures, "acpx:"+eventKey)
+		}
+		if len(signatures) > 0 {
+			return signatures
 		}
 		if event.EventID != "" {
-			return event.EventType + ":id:" + event.EventID
+			return []string{event.EventType + ":id:" + event.EventID}
 		}
 	}
+	if eventKey := taskEventACPXEventKey(event); eventKey != "" {
+		return []string{"acpx:" + eventKey}
+	}
 	if len(event.Data) > 0 {
-		return event.EventType + ":" + string(event.Data)
+		return []string{event.EventType + ":" + string(event.Data)}
 	}
 	if len(event.Raw) > 0 {
-		return event.EventType + ":" + string(event.Raw)
+		return []string{event.EventType + ":" + string(event.Raw)}
 	}
-	return fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID)
+	return []string{fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID)}
 }
 
 func taskEventACPXEventKey(event protocol.TaskEvent) string {
@@ -2828,6 +3477,37 @@ func taskEventACPXTurnIndex(event protocol.TaskEvent) (int, bool) {
 	return 0, false
 }
 
+func taskEventLogicalSequence(event protocol.TaskEvent) (int64, bool) {
+	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
+		if len(raw) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(raw, &data); err != nil {
+			continue
+		}
+		if sequence, ok := intFromMap(data, "_seq"); ok {
+			return int64(sequence), true
+		}
+	}
+	if _, ok := taskEventACPXTurnIndex(event); ok {
+		switch event.EventType {
+		case "user.prompt":
+			if strings.EqualFold(event.Source, "web") {
+				return 1, true
+			}
+		case "task.stopping":
+			return 1<<60 - 1, true
+		case "task.completed", "turn.completed", "task.failed", "turn.failed", "task.error", "task.killed", "task.stopped":
+			return 1 << 60, true
+		}
+	}
+	if event.Sequence > 0 {
+		return event.Sequence, true
+	}
+	return 0, false
+}
+
 func intFromMap(source map[string]any, keys ...string) (int, bool) {
 	for _, key := range keys {
 		switch value := source[key].(type) {
@@ -2864,6 +3544,22 @@ func taskEventTurnID(event protocol.TaskEvent) string {
 		}
 	}
 	return ""
+}
+
+func latestUserPromptTurnID(events []protocol.TaskEvent) string {
+	var selected protocol.TaskEvent
+	found := false
+	for _, event := range events {
+		if event.EventType != "user.prompt" || taskEventTurnID(event) == "" {
+			continue
+		}
+		if !found || event.Sequence > selected.Sequence ||
+			(event.Sequence == selected.Sequence && event.Timestamp >= selected.Timestamp) {
+			selected = event
+			found = true
+		}
+	}
+	return taskEventTurnID(selected)
 }
 
 func stringFromMap(source map[string]any, keys ...string) string {
@@ -3030,10 +3726,8 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 		Rows:          initialRows,
 	}
 	startEnv := protocol.NewEnvelope(protocol.TypeTerminalStreamStart, "server", startPayload)
-	dc.mu.Lock()
-	err = writeEnvelope(dc.conn, startEnv)
-	dc.mu.Unlock()
-	if err != nil {
+	if !dc.writeEnvelopeDirect(startEnv) {
+		_ = terminal.writeJSON(map[string]string{"type": "exit", "reason": "device_offline"})
 		return
 	}
 	for {
@@ -3060,7 +3754,10 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 						Cols:       controlMsg.Cols,
 						Rows:       controlMsg.Rows,
 					}
-					dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamResize, "server", resizePayload)
+					if !dc.enqueue(protocol.NewEnvelope(protocol.TypeTerminalStreamResize, "server", resizePayload)) {
+						_ = terminal.writeJSON(map[string]string{"type": "exit", "reason": "device_offline"})
+						return
+					}
 					continue
 				case "exit":
 					exitPayload := protocol.TerminalStreamExit{
@@ -3068,7 +3765,10 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 						TerminalID:   terminalID,
 						CloseSession: controlMsg.CloseSession,
 					}
-					dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", exitPayload)
+					if !dc.enqueue(protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", exitPayload)) {
+						_ = terminal.writeJSON(map[string]string{"type": "exit", "reason": "device_offline"})
+						return
+					}
 					continue
 				}
 			}
@@ -3081,17 +3781,22 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 				if dc.terminalBinary {
 					frame, err := protocol.MarshalTerminalStreamDataBinary(dataPayload)
 					if err != nil {
-						dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "server", dataPayload)
+						if !dc.enqueue(protocol.NewEnvelope(protocol.TypeTerminalStreamData, "server", dataPayload)) {
+							_ = terminal.writeJSON(map[string]string{"type": "exit", "reason": "device_offline"})
+							return
+						}
 						continue
 					}
-					dc.mu.Lock()
-					err = dc.conn.WriteMessage(websocket.BinaryMessage, frame)
-					dc.mu.Unlock()
-					if err == nil {
-						continue
+					if !dc.writeMessageDirect(websocket.BinaryMessage, frame) {
+						_ = terminal.writeJSON(map[string]string{"type": "exit", "reason": "device_offline"})
+						return
 					}
+					continue
 				}
-				dc.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "server", dataPayload)
+				if !dc.enqueue(protocol.NewEnvelope(protocol.TypeTerminalStreamData, "server", dataPayload)) {
+					_ = terminal.writeJSON(map[string]string{"type": "exit", "reason": "device_offline"})
+					return
+				}
 			}
 		}
 	}

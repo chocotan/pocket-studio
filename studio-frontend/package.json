@@ -7,10 +7,14 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:event-model": "node scripts/test-agent-event-model.mjs",
     "test:online-terminal": "node scripts/check-online-terminal.mjs",
-    "build:electron:linux": "npm run build && electron-builder --linux AppImage",
-    "build:electron:mac": "npm run build && electron-builder --mac dmg",
-    "build:electron:win": "npm run build && electron-builder --win nsis",
+    "build:electron:linux": "npm run build && npm run package:electron:linux",
+    "build:electron:mac": "npm run build && npm run package:electron:mac",
+    "build:electron:win": "npm run build && npm run package:electron:win",
+    "package:electron:linux": "electron-builder --linux AppImage",
+    "package:electron:mac": "electron-builder --mac dmg",
+    "package:electron:win": "electron-builder --win nsis",
     "lint": "eslint .",
     "preview": "vite preview",
     "test:direct-terminal": "node ../scripts/e2e-direct-terminal.mjs"

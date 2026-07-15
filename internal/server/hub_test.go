@@ -212,6 +212,137 @@ func TestTaskSnapshotMapsACPXSessionNameAlias(t *testing.T) {
 	}
 }
 
+func TestTaskSnapshotExplicitDeletionRemovesFreshActiveTaskAndAliases(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	dc := &daemonConn{userID: auth.OwnerAdmin, deviceID: "device-1"}
+	taskKey := scopedKey(auth.OwnerAdmin, "task-delete")
+	aliasKey := scopedKey(auth.OwnerAdmin, "provider-delete")
+	record := protocol.TaskRecord{
+		TaskID: "task-delete", SessionID: "provider-delete", SessionName: "task-delete",
+		DeviceID: "device-1", Status: "running", UpdatedAt: time.Now().Unix(),
+	}
+	h.taskRecords[taskKey] = record
+	h.taskRecords[aliasKey] = record
+	h.taskDevices[taskKey] = "device-1"
+	h.taskDevices[aliasKey] = "device-1"
+	h.taskEvents[taskKey] = []protocol.Envelope{{Type: protocol.TypeTaskEvent}}
+	h.taskEvents[aliasKey] = []protocol.Envelope{{Type: protocol.TypeTaskEvent}}
+	h.taskAliases[aliasKey] = "task-delete"
+
+	h.handleDaemonMessage(dc, protocol.NewEnvelope(protocol.TypeTaskSnapshot, "daemon", protocol.TaskSnapshot{
+		DeviceID: "device-1", DeletedTaskIDs: []string{"task-delete"}, Tasks: []protocol.TaskRecord{record},
+	}))
+
+	for _, key := range []string{taskKey, aliasKey} {
+		if _, ok := h.taskRecords[key]; ok {
+			t.Fatalf("explicitly deleted task record %q remains", key)
+		}
+		if _, ok := h.taskDevices[key]; ok {
+			t.Fatalf("explicitly deleted task device %q remains", key)
+		}
+		if _, ok := h.taskEvents[key]; ok {
+			t.Fatalf("explicitly deleted task events %q remain", key)
+		}
+		if _, ok := h.taskAliases[key]; ok {
+			t.Fatalf("explicitly deleted task alias %q remains", key)
+		}
+	}
+}
+
+func TestTaskSnapshotExplicitDeletionRejectsSpoofedSnapshotDevice(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	dc := &daemonConn{userID: auth.OwnerAdmin, deviceID: "device-1"}
+	taskKey := scopedKey(auth.OwnerAdmin, "other-device-task")
+	record := protocol.TaskRecord{
+		TaskID: "other-device-task", DeviceID: "device-2", Status: "completed", UpdatedAt: time.Now().Unix(),
+	}
+	h.taskRecords[taskKey] = record
+	h.taskDevices[taskKey] = "device-2"
+
+	h.handleDaemonMessage(dc, protocol.NewEnvelope(protocol.TypeTaskSnapshot, "daemon", protocol.TaskSnapshot{
+		DeviceID: "device-2", DeletedTaskIDs: []string{"other-device-task"}, Tasks: []protocol.TaskRecord{},
+	}))
+
+	if got, ok := h.taskRecords[taskKey]; !ok || got.DeviceID != "device-2" {
+		t.Fatalf("device-1 deletion removed device-2 task: %#v, exists=%v", got, ok)
+	}
+}
+
+func TestTaskSnapshotExplicitDeletionCannotRemoveAnotherDeviceTask(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	dc := &daemonConn{userID: auth.OwnerAdmin, deviceID: "device-1"}
+	taskKey := scopedKey(auth.OwnerAdmin, "other-device-task")
+	record := protocol.TaskRecord{
+		TaskID: "other-device-task", DeviceID: "device-2", Status: "completed", UpdatedAt: time.Now().Unix(),
+	}
+	h.taskRecords[taskKey] = record
+	h.taskDevices[taskKey] = "device-2"
+
+	h.handleDaemonMessage(dc, protocol.NewEnvelope(protocol.TypeTaskSnapshot, "daemon", protocol.TaskSnapshot{
+		DeviceID: "device-1", DeletedTaskIDs: []string{"other-device-task"}, Tasks: []protocol.TaskRecord{},
+	}))
+
+	if got, ok := h.taskRecords[taskKey]; !ok || got.DeviceID != "device-2" {
+		t.Fatalf("device-1 deletion removed device-2 task: %#v, exists=%v", got, ok)
+	}
+}
+
+func TestTaskSnapshotFromReplacedDaemonCannotDeleteCurrentTask(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	old := &daemonConn{userID: auth.OwnerAdmin, deviceID: "device-1"}
+	replacement := &daemonConn{userID: auth.OwnerAdmin, deviceID: "device-1"}
+	h.daemons[daemonKey(auth.OwnerAdmin, "device-1")] = replacement
+	taskKey := scopedKey(auth.OwnerAdmin, "replacement-task")
+	record := protocol.TaskRecord{
+		TaskID: "replacement-task", DeviceID: "device-1", Status: "running", UpdatedAt: time.Now().Unix(),
+	}
+	h.taskRecords[taskKey] = record
+	h.taskDevices[taskKey] = "device-1"
+
+	h.handleDaemonMessage(old, protocol.NewEnvelope(protocol.TypeTaskSnapshot, "daemon", protocol.TaskSnapshot{
+		DeviceID: "device-1", DeletedTaskIDs: []string{"replacement-task"}, Tasks: []protocol.TaskRecord{},
+	}))
+
+	if got, ok := h.taskRecords[taskKey]; !ok || got.Status != "running" {
+		t.Fatalf("replaced daemon deleted current task: %#v, exists=%v", got, ok)
+	}
+}
+
+func TestTaskSnapshotExplicitDeletionCannotRemoveAnotherUsersAlias(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	dc := &daemonConn{userID: "user-a", deviceID: "device-a"}
+	userATaskKey := scopedKey("user-a", "shared-task")
+	userBTaskKey := scopedKey("user-b", "shared-task")
+	userBAliasKey := scopedKey("user-b", "provider-b")
+	h.taskRecords[userATaskKey] = protocol.TaskRecord{TaskID: "shared-task", DeviceID: "device-a"}
+	h.taskDevices[userATaskKey] = "device-a"
+	h.taskRecords[userBTaskKey] = protocol.TaskRecord{TaskID: "shared-task", DeviceID: "device-b"}
+	h.taskRecords[userBAliasKey] = protocol.TaskRecord{TaskID: "shared-task", DeviceID: "device-b"}
+	h.taskDevices[userBTaskKey] = "device-b"
+	h.taskDevices[userBAliasKey] = "device-b"
+	h.taskEvents[userBAliasKey] = []protocol.Envelope{{Type: protocol.TypeTaskEvent}}
+	h.taskAliases[userBAliasKey] = "shared-task"
+
+	h.handleDaemonMessage(dc, protocol.NewEnvelope(protocol.TypeTaskSnapshot, "daemon", protocol.TaskSnapshot{
+		DeviceID: "device-a", DeletedTaskIDs: []string{"shared-task"}, Tasks: []protocol.TaskRecord{},
+	}))
+
+	for _, key := range []string{userBTaskKey, userBAliasKey} {
+		if _, ok := h.taskRecords[key]; !ok {
+			t.Fatalf("user-a deletion removed user-b task record %q", key)
+		}
+		if got := h.taskDevices[key]; got != "device-b" {
+			t.Fatalf("user-a deletion changed user-b task device %q to %q", key, got)
+		}
+	}
+	if got := h.taskAliases[userBAliasKey]; got != "shared-task" {
+		t.Fatalf("user-a deletion removed user-b alias: %q", got)
+	}
+	if _, ok := h.taskEvents[userBAliasKey]; !ok {
+		t.Fatal("user-a deletion removed user-b task events")
+	}
+}
+
 func TestEnrichTerminalStreamAlertUsesCachedHostLayout(t *testing.T) {
 	h := NewHub(auth.NewOpen(""))
 	h.cacheProjectState(auth.OwnerAdmin, Project{
@@ -431,6 +562,108 @@ func TestMergeTaskRecordEventsDeduplicatesRestoredACPXEventsByStableKey(t *testi
 	}
 }
 
+func TestMergeTaskRecordEventsCoalescesLiveAssistantPrefixWithRestoredFullTurn(t *testing.T) {
+	restored := []protocol.TaskEvent{
+		{
+			TaskID: "task-1", EventID: "history-user", EventType: "user.prompt", Source: "acpx", Sequence: 1,
+			Data: json.RawMessage(`{"prompt":"磁盘剩余空间多少","turn_id":"history-turn-0","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+		},
+		{
+			TaskID: "task-1", EventID: "history-start", EventType: "task.started", Source: "acpx", Sequence: 2,
+			Data: json.RawMessage(`{"_seq":2,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`),
+		},
+		{
+			TaskID: "task-1", EventID: "history-assistant", EventType: "assistant.message", Source: "acpx", Sequence: 3,
+			Data: json.RawMessage(`{"text":"磁盘剩余空间为 60 GB，可用率正常。","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+		},
+		{
+			TaskID: "task-1", EventID: "history-done", EventType: "task.completed", Source: "acpx", Sequence: 4,
+			Data: json.RawMessage(`{"_seq":10,"stop_reason":"end_turn","acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`),
+		},
+	}
+	live := []protocol.TaskEvent{
+		{
+			TaskID: "task-1", EventID: "live-user", EventType: "user.prompt", Source: "web", Sequence: 11,
+			Data: json.RawMessage(`{"prompt":"磁盘剩余空间多少","turn_id":"live-turn","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+		},
+		{
+			TaskID: "task-1", EventID: "live-start", EventType: "task.started", Source: "codex", Sequence: 12,
+			Data: json.RawMessage(`{"_seq":2,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`),
+		},
+		{
+			TaskID: "task-1", EventID: "live-assistant", EventType: "assistant.message", Source: "codex", Sequence: 13,
+			Data: json.RawMessage(`{"text":"磁盘剩余空间为 60 GB","stream_id":"assistant-0","replace":true,"_seq":8,"acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`),
+		},
+	}
+
+	for _, test := range []struct {
+		name  string
+		base  []protocol.TaskEvent
+		extra []protocol.TaskEvent
+	}{
+		{name: "restored_then_live", base: restored, extra: live},
+		{name: "live_then_restored", base: live, extra: restored},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			merged := mergeTaskRecordEvents(test.base, test.extra)
+			counts := map[string]int{}
+			assistantText := ""
+			for _, event := range merged {
+				counts[event.EventType]++
+				if turn, ok := taskEventACPXTurnIndex(event); ok && turn != 0 {
+					t.Fatalf("event was spuriously rebased to turn %d: %#v", turn, merged)
+				}
+				if event.EventType == "assistant.message" {
+					assistantText = taskEventComparableText(event)
+				}
+			}
+			if counts["user.prompt"] != 1 || counts["assistant.message"] != 1 || counts["task.completed"] != 1 {
+				t.Fatalf("merged counts = %#v, want one prompt, assistant, and terminal; events=%#v", counts, merged)
+			}
+			if assistantText != "磁盘剩余空间为 60 GB，可用率正常。" {
+				t.Fatalf("assistant text = %q, want restored complete response; events=%#v", assistantText, merged)
+			}
+		})
+	}
+}
+
+func TestMergeDaemonTaskRecordKeepsRestoredTerminalForLiveAssistantPrefix(t *testing.T) {
+	existing := protocol.TaskRecord{
+		TaskID: "task-1", AgentRuntime: "acpx", Status: "running", UpdatedAt: 100,
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "live-user", EventType: "user.prompt", Source: "web", Sequence: 1, Data: json.RawMessage(`{"prompt":"来点马斯克新闻","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`)},
+			{TaskID: "task-1", EventID: "live-assistant", EventType: "assistant.message", Source: "codex", Sequence: 2, Data: json.RawMessage(`{"text":"马斯克新闻摘要","stream_id":"assistant-0","replace":true,"_seq":8,"acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`)},
+		},
+	}
+	incoming := protocol.TaskRecord{
+		TaskID: "task-1", AgentRuntime: "acpx", Status: "completed", UpdatedAt: 101,
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "history-user", EventType: "user.prompt", Source: "acpx", Sequence: 1, Data: json.RawMessage(`{"prompt":"来点马斯克新闻","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`)},
+			{TaskID: "task-1", EventID: "history-assistant", EventType: "assistant.message", Source: "acpx", Sequence: 2, Data: json.RawMessage(`{"text":"马斯克新闻摘要与来源链接。","acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`)},
+			{TaskID: "task-1", EventID: "history-done", EventType: "task.completed", Source: "acpx", Sequence: 3, Data: json.RawMessage(`{"_seq":10,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`)},
+		},
+	}
+
+	mergedEvents := mergeDaemonTaskRecordEvents(incoming.Events, existing.Events, "acpx")
+	if status := mergedTaskRecordStatus(existing, incoming, mergedEvents); status != "completed" {
+		t.Fatalf("merged status = %q, want completed; events=%#v", status, mergedEvents)
+	}
+	counts := map[string]int{}
+	promptEventID := ""
+	for _, event := range mergedEvents {
+		counts[event.EventType]++
+		if event.EventType == "user.prompt" {
+			promptEventID = event.EventID
+		}
+	}
+	if counts["user.prompt"] != 1 || counts["assistant.message"] != 1 || counts["task.completed"] != 1 {
+		t.Fatalf("merged lifecycle duplicated or lost events: counts=%#v events=%#v", counts, mergedEvents)
+	}
+	if promptEventID != "live-user" {
+		t.Fatalf("merge replaced the live prompt identity with %q: %#v", promptEventID, mergedEvents)
+	}
+}
+
 func TestMergeTaskRecordEventsKeepsRepeatedACPXPromptTurnsWithDifferentStableKeys(t *testing.T) {
 	base := []protocol.TaskEvent{
 		{
@@ -468,6 +701,216 @@ func TestMergeTaskRecordEventsKeepsRepeatedACPXPromptTurnsWithDifferentStableKey
 	merged := mergeTaskRecordEvents(base, extra)
 	if len(merged) != 4 {
 		t.Fatalf("merged events = %#v, want both repeated prompt turns", merged)
+	}
+}
+
+func TestOrderTaskRecordEventsUsesACPXLogicalSequenceBeforeTransportOrder(t *testing.T) {
+	events := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "tail", EventType: "assistant.message", Sequence: 14, Timestamp: 100, Data: json.RawMessage(`{"text":"tail","_seq":7,"acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:1"}`)},
+		{TaskID: "task-1", EventID: "done", EventType: "task.completed", Sequence: 17, Timestamp: 50, Data: json.RawMessage(`{"_seq":10,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`)},
+		{TaskID: "task-1", EventID: "output", EventType: "tool.output", Sequence: 13, Timestamp: 300, Data: json.RawMessage(`{"_seq":6,"acpx_turn_index":0,"acpx_event_key":"turn:0:tool.output:tool-1"}`)},
+		{TaskID: "task-1", EventID: "user", EventType: "user.prompt", Sequence: 1, Timestamp: 200, Data: json.RawMessage(`{"prompt":"hello","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`)},
+		{TaskID: "task-1", EventID: "first", EventType: "assistant.message", Sequence: 5, Timestamp: 400, Data: json.RawMessage(`{"text":"first","_seq":5,"acpx_turn_index":0,"acpx_event_key":"turn:0:assistant.message:0"}`)},
+		{TaskID: "task-1", EventID: "start", EventType: "task.started", Sequence: 2, Timestamp: 150, Data: json.RawMessage(`{"_seq":2,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`)},
+		{TaskID: "task-1", EventID: "call", EventType: "tool.call", Sequence: 4, Timestamp: 500, Data: json.RawMessage(`{"_seq":4,"acpx_turn_index":0,"acpx_event_key":"turn:0:tool.call:tool-1"}`)},
+	}
+
+	ordered := orderTaskRecordEvents(events)
+	want := []string{"user", "start", "call", "first", "output", "tail", "done"}
+	for index, eventID := range want {
+		if ordered[index].EventID != eventID {
+			t.Fatalf("ordered[%d] = %q, want %q; events=%#v", index, ordered[index].EventID, eventID, ordered)
+		}
+	}
+}
+
+func TestMergedTaskRecordStatusKeepsTerminalAgainstStaleRunningAndAllowsNewTurn(t *testing.T) {
+	existing := protocol.TaskRecord{
+		TaskID: "task-1", AgentRuntime: "acpx", Status: "completed", UpdatedAt: 200,
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "prompt-0", EventType: "user.prompt", Sequence: 1, Timestamp: 100, Data: json.RawMessage(`{"prompt":"old","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`)},
+			{TaskID: "task-1", EventID: "start-0", EventType: "task.started", Sequence: 2, Timestamp: 100, Data: json.RawMessage(`{"_seq":2,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`)},
+			{TaskID: "task-1", EventID: "done-0", EventType: "task.completed", Sequence: 10, Timestamp: 101, Data: json.RawMessage(`{"_seq":10,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`)},
+		},
+	}
+	stale := protocol.TaskRecord{
+		TaskID: "task-1", AgentRuntime: "acpx", Status: "running", UpdatedAt: 100,
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "stale-start-0", EventType: "task.started", Sequence: 2, Timestamp: 100, Data: json.RawMessage(`{"_seq":2,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`)},
+		},
+	}
+	mergedEvents := mergeDaemonTaskRecordEvents(stale.Events, existing.Events, "acpx")
+	if got := mergedTaskRecordStatus(existing, stale, mergedEvents); got != "completed" {
+		t.Fatalf("stale running merge status = %q, want completed", got)
+	}
+
+	newTurn := protocol.TaskRecord{
+		TaskID: "task-1", AgentRuntime: "acpx", Status: "running", UpdatedAt: 201,
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "prompt-1", EventType: "user.prompt", Sequence: 11, Timestamp: 201, Data: json.RawMessage(`{"prompt":"new","acpx_turn_index":1,"acpx_event_key":"turn:1:user.prompt:0"}`)},
+			{TaskID: "task-1", EventID: "start-1", EventType: "task.started", Sequence: 12, Timestamp: 201, Data: json.RawMessage(`{"_seq":2,"acpx_turn_index":1,"acpx_event_key":"turn:1:task.started:0"}`)},
+		},
+	}
+	mergedEvents = mergeDaemonTaskRecordEvents(newTurn.Events, existing.Events, "acpx")
+	if got := mergedTaskRecordStatus(existing, newTurn, mergedEvents); got != "running" {
+		t.Fatalf("new turn merge status = %q, want running", got)
+	}
+}
+
+func TestMergedTaskRecordStatusKeepsQueuedPromptOverStalePreviousTurnHistory(t *testing.T) {
+	tests := []struct {
+		name      string
+		runtime   string
+		oldPrompt json.RawMessage
+		oldDone   json.RawMessage
+		newPrompt json.RawMessage
+	}{
+		{
+			name: "acpx-index", runtime: "acpx",
+			oldPrompt: json.RawMessage(`{"prompt":"old","turn_id":"turn-old","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+			oldDone:   json.RawMessage(`{"_seq":10,"turn_id":"turn-old","acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`),
+			newPrompt: json.RawMessage(`{"prompt":"new","turn_id":"turn-new","acpx_turn_index":1,"acpx_event_key":"turn:1:user.prompt:0"}`),
+		},
+		{
+			name: "direct-turn-id", runtime: "direct_acp",
+			oldPrompt: json.RawMessage(`{"prompt":"old","turn_id":"turn-old"}`),
+			oldDone:   json.RawMessage(`{"turn_id":"turn-old"}`),
+			newPrompt: json.RawMessage(`{"prompt":"new","turn_id":"turn-new"}`),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			existing := protocol.TaskRecord{
+				TaskID: "task-1", AgentRuntime: test.runtime, Status: "queued", UpdatedAt: 201,
+				Events: []protocol.TaskEvent{
+					{TaskID: "task-1", EventID: "prompt-old", EventType: "user.prompt", Sequence: 1, Timestamp: 100, Data: test.oldPrompt},
+					{TaskID: "task-1", EventID: "done-old", EventType: "task.completed", Sequence: 10, Timestamp: 101, Data: test.oldDone},
+					{TaskID: "task-1", EventID: "prompt-new", EventType: "user.prompt", Sequence: 11, Timestamp: 201, Data: test.newPrompt},
+				},
+			}
+			stale := protocol.TaskRecord{
+				TaskID: "task-1", AgentRuntime: test.runtime, Status: "completed", UpdatedAt: 101,
+				Events: []protocol.TaskEvent{
+					{TaskID: "task-1", EventID: "history-prompt-old", EventType: "user.prompt", Sequence: 1, Timestamp: 100, Data: test.oldPrompt},
+					{TaskID: "task-1", EventID: "history-done-old", EventType: "task.completed", Sequence: 10, Timestamp: 101, Data: test.oldDone},
+				},
+			}
+			mergedEvents := mergeDaemonTaskRecordEvents(stale.Events, existing.Events, test.runtime)
+			if got := mergedTaskRecordStatus(existing, stale, mergedEvents); got != "queued" {
+				t.Fatalf("merged status = %q, want queued; events=%#v", got, mergedEvents)
+			}
+		})
+	}
+}
+
+func TestPrepareDirectACPDispatchKeepsTransportOrderedPromptUnindexed(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	taskKey := scopedKey(auth.OwnerAdmin, "task-1")
+	now := time.Now().Unix()
+	h.taskRecords[taskKey] = protocol.TaskRecord{
+		TaskID: "task-1", AgentRuntime: "direct_acp", Status: "completed", UpdatedAt: now,
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "old-tail", EventType: "assistant.message", Source: "claude_code", Sequence: 14, Timestamp: now, Data: json.RawMessage(`{"text":"old","turn_id":"turn-old"}`)},
+			{TaskID: "task-1", EventID: "old-done", EventType: "task.completed", Source: "claude_code", Sequence: 17, Timestamp: now, Data: json.RawMessage(`{"turn_id":"turn-old"}`)},
+		},
+	}
+	prompt := h.prepareTaskDispatchRecordLocked(auth.OwnerAdmin, "dev-1", protocol.TaskDispatch{
+		TaskID: "task-1", TurnID: "turn-new", AgentRuntime: "direct_acp", Prompt: "来点马斯克新闻",
+	})
+	var data map[string]any
+	if err := json.Unmarshal(prompt.Data, &data); err != nil {
+		t.Fatalf("decode prompt data: %v", err)
+	}
+	if _, ok := data["acpx_turn_index"]; ok {
+		t.Fatalf("direct ACP optimistic prompt unexpectedly indexed: %#v", data)
+	}
+	newStart := protocol.TaskEvent{
+		TaskID: "task-1", EventID: "new-start", EventType: "task.started", Source: "claude_code",
+		Sequence: 19, Timestamp: prompt.Timestamp, Data: json.RawMessage(`{"turn_id":"turn-new"}`),
+	}
+	record := h.taskRecords[taskKey]
+	ordered := orderTaskRecordEvents(append(record.Events, newStart))
+	want := []string{"old-tail", "old-done", prompt.EventID, "new-start"}
+	for index, eventID := range want {
+		if ordered[index].EventID != eventID {
+			t.Fatalf("ordered[%d] = %q, want %q; events=%#v", index, ordered[index].EventID, eventID, ordered)
+		}
+	}
+	stale := protocol.TaskRecord{
+		TaskID: "task-1", AgentRuntime: "direct_acp", Status: "completed", UpdatedAt: now,
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "history-tail", EventType: "assistant.message", Source: "claude_code", Sequence: 14, Timestamp: now, Data: json.RawMessage(`{"text":"old","turn_id":"turn-old"}`)},
+			{TaskID: "task-1", EventID: "history-done", EventType: "task.completed", Source: "claude_code", Sequence: 17, Timestamp: now, Data: json.RawMessage(`{"turn_id":"turn-old"}`)},
+		},
+	}
+	merged := mergeDaemonTaskRecordEvents(stale.Events, record.Events, "direct_acp")
+	if got := mergedTaskRecordStatus(record, stale, merged); got != "queued" {
+		t.Fatalf("stale previous-turn history status = %q, want queued; events=%#v", got, merged)
+	}
+}
+
+func TestMergedDirectACPRestartStatusKeepsRecoveryTurnRunning(t *testing.T) {
+	existing := protocol.TaskRecord{
+		TaskID: "task-1", AgentRuntime: "direct_acp", Status: "queued", UpdatedAt: 1003,
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "old-start", EventType: "task.started", Sequence: 20, Timestamp: 1000, Data: json.RawMessage(`{"_seq":15,"turn_id":"old-turn"}`)},
+			{TaskID: "task-1", EventID: "old-failed", EventType: "task.failed", Sequence: 26, Timestamp: 1001, Data: json.RawMessage(`{"turn_id":"old-turn","reason":"interrupted"}`)},
+			{TaskID: "task-1", EventID: "recovery-prompt", EventType: "user.prompt", Source: "web", Sequence: 27, Timestamp: 1003, Data: json.RawMessage(`{"prompt":"recover","turn_id":"recovery-turn"}`)},
+		},
+	}
+	incoming := protocol.TaskRecord{
+		TaskID: "task-1", AgentRuntime: "direct_acp", Status: "running", UpdatedAt: 1004,
+		Events: []protocol.TaskEvent{
+			{TaskID: "task-1", EventID: "recovery-start", EventType: "task.started", Sequence: 32, Timestamp: 1004, Data: json.RawMessage(`{"_seq":25,"turn_id":"recovery-turn"}`)},
+		},
+	}
+	merged := mergeDaemonTaskRecordEvents(incoming.Events, existing.Events, "direct_acp")
+	if got := mergedTaskRecordStatus(existing, incoming, merged); got != "running" {
+		t.Fatalf("Direct ACP restart merge status = %q, want running; events=%#v", got, merged)
+	}
+}
+
+func TestCompletedHistoryCannotBeDowngradedThenFailedByHeartbeat(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	taskKey := scopedKey(auth.OwnerAdmin, "task-1")
+	existingEvents := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "start-0", EventType: "task.started", Sequence: 2, Timestamp: 100, Data: json.RawMessage(`{"_seq":2,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`)},
+		{TaskID: "task-1", EventID: "done-0", EventType: "task.completed", Sequence: 10, Timestamp: 101, Data: json.RawMessage(`{"_seq":10,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.completed:0"}`)},
+	}
+	h.taskRecords[taskKey] = protocol.TaskRecord{
+		TaskID: "task-1", DeviceID: "dev-1", AgentRuntime: "acpx", Status: "completed",
+		UpdatedAt: time.Now().Add(-time.Minute).Unix(), Events: existingEvents,
+	}
+	h.taskDevices[taskKey] = "dev-1"
+	requester := &agentChatConn{userID: auth.OwnerAdmin, taskID: "task-1", send: make(chan protocol.Envelope, 16)}
+	h.agentChatHistoryReq["req-1"] = agentChatHistoryRequest{requester: requester, deviceID: "dev-1"}
+	dc := &daemonConn{userID: auth.OwnerAdmin, deviceID: "dev-1", send: make(chan protocol.Envelope, 2)}
+
+	h.handleDaemonMessage(dc, protocol.NewEnvelope(protocol.TypeTaskHistoryResult, "daemon", protocol.TaskHistoryResult{
+		RequestID: "req-1",
+		TaskID:    "task-1",
+		Record: &protocol.TaskRecord{
+			TaskID: "task-1", DeviceID: "dev-1", AgentRuntime: "acpx", Status: "running", UpdatedAt: 100,
+			Events: []protocol.TaskEvent{
+				{TaskID: "task-1", EventID: "stale-start", EventType: "task.started", Sequence: 2, Timestamp: 100, Data: json.RawMessage(`{"_seq":2,"acpx_turn_index":0,"acpx_event_key":"turn:0:task.started:0"}`)},
+			},
+		},
+	}))
+	if got := h.taskRecords[taskKey].Status; got != "completed" {
+		t.Fatalf("status after stale history = %q, want completed", got)
+	}
+
+	h.handleDaemonMessage(dc, protocol.NewEnvelope(protocol.TypeDaemonHeartbeat, "daemon", protocol.DaemonHeartbeat{
+		DeviceID: "dev-1", RunningTaskIDs: []string{},
+	}))
+	record := h.taskRecords[taskKey]
+	if record.Status != "completed" {
+		t.Fatalf("status after heartbeat = %q, want completed", record.Status)
+	}
+	for _, event := range record.Events {
+		if event.EventType == "task.failed" {
+			t.Fatalf("heartbeat synthesized failure after completion: %#v", record.Events)
+		}
 	}
 }
 
@@ -547,6 +990,44 @@ func TestMergeTaskRecordEventsDeduplicatesSameTurnUserPromptEcho(t *testing.T) {
 	}
 }
 
+func TestMergeTaskRecordEventsDeduplicatesKeyedPromptHistoryByTurnID(t *testing.T) {
+	base := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-daemon", EventType: "user.prompt", Sequence: 2, Data: json.RawMessage(`{"prompt":"again","turn_id":"turn-1","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`)},
+	}
+	extra := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-server", EventType: "user.prompt", Sequence: 1, Data: json.RawMessage(`{"prompt":"again","turn_id":"turn-1"}`)},
+	}
+
+	merged := mergeTaskRecordEvents(base, extra)
+	if len(merged) != 1 || merged[0].EventID != "evt-daemon" {
+		t.Fatalf("merged events = %#v, want one keyed daemon prompt", merged)
+	}
+}
+
+func TestUpsertTaskRecordEventDeduplicatesKeyedPromptEchoByTurnID(t *testing.T) {
+	base := []protocol.TaskEvent{
+		{TaskID: "task-1", EventID: "evt-server", EventType: "user.prompt", Sequence: 1, Data: json.RawMessage(`{"prompt":"again","turn_id":"turn-1"}`)},
+	}
+	echo := protocol.TaskEvent{
+		TaskID:    "task-1",
+		EventID:   "evt-daemon",
+		EventType: "user.prompt",
+		Sequence:  2,
+		Data:      json.RawMessage(`{"prompt":"again","turn_id":"turn-1","acpx_turn_index":0,"acpx_event_key":"turn:0:user.prompt:0"}`),
+	}
+
+	merged, forwarded, shouldForward := upsertOrAppendTaskRecordEvent(base, echo)
+	if shouldForward {
+		t.Fatalf("shouldForward = true, want keyed prompt echo suppressed")
+	}
+	if len(merged) != 1 || merged[0].EventID != "evt-server" {
+		t.Fatalf("merged events = %#v, want original optimistic prompt only", merged)
+	}
+	if forwarded.EventID != "evt-server" {
+		t.Fatalf("forwarded event = %#v, want existing optimistic prompt", forwarded)
+	}
+}
+
 func TestTaskEventEnvelopeCarriesNormalizedSequenceAndRawPayload(t *testing.T) {
 	raw := json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","rawInput":{"command":"df -h"}}}}`)
 	event := protocol.TaskEvent{
@@ -610,8 +1091,8 @@ func TestHandleDaemonMessageDoesNotBroadcastDuplicateTaskEvent(t *testing.T) {
 func TestHandleDaemonHistoryResultMergesExistingLiveTurnWithoutDuplication(t *testing.T) {
 	h := NewHub(auth.NewOpen(""))
 	dc := &daemonConn{userID: auth.OwnerAdmin, deviceID: "device-1"}
-	requester := &acpxConn{userID: auth.OwnerAdmin, taskID: "task-1", send: make(chan protocol.Envelope, 8)}
-	h.acpxHistoryReq["req-1"] = requester
+	requester := &agentChatConn{userID: auth.OwnerAdmin, taskID: "task-1", send: make(chan protocol.Envelope, 8)}
+	h.agentChatHistoryReq["req-1"] = agentChatHistoryRequest{requester: requester, deviceID: "device-1"}
 	taskKey := scopedKey(auth.OwnerAdmin, "task-1")
 	h.taskRecords[taskKey] = protocol.TaskRecord{
 		TaskID: "task-1",
@@ -702,9 +1183,10 @@ func TestHandleDaemonHistoryResultMergesExistingLiveTurnWithoutDuplication(t *te
 	if len(record.Events) != 4 {
 		t.Fatalf("record events = %#v, want one restored turn without existing duplicate live turn", record.Events)
 	}
-	for _, event := range record.Events {
-		if strings.HasPrefix(event.EventID, "live-") {
-			t.Fatalf("record events kept duplicate live event %#v; all events=%#v", event, record.Events)
+	wantEventIDs := []string{"live-user", "live-start", "live-assistant", "live-done"}
+	for index, event := range record.Events {
+		if event.EventID != wantEventIDs[index] {
+			t.Fatalf("record event %d id = %q, want preserved live id %q; all events=%#v", index, event.EventID, wantEventIDs[index], record.Events)
 		}
 	}
 	forwarded := make([]protocol.TaskEvent, 0)
@@ -714,6 +1196,11 @@ func TestHandleDaemonHistoryResultMergesExistingLiveTurnWithoutDuplication(t *te
 			if env.Type == protocol.TypeTaskHistoryReady {
 				if len(forwarded) != 4 {
 					t.Fatalf("forwarded events = %#v, want one restored turn", forwarded)
+				}
+				for index, event := range forwarded {
+					if event.EventID != wantEventIDs[index] {
+						t.Fatalf("forwarded event %d id = %q, want %q; events=%#v", index, event.EventID, wantEventIDs[index], forwarded)
+					}
 				}
 				return
 			}

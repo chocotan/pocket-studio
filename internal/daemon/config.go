@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"remote-agent/internal/hostinfo"
@@ -17,7 +18,6 @@ import (
 type Config struct {
 	Device     DeviceConfig         `json:"device"`
 	Server     ServerConfig         `json:"server"`
-	ACPX       ACPXConfig           `json:"acpx"`
 	DirectACP  DirectACPConfig      `json:"direct_acp"`
 	DirectWeb  DirectWebConfig      `json:"direct_web"`
 	Claude     ClaudeConfig         `json:"claude"`
@@ -40,16 +40,6 @@ type ClaudeConfig struct {
 	Args    []string `json:"args"`
 }
 
-type ACPXConfig struct {
-	Enabled               bool     `json:"enabled"`
-	Command               string   `json:"command"`
-	Agent                 string   `json:"agent"`
-	SessionName           string   `json:"session_name"`
-	TTLSeconds            int      `json:"ttl_seconds"`
-	CommandTimeoutSeconds int      `json:"command_timeout_seconds"`
-	Args                  []string `json:"args"`
-}
-
 type DirectACPConfig struct {
 	Enabled bool                            `json:"enabled"`
 	Agents  map[string]DirectACPAgentConfig `json:"agents"`
@@ -59,6 +49,14 @@ type DirectACPAgentConfig struct {
 	Command string            `json:"command"`
 	Args    []string          `json:"args"`
 	Env     map[string]string `json:"env"`
+}
+
+type QualificationAgentConfig struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"-"`
+	EnvKeys []string          `json:"env_keys,omitempty"`
+	Source  string            `json:"source"`
 }
 
 type DirectWebConfig struct {
@@ -93,18 +91,6 @@ func NormalizeConfig(cfg Config) (Config, error) {
 	cfg.Server.Token = strings.TrimSpace(cfg.Server.Token)
 	if cfg.Claude.Command == "" {
 		cfg.Claude.Command = "claude"
-	}
-	if cfg.ACPX.Command == "" {
-		cfg.ACPX.Command = "acpx"
-	}
-	if cfg.ACPX.Agent == "" {
-		cfg.ACPX.Agent = "claude"
-	}
-	if cfg.ACPX.TTLSeconds < 0 {
-		return cfg, fmt.Errorf("acpx.ttl_seconds must be >= 0")
-	}
-	if cfg.ACPX.CommandTimeoutSeconds < 0 {
-		return cfg, fmt.Errorf("acpx.command_timeout_seconds must be >= 0")
 	}
 	cfg.DirectACP.Agents = normalizeDirectACPAgents(cfg.DirectACP.Agents)
 	if cfg.DirectWeb.ListenAddr == "" {
@@ -159,14 +145,6 @@ func DefaultConfig() Config {
 			Command: "claude",
 			Args:    []string{"--output-format", "stream-json", "--verbose"},
 		},
-		ACPX: ACPXConfig{
-			Enabled:               true,
-			Command:               "acpx",
-			Agent:                 "claude",
-			TTLSeconds:            300,
-			CommandTimeoutSeconds: 1800,
-			Args:                  []string{"--format", "json", "--approve-all"},
-		},
 		DirectACP: DirectACPConfig{
 			Enabled: true,
 			Agents:  normalizeDirectACPAgents(nil),
@@ -191,6 +169,13 @@ func normalizeDirectACPAgents(agents map[string]DirectACPAgentConfig) map[string
 		normalized := strings.ToLower(strings.TrimSpace(key))
 		if normalized == "" {
 			continue
+		}
+		if normalized == "codex" {
+			value = migrateLegacyCodexACPConfig(value)
+			value = normalizeOfficialCodexACPConfig(value)
+		}
+		if normalized == "kilo" {
+			value = migrateLegacyKiloACPConfig(value)
 		}
 		out[normalized] = value
 	}
@@ -231,12 +216,72 @@ func normalizeDirectACPAgents(agents map[string]DirectACPAgentConfig) map[string
 	}
 	if _, ok := out["kilo"]; !ok {
 		if path, err := exec.LookPath("kilo"); err == nil {
-			out["kilo"] = DirectACPAgentConfig{Command: path, Args: []string{"acp"}}
+			out["kilo"] = DirectACPAgentConfig{Command: path, Args: []string{"acp", "--pure"}}
 		} else {
-			out["kilo"] = DirectACPAgentConfig{Command: "kilo", Args: []string{"acp"}}
+			out["kilo"] = DirectACPAgentConfig{Command: "kilo", Args: []string{"acp", "--pure"}}
 		}
 	}
 	return out
+}
+
+func migrateLegacyCodexACPConfig(cfg DirectACPAgentConfig) DirectACPAgentConfig {
+	command := normalizedCommandBase(cfg.Command)
+	if command != "npx" && command != "npx.cmd" {
+		return cfg
+	}
+	packageIndex := 0
+	if len(cfg.Args) == 2 && (cfg.Args[0] == "-y" || cfg.Args[0] == "--yes") {
+		packageIndex = 1
+	} else if len(cfg.Args) != 1 {
+		return cfg
+	}
+	legacyPackage := cfg.Args[packageIndex]
+	if legacyPackage != "@zed-industries/codex-acp" && legacyPackage != "@zed-industries/codex-acp@latest" {
+		return cfg
+	}
+	cfg.Args = []string{"-y", "@agentclientprotocol/codex-acp@latest"}
+	return cfg
+}
+
+func normalizeOfficialCodexACPConfig(cfg DirectACPAgentConfig) DirectACPAgentConfig {
+	command := normalizedCommandBase(cfg.Command)
+	if command != "npx" && command != "npx.cmd" {
+		return cfg
+	}
+	packageIndex := 0
+	if len(cfg.Args) == 2 && (cfg.Args[0] == "-y" || cfg.Args[0] == "--yes") {
+		packageIndex = 1
+	} else if len(cfg.Args) != 1 {
+		return cfg
+	}
+	if cfg.Args[packageIndex] != "@agentclientprotocol/codex-acp@latest" {
+		return cfg
+	}
+	if path, err := exec.LookPath("codex-acp"); err == nil {
+		cfg.Command = path
+		cfg.Args = []string{}
+		return cfg
+	}
+	cfg.Args = []string{"-y", "@agentclientprotocol/codex-acp@latest"}
+	return cfg
+}
+
+func migrateLegacyKiloACPConfig(cfg DirectACPAgentConfig) DirectACPAgentConfig {
+	command := normalizedCommandBase(cfg.Command)
+	command = strings.TrimSuffix(strings.TrimSuffix(command, ".exe"), ".cmd")
+	if command != "kilo" && command != "kilocode" {
+		return cfg
+	}
+	if len(cfg.Args) != 1 || cfg.Args[0] != "acp" {
+		return cfg
+	}
+	cfg.Args = []string{"acp", "--pure"}
+	return cfg
+}
+
+func normalizedCommandBase(command string) string {
+	command = strings.ReplaceAll(strings.TrimSpace(command), `\`, "/")
+	return strings.ToLower(filepath.Base(command))
 }
 
 func daemonDevicePath() string {
@@ -318,6 +363,55 @@ func LoadConfigFile() (Config, error) {
 		return cfg, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
+}
+
+func LoadQualificationAgentConfigs() (map[string]QualificationAgentConfig, error) {
+	cfg, err := LoadConfigFile()
+	if err != nil {
+		return nil, err
+	}
+
+	persisted := make(map[string]bool)
+	raw, err := os.ReadFile(ConfigFilePath())
+	if err == nil {
+		var document struct {
+			DirectACP struct {
+				Agents map[string]json.RawMessage `json:"agents"`
+			} `json:"direct_acp"`
+		}
+		if err := json.Unmarshal(raw, &document); err != nil {
+			return nil, fmt.Errorf("%s: %w", ConfigFilePath(), err)
+		}
+		for name := range document.DirectACP.Agents {
+			if normalized := strings.ToLower(strings.TrimSpace(name)); normalized != "" {
+				persisted[normalized] = true
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	agents := normalizeDirectACPAgents(cfg.DirectACP.Agents)
+	result := make(map[string]QualificationAgentConfig, len(agents))
+	for name, agent := range agents {
+		source := "built_in_default"
+		if persisted[name] {
+			source = "normalized_persisted_config"
+		}
+		envKeys := make([]string, 0, len(agent.Env))
+		for key := range agent.Env {
+			envKeys = append(envKeys, key)
+		}
+		sort.Strings(envKeys)
+		result[name] = QualificationAgentConfig{
+			Command: agent.Command,
+			Args:    append([]string(nil), agent.Args...),
+			Env:     agent.Env,
+			EnvKeys: envKeys,
+			Source:  source,
+		}
+	}
+	return result, nil
 }
 
 func SaveConfigFile(cfg Config) error {

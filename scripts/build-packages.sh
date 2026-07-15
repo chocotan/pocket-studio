@@ -55,7 +55,7 @@ fi
 
 (
   cd "$ROOT/studio-frontend"
-  npm run "build:electron:${PLATFORM}"
+  npm run "package:electron:${PLATFORM}"
 )
 
 echo "Build artifacts:"

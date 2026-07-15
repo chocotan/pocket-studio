@@ -17,12 +17,13 @@ import type { AgentConfigOption } from "@/lib/agent-protocol";
 import {
   configOptionsFromTaskEvents,
   getMetadata,
+  getTaskRunTiming,
   getUnixTimestamp,
   isTerminalTaskEvent,
   makeLocalUserPromptEvent,
   mergeTaskEvents,
   modelListFromTaskEvents,
-  sortTaskEventsForDisplay,
+  taskRunTimingMatchesAwaitedTurn,
 } from "./event-model";
 import {
   buildMessageStateFromEvents,
@@ -74,19 +75,6 @@ function envelopeTaskId(envelope: AgentEnvelope) {
   return typeof taskId === "string" ? taskId : "";
 }
 
-function getRunTiming(events: TaskEvent[], agentRuntime: string) {
-  let activeStartedAtMs = 0;
-  for (const event of sortTaskEventsForDisplay(events)) {
-    if (event.event_type === "task.started") {
-      const timestampMs = Number(event.timestamp || 0) * 1000;
-      activeStartedAtMs = timestampMs > 0 ? timestampMs : 0;
-    } else if (isTerminalTaskEvent(event, agentRuntime)) {
-      activeStartedAtMs = 0;
-    }
-  }
-  return { activeStartedAtMs };
-}
-
 interface AgentChatTabProps {
   project: Project;
   tab: StudioTab;
@@ -104,9 +92,9 @@ export function AgentChatTab({
   const sessionId = tab.agentSessionId;
   const sessionName = tab.agentSessionName || sessionId;
   const agentKind = tab.agentKind || "opencode";
-  const agentRuntime = tab.agentRuntime || (agentKind === "codex" || agentKind === "kilo" ? "direct_acp" : "acpx");
-  const agentRuntimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : "Agent";
-  const supportsModelSelection = agentRuntime === "direct_acp" || agentRuntime === "acpx";
+  const agentRuntime = "direct_acp" as const;
+  const agentRuntimeLabel = "Direct ACP";
+  const supportsModelSelection = true;
   const projectId = project.id;
   const projectDeviceId = project.device_id;
   const projectDirectMode = Boolean(project.direct_mode);
@@ -149,6 +137,8 @@ export function AgentChatTab({
   const dispatchPromptRef = useRef<(promptText: string) => Promise<void>>(async () => {});
   const lastEventSeqRef = useRef(0);
   const awaitingNewTurnRef = useRef(false);
+  const awaitingTurnIdRef = useRef("");
+  const awaitingPreviousStartEventIdRef = useRef("");
   const historyLoadedOnceRef = useRef(historyLoadedOnce);
   const previousSessionIdRef = useRef(sessionId || "");
   const pendingSessionCreatesRef = useRef<Set<string>>(new Set());
@@ -310,7 +300,7 @@ export function AgentChatTab({
             eventType: taskEvent.event_type,
             sequence: taskEvent.sequence,
           });
-          if (taskEvent.event_type === "acpx.session") {
+          if (taskEvent.event_type === "acp.session" || taskEvent.event_type === "session.created") {
             const meta = getMetadata(taskEvent.data) || {};
             const nextName = String(meta.name || meta.agentSessionId || activeSessionName || "").trim();
             if (pendingSessionResolveRef.current) {
@@ -323,7 +313,7 @@ export function AgentChatTab({
               resolveSession(activeSessionId);
               return;
             }
-            if (nextName && nextName !== activeSessionName) {
+            if (taskEvent.event_type === "acp.session" && nextName && nextName !== activeSessionName) {
               onUpdateTabPropertiesRef.current(tab.id, {
                 agentSessionName: nextName || activeSessionName,
               });
@@ -338,6 +328,9 @@ export function AgentChatTab({
             if (taskEvent.event_type === "task.failed") {
               const meta = getMetadata(taskEvent.data) || {};
               showError(String(meta.message || meta.error || "任务执行失败"));
+            } else if (taskEvent.event_type === "task.completed" || taskEvent.event_type === "turn.completed") {
+              dismissedErrorRef.current = "";
+              setError("");
             }
           }
         } else if (envelope?.type === "task.history.ready") {
@@ -367,10 +360,13 @@ export function AgentChatTab({
           setHistoryLoading(false);
           setHistoryLoadedOnce(true);
           setRunStatus("idle");
+          awaitingNewTurnRef.current = false;
+          awaitingTurnIdRef.current = "";
+          awaitingPreviousStartEventIdRef.current = "";
           setModelUpdating(false);
         }
       } catch (err) {
-        console.error("ACPX websocket parse error:", err);
+        console.error("ACP websocket parse error:", err);
         pushAgentChatDebug({
           phase: "ws.parse_error",
           taskId: activeSessionId,
@@ -464,6 +460,9 @@ export function AgentChatTab({
     if (!sessionId) {
       setEvents([]);
       setRunStatus("idle");
+      awaitingNewTurnRef.current = false;
+      awaitingTurnIdRef.current = "";
+      awaitingPreviousStartEventIdRef.current = "";
       setHistoryLoading(false);
       setHistoryLoadedOnce(true);
       lastEventSeqRef.current = 0;
@@ -485,7 +484,7 @@ export function AgentChatTab({
     return () => {
       socketHandle.close();
     };
-    // sessionName is intentionally excluded: the backend re-emits "acpx.session"
+    // sessionName is intentionally excluded: the backend re-emits "acp.session"
     // (updating tab.agentSessionName) on every turn's session ensure, not just the
     // first. Reconnecting the socket each time drops in-flight events for the
     // turn that's currently streaming, which is what left the tab stuck on
@@ -519,14 +518,26 @@ export function AgentChatTab({
   }, [runStatus]);
 
   const runTiming = useMemo(() => {
-    return getRunTiming(events, agentRuntime);
+    return getTaskRunTiming(events, agentRuntime);
   }, [agentRuntime, events]);
   const backendRunStartedAtMs = runTiming.activeStartedAtMs;
 
   useEffect(() => {
+    if (taskRunTimingMatchesAwaitedTurn(
+      runTiming,
+      awaitingTurnIdRef.current,
+      awaitingPreviousStartEventIdRef.current,
+    )) {
+      awaitingNewTurnRef.current = false;
+      awaitingTurnIdRef.current = "";
+      awaitingPreviousStartEventIdRef.current = "";
+    }
     if (backendRunStartedAtMs > 0) {
       setRunStatus("running");
-      awaitingNewTurnRef.current = false;
+      if (!awaitingTurnIdRef.current) {
+        awaitingNewTurnRef.current = false;
+        awaitingPreviousStartEventIdRef.current = "";
+      }
       return;
     }
 
@@ -538,9 +549,15 @@ export function AgentChatTab({
     setRunStatus(() => {
       if (awaitingNewTurnRef.current) return "sending";
       awaitingNewTurnRef.current = false;
+      awaitingTurnIdRef.current = "";
+      awaitingPreviousStartEventIdRef.current = "";
       return "idle";
     });
-  }, [backendRunStartedAtMs, events.length]);
+  }, [
+    backendRunStartedAtMs,
+    events.length,
+    runTiming,
+  ]);
 
   const modelList = useMemo(() => {
     return modelListFromTaskEvents(events);
@@ -630,16 +647,16 @@ export function AgentChatTab({
   }, [openAgentSocket, sessionName]);
 
   const ensureSession = useCallback(async () => {
-    if (sessionId) return sessionId;
     if (ensureSessionRef.current) return ensureSessionRef.current;
+    if (sessionId) return sessionId;
 
-    const activeSessionName = makeId("acpx");
+    const activeSessionName = makeId("acp");
     const promise = new Promise<string>((resolve, reject) => {
       const timer = window.setTimeout(() => {
         if (pendingSessionRejectRef.current === reject) {
           pendingSessionResolveRef.current = null;
           pendingSessionRejectRef.current = null;
-          reject(new Error("创建 ACPX 会话超时"));
+          reject(new Error("创建 ACP 会话超时"));
         }
       }, 15_000);
       pendingSessionResolveRef.current = resolve;
@@ -729,12 +746,15 @@ export function AgentChatTab({
 
   async function dispatchPrompt(promptText: string) {
     clearErrorForNewAction();
+    const turnId = makeId("turn");
     setRunStatus("sending");
     setLocalRunStartedAtMs(Date.now());
     // Mark that we are awaiting the new turn's task.started event.
     // While this flag is true, late-arriving terminal events from the
     // previous turn will be ignored.
     awaitingNewTurnRef.current = true;
+    awaitingTurnIdRef.current = turnId;
+    awaitingPreviousStartEventIdRef.current = runTiming.latestStartedEventId;
 
     try {
       const activeSessionId = await ensureSession();
@@ -746,9 +766,14 @@ export function AgentChatTab({
         runStatus,
         hasActiveBackendTurn,
       });
-      const turnId = makeId("turn");
       const maxSeq = events.reduce((max, ev) => Math.max(max, Number(ev.sequence || 0)), 0);
-      const localUserEvent = makeLocalUserPromptEvent(activeSessionId, turnId, promptText, maxSeq + 1);
+      const localUserEvent = makeLocalUserPromptEvent(
+        activeSessionId,
+        turnId,
+        promptText,
+        maxSeq + 1,
+        undefined,
+      );
       setEvents((prev) => mergeTaskEvents(prev, [localUserEvent]));
 
       if (selectedModelIdRef.current && typeof window !== "undefined" && window.localStorage) {
@@ -763,7 +788,7 @@ export function AgentChatTab({
         agent: agentNameForRuntime(agentKind, agentRuntime),
         agent_runtime: agentRuntime,
         prompt: promptText,
-        model_id: messages.length === 0 ? selectedModelIdRef.current : ""
+        model_id: selectedModelIdRef.current
       };
       dispatchPayload.session_name = activeSessionName;
       const dispatchEnv = {
@@ -784,6 +809,9 @@ export function AgentChatTab({
       showError(err instanceof Error ? err.message : "执行出错");
       setRunStatus("idle");
       setLocalRunStartedAtMs(0);
+      awaitingNewTurnRef.current = false;
+      awaitingTurnIdRef.current = "";
+      awaitingPreviousStartEventIdRef.current = "";
     }
   }
 
@@ -825,6 +853,8 @@ export function AgentChatTab({
     try {
       clearQueuedPrompts();
       awaitingNewTurnRef.current = false;
+      awaitingTurnIdRef.current = "";
+      awaitingPreviousStartEventIdRef.current = "";
       setLocalRunStartedAtMs(0);
       const stopEnv = {
         id: makeId("msg"),
@@ -941,10 +971,18 @@ export function AgentChatTab({
   ];
 
   return (
-    <div className="flex h-full flex-col bg-card text-card-foreground select-none relative">
+    <div
+      className="flex h-full flex-col bg-card text-card-foreground select-none relative"
+      data-testid="agent-chat"
+      data-agent-runtime={agentRuntime}
+      data-agent-kind={agentKind}
+      data-run-status={runStatus}
+      data-session-id={sessionId || ""}
+      data-working={showWorking ? "true" : "false"}
+    >
       {/* Error Message */}
       {error && (
-        <div className="mx-3 mt-2 rounded-lg border border-red-200/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-600 dark:text-red-400 flex items-start gap-1.5">
+        <div data-testid="agent-error" className="mx-3 mt-2 rounded-lg border border-red-200/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-600 dark:text-red-400 flex items-start gap-1.5">
           <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
           <span className="min-w-0 flex-1">{error}</span>
           <button
@@ -960,7 +998,7 @@ export function AgentChatTab({
       )}
 
       {/* Main chat flow */}
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-2 space-y-2 select-text">
+      <div data-testid="agent-timeline" ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-2 space-y-2 select-text">
         {showHistoryLoading ? (
           <div className="h-full flex flex-col items-center justify-center p-6 text-center select-none">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/70" />
@@ -978,7 +1016,7 @@ export function AgentChatTab({
               与 {agentRuntimeLabel} {agentKind} 开始新的智能对话
             </h2>
             <p className="text-[11px] text-muted-foreground mt-1.5 leading-relaxed max-w-[280px]">
-              基于 ACPX 协议环境，随时在当前工作区为您实现深度 code 阅读、分析与命令执行。
+              基于 ACP 协议环境，随时在当前工作区进行代码阅读、分析与命令执行。
             </p>
 
             <div className="mt-6 w-full space-y-2 select-none">
@@ -1007,7 +1045,7 @@ export function AgentChatTab({
                 const msg = messages[i];
                 if (msg.kind === "user_prompt") {
                   rendered.push(
-                    <div key={msg.id} className="flex justify-start select-text">
+                    <div key={msg.id} data-message-kind="user_prompt" data-message-id={msg.id} className="flex justify-start select-text">
                       <div className="max-w-full rounded-xl bg-primary text-primary-foreground px-3 py-1.5 text-[12px] font-medium leading-relaxed shadow-sm whitespace-pre-wrap">
                         {msg.content}
                       </div>
@@ -1023,7 +1061,7 @@ export function AgentChatTab({
                   i++;
                 } else if (msg.kind === "assistant_message") {
                   rendered.push(
-                    <div key={msg.id} className="w-full max-w-none rounded-xl border border-border/60 bg-muted/20 px-3 py-2 shadow-sm select-text">
+                    <div key={msg.id} data-message-kind="assistant_message" data-message-id={msg.id} className="w-full max-w-none rounded-xl border border-border/60 bg-muted/20 px-3 py-2 shadow-sm select-text">
                       <Markdown content={msg.content} />
                     </div>
                   );
@@ -1075,7 +1113,7 @@ export function AgentChatTab({
               return rendered;
             })()}
             {showWorking && (
-              <WorkingStatus elapsedMs={nowMs - workingStartedAtMs} />
+              <div data-testid="agent-working"><WorkingStatus elapsedMs={nowMs - workingStartedAtMs} /></div>
             )}
 
             <div ref={eventsEndRef} />
@@ -1131,6 +1169,7 @@ export function AgentChatTab({
           className="relative border border-border bg-card rounded-xl shadow-sm focus-within:ring-1 focus-within:ring-primary focus-within:border-primary transition-all p-2 flex flex-col gap-1.5"
         >
           <textarea
+            data-testid="agent-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -1210,6 +1249,7 @@ export function AgentChatTab({
               {isRunning && !input.trim() ? (
                 <button
                   type="button"
+                  data-testid="agent-stop"
                   onClick={cancelRun}
                   title="中断运行"
                   className="flex h-7 w-7 items-center justify-center rounded-lg border border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/15 transition-all cursor-pointer select-none"
@@ -1219,6 +1259,7 @@ export function AgentChatTab({
               ) : (
                 <button
                   type="submit"
+                  data-testid="agent-send"
                   disabled={!input.trim()}
                   title={isRunning ? "加入队列" : "发送"}
                   className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-all cursor-pointer select-none"

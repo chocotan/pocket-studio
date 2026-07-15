@@ -10,7 +10,7 @@ export function agentChatDirectEndpointURL(project: AgentChatProjectEndpoint) {
   }
   try {
     const endpoint = new URL(project.direct_endpoint.terminal_ws_url);
-    endpoint.pathname = "/ws/acpx";
+    endpoint.pathname = "/ws/agent";
     endpoint.search = "";
     endpoint.hash = "";
     return endpoint.toString();
@@ -32,7 +32,7 @@ export function agentChatWebSocketURL(project: AgentChatProjectEndpoint, taskId:
     };
   }
   return {
-    url: websocketURL("/ws/acpx", new URLSearchParams({ task_id: taskId, project_id: project.id })),
+    url: websocketURL("/ws/agent", new URLSearchParams({ task_id: taskId, project_id: project.id })),
     transport: "relay",
   };
 }

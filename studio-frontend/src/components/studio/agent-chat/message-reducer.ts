@@ -205,7 +205,7 @@ function applyUserPrompt(state: MessageState, evt: TaskEvent, dataPayload: Event
 
 function applyAssistantMessage(state: MessageState, evt: TaskEvent, dataPayload: EventRecord | undefined) {
   const text = String(dataPayload?.text || "");
-  if (!text) return;
+  const hasVisibleText = text.trim().length > 0;
   const seq = Number(evt.sequence);
   const createdAt = new Date(evt.timestamp * 1000).toISOString();
   const streamId = typeof dataPayload?.stream_id === "string" ? dataPayload.stream_id : "";
@@ -215,16 +215,18 @@ function applyAssistantMessage(state: MessageState, evt: TaskEvent, dataPayload:
     if (existingId) {
       const index = state.byId.get(existingId);
       const previous = index === undefined ? undefined : state.messages[index];
-      const content = dataPayload?.append === true ? (previous?.content || "") + text : text;
-      setMessageContent(state, existingId, content);
+      if (dataPayload?.append === true) setMessageContent(state, existingId, (previous?.content || "") + text);
+      else if (hasVisibleText) setMessageContent(state, existingId, text);
       return;
     }
+    if (!hasVisibleText) return;
     const id = evt.event_id;
     state.assistantStreams.set(streamId, id);
     appendMessage(state, { id, seq, kind: "assistant_message", content: text, createdAt, streamId });
     return;
   }
 
+  if (!hasVisibleText) return;
   const signature = normalizeTextForDedup(text);
   if (!signature || state.assistantSignatures.has(signature)) return;
   state.assistantSignatures.add(signature);

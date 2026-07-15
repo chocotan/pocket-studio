@@ -3,8 +3,8 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +13,28 @@ import (
 
 	"remote-agent/internal/protocol"
 )
+
+func TestDirectACPReaderSuppressesSplitPiStartupInfoAndKeepsSuffix(t *testing.T) {
+	d := New(Config{})
+	const taskID = "direct-startup-info"
+	d.history[taskID] = protocol.TaskRecord{TaskID: taskID, AgentRuntime: "direct_acp"}
+	client := &directACPClient{
+		cmd:     &exec.Cmd{Path: "fake-pi-acp"},
+		emitter: &taskEmitter{daemon: d, taskID: taskID},
+	}
+	output := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"result":{"sessionId":"session-1","_meta":{"piAcp":{"startupInfo":"Pi startup\n"}}}}`,
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"Pi star"}}}}`,
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"tup\nkept suffix"}}}}`,
+	}, "\n") + "\n"
+
+	client.readStdout(strings.NewReader(output))
+
+	messages := taskEventsOfType(d.history[taskID].Events, "assistant.message")
+	if len(messages) != 1 || taskEventData(t, messages[0])["text"] != "kept suffix" {
+		t.Fatalf("assistant messages = %#v, want only kept suffix", messages)
+	}
+}
 
 func TestDirectACPSessionPromptEmitsAssistantMessage(t *testing.T) {
 	dir := t.TempDir()
@@ -72,6 +94,69 @@ rl.on("line", (line) => {
 	}
 }
 
+func TestDeleteDirectACPSessionFlushesCloseBeforeProcessExit(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "close.log")
+	scriptPath := filepath.Join(dir, "fake-direct-acp-close")
+	script := `#!/bin/sh
+node -e '
+const fs = require("fs");
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("close", () => fs.appendFileSync(process.env.ACP_CLOSE_LOG, "eof\n"));
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  const kind = msg.id === undefined ? "notify" : "request";
+  fs.appendFileSync(process.env.ACP_CLOSE_LOG, String(msg.method || "") + ":" + kind + "\n");
+  if (msg.id !== undefined) {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }));
+  }
+});
+'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake direct acp: %v", err)
+	}
+
+	d := New(DefaultConfig())
+	client, err := startDirectACPClient(context.Background(), DirectACPAgentConfig{
+		Command: scriptPath,
+		Env:     map[string]string{"ACP_CLOSE_LOG": logPath},
+	}, dir, &taskEmitter{daemon: d, taskID: "task-close"})
+	if err != nil {
+		t.Fatalf("startDirectACPClient() error = %v", err)
+	}
+	client.session = "session-close"
+	d.directACP["task-close"] = &directACPSession{taskID: "task-close", client: client}
+	d.history["task-close"] = protocol.TaskRecord{TaskID: "task-close", AgentRuntime: "direct_acp"}
+
+	if !d.deleteDirectACPSession("task-close") {
+		t.Fatal("deleteDirectACPSession() = false")
+	}
+	var closeWG sync.WaitGroup
+	closeWG.Add(2)
+	for range 2 {
+		go func() {
+			defer closeWG.Done()
+			client.close()
+		}()
+	}
+	closeWG.Wait()
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read close log: %v", err)
+	}
+	if got, want := string(raw), "session/cancel:notify\nsession/close:request\neof\n"; got != want {
+		t.Fatalf("close notifications = %q, want %q", got, want)
+	}
+	if d.directACP["task-close"] != nil {
+		t.Fatal("direct ACP session still registered after delete")
+	}
+	if _, ok := d.history["task-close"]; ok {
+		t.Fatal("direct ACP history still registered after delete")
+	}
+}
+
 func TestDirectACPHistoryPersistsAndLoadsInterrupted(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("POCKET_STUDIO_DAEMON_CONFIG_DIR", dir)
@@ -116,8 +201,12 @@ func TestDirectACPHistoryPersistsAndLoadsInterrupted(t *testing.T) {
 	if record.Status != "interrupted" {
 		t.Fatalf("restored status = %q, want interrupted", record.Status)
 	}
-	if len(record.Events) != 1 || record.Events[0].EventID != "evt-1" {
-		t.Fatalf("restored events = %#v, want persisted event", record.Events)
+	if len(record.Events) != 2 || record.Events[0].EventID != "evt-1" || record.Events[1].EventType != "task.failed" {
+		t.Fatalf("restored events = %#v, want persisted event followed by restart interruption", record.Events)
+	}
+	interruptedData := taskEventData(t, record.Events[1])
+	if interruptedData["reason"] != "interrupted" {
+		t.Fatalf("restart terminal data = %#v, want interrupted reason", interruptedData)
 	}
 
 	raw, err := os.ReadFile(daemonDirectACPSessionsPath())
@@ -130,6 +219,9 @@ func TestDirectACPHistoryPersistsAndLoadsInterrupted(t *testing.T) {
 	}
 	if len(store.Tasks) != 1 || store.Tasks[0].Status != "interrupted" {
 		t.Fatalf("stored tasks = %#v, want interrupted direct ACP task", store.Tasks)
+	}
+	if taskEventOfType(store.Tasks[0].Events, "task.failed").EventType == "" {
+		t.Fatalf("stored interrupted task missing terminal event: %#v", store.Tasks[0].Events)
 	}
 }
 
@@ -198,6 +290,81 @@ rl.on("line", (line) => {
 	}
 	if got, want := string(raw), "resume:old-session\n"; got != want {
 		t.Fatalf("direct ACP restore calls = %q, want %q", got, want)
+	}
+}
+
+func TestDirectACPResumeDoesNotImportProviderHistoryIntoTimeline(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "fake-direct-acp-history-replay")
+	script := `#!/bin/sh
+node -e '
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { sessionCapabilities: { resume: true } }
+    } }));
+  } else if (msg.method === "session/resume") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: {
+      sessionId: msg.params.sessionId,
+      update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "provider history must stay hidden" } }
+    } }));
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { sessionId: msg.params.sessionId } }));
+  }
+});
+'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake direct acp: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.DirectACP.Enabled = true
+	cfg.DirectACP.Agents = map[string]DirectACPAgentConfig{"opencode": {Command: scriptPath}}
+	d := New(cfg)
+	original := protocol.TaskEvent{TaskID: "task-1", EventID: "saved", EventType: "assistant.message", Data: json.RawMessage(`{"text":"saved timeline"}`)}
+	d.history["task-1"] = protocol.TaskRecord{
+		TaskID: "task-1", WorkspacePath: dir, Agent: "opencode", AgentRuntime: "direct_acp",
+		SessionName: "task-1", SessionID: "provider-session", Events: []protocol.TaskEvent{original},
+	}
+	task := protocol.TaskDispatch{TaskID: "task-1", WorkspacePath: dir, Agent: "opencode", AgentRuntime: "direct_acp", SessionName: "task-1"}
+	if err := d.createDirectACPSession(context.Background(), task, dir, task.TaskID); err != nil {
+		t.Fatalf("createDirectACPSession() error = %v", err)
+	}
+	defer d.deleteDirectACPSession("task-1")
+
+	messages := taskEventsOfType(d.history["task-1"].Events, "assistant.message")
+	if len(messages) != 1 || messages[0].EventID != original.EventID || textFieldFromEventJSON(messages[0].Data, "text") != "saved timeline" {
+		t.Fatalf("provider history changed Pocket Studio messages: %#v", messages)
+	}
+}
+
+func TestRestoreInterruptedDirectACPUsesPromptTurnWithoutToolIndex(t *testing.T) {
+	record := protocol.TaskRecord{
+		TaskID: "task-1", AgentRuntime: "direct_acp", Status: "running",
+		Events: []protocol.TaskEvent{
+			{EventType: "user.prompt", Sequence: 1, Data: json.RawMessage(`{"prompt":"disk","turn_id":"direct-turn-0"}`)},
+			{EventType: "task.started", Sequence: 7, Data: json.RawMessage(`{"_seq":4,"turn_id":"direct-turn-0"}`)},
+			{EventType: "tool.call", Sequence: 10, Data: json.RawMessage(`{"_seq":7,"acpx_turn_index":0,"acpx_event_key":"turn:0:tool.call:tool-1"}`)},
+		},
+	}
+
+	restored, changed := restoreInterruptedTaskRecord(record)
+	if !changed || len(restored.Events) != 4 {
+		t.Fatalf("restore result = %#v, changed=%v", restored, changed)
+	}
+	data := taskEventData(t, restored.Events[3])
+	if data["turn_id"] != "direct-turn-0" {
+		t.Fatalf("Direct restore turn_id = %#v, want direct-turn-0", data["turn_id"])
+	}
+	if _, ok := data["acpx_turn_index"]; ok {
+		t.Fatalf("Direct restore inherited tool index: %#v", data)
+	}
+	if _, ok := data["acpx_event_key"]; ok {
+		t.Fatalf("Direct restore inherited ACPX key: %#v", data)
 	}
 }
 
@@ -772,6 +939,9 @@ rl.on("line", (line) => {
 	}
 
 	events := drainTaskEvents(d.send)
+	if !hasTaskEvent(events, "task.killed") {
+		t.Fatalf("direct ACP events missing stopped turn task.killed: %#v", events)
+	}
 	if !hasTaskEvent(events, "task.completed") {
 		t.Fatalf("direct ACP events missing second task.completed: %#v", events)
 	}
@@ -999,77 +1169,4 @@ func historyHasUserPrompt(events []protocol.TaskEvent, prompt string) bool {
 		}
 	}
 	return false
-}
-
-func TestDirectACPHistoryNotOverwrittenByACPXSessionRecords(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("POCKET_STUDIO_DAEMON_CONFIG_DIR", dir)
-	cfg := DefaultConfig()
-	cfg.Device.ID = "device-1"
-	cfg.ACPX.Enabled = true
-	d := New(cfg)
-
-	// Inject a direct ACP session history with multiple messages
-	taskID := "acpx-chat-1"
-	event1 := protocol.TaskEvent{
-		TaskID:    taskID,
-		EventID:   "evt-1",
-		EventType: "user.prompt",
-		Sequence:  1,
-		Timestamp: 100,
-		Data:      []byte(`{"prompt":"hello"}`),
-	}
-	event2 := protocol.TaskEvent{
-		TaskID:    taskID,
-		EventID:   "evt-2",
-		EventType: "user.prompt",
-		Sequence:  2,
-		Timestamp: 110,
-		Data:      []byte(`{"prompt":"subsequent"}`),
-	}
-
-	d.mu.Lock()
-	d.history[taskID] = protocol.TaskRecord{
-		TaskID:        taskID,
-		DeviceID:      "device-1",
-		WorkspacePath: dir,
-		Agent:         "opencode",
-		AgentRuntime:  "direct_acp",
-		SessionName:   taskID,
-		SessionID:     "agent-session-1",
-		Status:        "running",
-		StartedAt:     100,
-		UpdatedAt:     120,
-		Events:        []protocol.TaskEvent{event1, event2},
-	}
-	d.mu.Unlock()
-
-	scriptPath := filepath.Join(dir, "fake-acpx")
-	scriptContent := `#!/bin/sh
-printf '[{"acpxRecordId":"agent-session-1","name":"acpx-chat-1","cwd":"%s","createdAt":"2026-06-18T14:00:00Z","lastUsedAt":"2026-06-18T14:00:00Z","messages":[{"User":{"content":"hello"}}]}]\n'
-`
-	scriptContent = fmt.Sprintf(scriptContent, dir)
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0o755); err != nil {
-		t.Fatalf("write fake acpx: %v", err)
-	}
-	cfg.ACPX.Command = scriptPath
-
-	// Trigger sendSnapshot. Inside, it calls acpxSessionRecords and merges.
-	// Since we fixed it, it should skip the record.
-	d.send = make(chan protocol.Envelope, 10)
-	d.sendSnapshot()
-
-	d.mu.Lock()
-	record := d.history[taskID]
-	d.mu.Unlock()
-
-	if record.AgentRuntime != "direct_acp" {
-		t.Errorf("AgentRuntime = %q, want direct_acp", record.AgentRuntime)
-	}
-	if len(record.Events) != 2 {
-		t.Errorf("len(Events) = %d, want 2", len(record.Events))
-	}
-	if !historyHasUserPrompt(record.Events, "subsequent") {
-		t.Errorf("lost subsequent user prompt: %#v", record.Events)
-	}
 }

@@ -34,7 +34,7 @@ flowchart TD
   server["Pocket Studio Server<br/>Web UI / Auth / WebSocket Hub"]
   daemon["Pocket Studio Daemon<br/>开发机守护进程"]
   project["项目目录"]
-  agent["本地 AI Agent / 终端<br/>Claude Code / Codex / OpenCode / Kilo / acpx"]
+  agent["本地 AI Agent / 终端<br/>Claude Code / Codex / OpenCode / Kilo / ACP"]
 
   user <-->|HTTP / WebSocket 中转| server
   user <-->|"WebSocket 直连（低延迟）"| daemon
@@ -60,9 +60,8 @@ flowchart TD
 3. **强大的终端 AI Hook & 任务通知**
    - 自动检测并深度适配主流 AI Agent 框架（如 Claude Code, Antigravity SDK, Codex, OpenCode, Kilo, Pi 等）。
    - 在 AI 执行任务（如 Tool Call 或运行完毕）时，自动向 Daemon 触发 Hook 并向 Studio UI 发送实时通知徽章（Alert）以及声音/视觉提示，不再需要持续盯着终端等待。
-4. **两类 ACP (Agent Communication Protocol) 支持**
-   - **ACPX CLI 模式**：通过调用外部 `acpx` 命令行会话包来操作 AI Agent。
-   - **Direct ACP 模式**：Daemon 自身作为标准 ACP 客户端，直接使用 stdin/stdout JSON-RPC 协议与 `codex`、`opencode`、`kilo` 等执行体交互，支持流畅的 Chat 面板渲染以及 Tool Calls 执行过程展示。
+4. **Direct ACP (Agent Communication Protocol)**
+   - Daemon 自身作为标准 ACP 客户端，直接使用 stdin/stdout JSON-RPC 协议与 `codex`、`opencode`、`kilo` 等执行体交互，支持 Chat、工具调用、模型配置、取消和会话恢复。
 5. **高度可定制的 Studio 布局系统**
    - **平铺网格模式 (Grid)**：传统的窗口分栏平铺，同一开发机下的多个项目可共享分屏状态。
    - **悬浮窗口模式 (Floating)**：支持每个面板（文件树、终端、编辑器）作为可自由拖拽、缩放、层级置顶（z-index 提升）以及最小化/最大化的独立窗口。
@@ -81,7 +80,7 @@ flowchart TD
 | 组件 | 对应源码目录 | 说明 |
 | --- | --- | --- |
 | Server | [cmd/server](cmd/server/main.go) | HTTP 服务、用户注册与登录、Token 认证、WebSocket Hub、SPA 静态资源托管 |
-| Daemon | [cmd/daemon](cmd/daemon/main.go) | 连接 Server，启动 Direct Terminal 与 Hook 监听，执行 ACP/ACPX/Claude Code 进程，管理文件系统 |
+| Daemon | [cmd/daemon](cmd/daemon/main.go) | 连接 Server，启动 Direct Terminal 与 Hook 监听，执行 Direct ACP Agent 进程，管理文件系统 |
 | Studio 前端 | [studio-frontend](studio-frontend) | 基于 React + TS + Vite 的主工作台 UI，包含 Electron 桌面端外壳 |
 | 用户前端 | [user-frontend](user-frontend) | 基于 React 的登录、注册和 API 令牌（Tokens）管理后台 |
 | 协议定义 | [internal/protocol](internal/protocol) | 统一的消息结构、Envelope 定义以及直连 Token 签名算法 |
@@ -146,7 +145,7 @@ flowchart TD
 ### 1. 环境准备
 - **Go**: 1.26.3+ (详见 [go.mod](go.mod))
 - **Node.js**: 24+ & **npm**
-- 开发机上已全局安装需要调用的 Agent CLI（如 `claude`、`acpx` 或相关的 npm 模块）
+- 开发机上已安装需要调用的 ACP Agent CLI（如 `opencode`、`codex-acp` 或相关 npm 模块）
 
 ### 2. 初始化依赖
 ```bash
@@ -221,13 +220,6 @@ go build -trimpath -ldflags="-s -w" -o ./daemon ./cmd/daemon
 | `-daemon.server.url` | **必填** | Server 的 Daemon WebSocket 中继地址，例如 `ws://127.0.0.1:18080/ws/daemon` |
 | `-daemon.server.token` | **必填** (与 Server Token 匹配) | 接入控制中心的 Token |
 | `-daemon.workspace` | 默认 `~/Agent`（可多次指定） | 工作区目录。支持直接路径，或格式为 `id:display_name:absolute_path` 的定制串 |
-| `-daemon.acpx.enabled` | `true` | 是否启用 acpx Agent 工具包 |
-| `-daemon.acpx.command` | `acpx` | 本地 `acpx` CLI 执行路径 |
-| `-daemon.acpx.agent` | `claude` | `acpx` 默认调用的底层 Agent 模型 |
-| `-daemon.acpx.session-name` | `agentbridge` | `acpx` 默认会话标识 |
-| `-daemon.acpx.ttl-seconds` | `300` | `acpx` 会话的生存时间 (TTL)，单位秒 |
-| `-daemon.acpx.command-timeout-seconds` | `1800` | 守护进程等待 acpx 会话/提示返回的最大超时时长；`0` 表示不设置超时限制 |
-| `-daemon.acpx.args` | 见 `acpx` 默认参数 | 逗号分隔的 acpx 全局运行参数 |
 | `-daemon.claude.command` | `claude` | Claude Code 命令路径 |
 | `-daemon.claude.args` | `--output-format,stream-json,--verbose` | 逗号分隔的 Claude 运行参数 |
 | `-daemon.direct-web.enabled` | `true` | 是否启用 Daemon 本地直连端口（用于 Studio 终端跳过 Server 中继） |
@@ -266,19 +258,6 @@ go build -trimpath -ldflags="-s -w" -o ./daemon ./cmd/daemon
       "--output-format",
       "stream-json",
       "--verbose"
-    ]
-  },
-  "acpx": {
-    "enabled": true,
-    "command": "acpx",
-    "agent": "claude",
-    "session_name": "agentbridge",
-    "ttl_seconds": 300,
-    "command_timeout_seconds": 1800,
-    "args": [
-      "--format",
-      "json",
-      "--approve-all"
     ]
   },
   "direct_acp": {

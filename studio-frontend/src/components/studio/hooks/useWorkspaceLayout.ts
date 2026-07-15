@@ -704,7 +704,7 @@ export function useWorkspaceLayout({
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleAddAgentChat(panelId: string, agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "acpx", tabProjectId?: string, filePath?: string) {
+  function handleAddAgentChat(panelId: string, agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "direct_acp", tabProjectId?: string, filePath?: string) {
     const tab = createAgentChatTab(agentKind, undefined, undefined, agentRuntime, tabProjectId, filePath);
     setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : null));
     setFocusedId(panelId);
@@ -965,7 +965,7 @@ export function useWorkspaceLayout({
     });
   }
 
-  function handleCreateNewAgentChat(agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "acpx", tabProjectId?: string, filePath?: string) {
+  function handleCreateNewAgentChat(agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "direct_acp", tabProjectId?: string, filePath?: string) {
     const newTab = createAgentChatTab(agentKind, undefined, undefined, agentRuntime, tabProjectId, filePath);
     const panelId = makeId("panel");
     insertNewPanel({

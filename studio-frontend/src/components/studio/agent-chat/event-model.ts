@@ -28,6 +28,99 @@ export function isTerminalTaskEvent(evt: TaskEvent, _agentRuntime?: string): boo
   );
 }
 
+export function getTaskRunTiming(events: TaskEvent[], agentRuntime: string) {
+  const turnIdByIndex = new Map<number, string>();
+  for (const event of events) {
+    const turnIndex = eventTurnIndex(event);
+    const turnId = taskEventTurnId(event);
+    if (turnIndex !== undefined && turnId) turnIdByIndex.set(turnIndex, turnId);
+  }
+  const allLifecycle = events
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.event_type === "task.started" || isTerminalTaskEvent(event, agentRuntime))
+    .sort((left, right) => compareTaskLifecycleEvents(left, right, agentRuntime));
+  const nativeLifecycle = allLifecycle.filter(({ event }) => !isSyntheticHistoryLifecycle(event));
+  const lifecycle = nativeLifecycle.length > 0 ? nativeLifecycle : allLifecycle;
+  const latestStarted = lifecycle.filter(({ event }) => event.event_type === "task.started").at(-1)?.event;
+  const latestTerminal = lifecycle.filter(({ event }) => isTerminalTaskEvent(event, agentRuntime)).at(-1)?.event;
+  const latestLifecycle = lifecycle.at(-1)?.event;
+  const activeStartedAtMs = latestLifecycle?.event_type === "task.started"
+    ? Math.max(0, Number(latestLifecycle.timestamp || 0) * 1000)
+    : 0;
+  const resolveTurnId = (event: TaskEvent | undefined) => {
+    if (!event) return "";
+    const direct = taskEventTurnId(event);
+    if (direct) return direct;
+    const turnIndex = eventTurnIndex(event);
+    return turnIndex === undefined ? "" : turnIdByIndex.get(turnIndex) || "";
+  };
+  return {
+    activeStartedAtMs,
+    latestStartedTurnId: resolveTurnId(latestStarted),
+    latestStartedEventId: latestStarted?.event_id || "",
+    latestTerminalTurnId: resolveTurnId(latestTerminal),
+    latestTerminalEventId: latestTerminal?.event_id || "",
+  };
+}
+
+function isSyntheticHistoryLifecycle(event: TaskEvent) {
+  const metadata = getMetadata(event.data) ?? getMetadata(event.raw);
+  return metadata?.source === "acpx.history" || String(metadata?.turn_id || "").startsWith("history-turn-");
+}
+
+function taskEventTurnId(event: TaskEvent) {
+  const metadata = getMetadata(event.data) ?? getMetadata(event.raw);
+  const rawTurnId = metadata?.turn_id ?? metadata?.turnId;
+  return typeof rawTurnId === "string" ? rawTurnId : "";
+}
+
+function compareTaskLifecycleEvents(
+  leftItem: { event: TaskEvent; index: number },
+  rightItem: { event: TaskEvent; index: number },
+  agentRuntime: string,
+) {
+  const left = leftItem.event;
+  const right = rightItem.event;
+  if (agentRuntime === "direct_acp") {
+    // Direct ACP producer _seq values restart with the daemon, while the
+    // server transport sequence remains monotonic across daemon replacement.
+    const sequenceDiff = Number(left.sequence || 0) - Number(right.sequence || 0);
+    if (sequenceDiff !== 0) return sequenceDiff;
+    const timeDiff = Number(left.timestamp || 0) - Number(right.timestamp || 0);
+    if (timeDiff !== 0) return timeDiff;
+    return leftItem.index - rightItem.index;
+  }
+  const leftTurn = eventTurnIndex(left);
+  const rightTurn = eventTurnIndex(right);
+  if (leftTurn !== undefined && rightTurn !== undefined && leftTurn !== rightTurn) {
+    return leftTurn - rightTurn;
+  }
+  if ((leftTurn === undefined) !== (rightTurn === undefined)) {
+    return leftTurn === undefined ? 1 : -1;
+  }
+  const leftOrder = eventLogicalSequence(left);
+  const rightOrder = eventLogicalSequence(right);
+  if (leftOrder !== undefined && rightOrder !== undefined && leftOrder !== rightOrder) {
+    return leftOrder - rightOrder;
+  }
+  const timeDiff = Number(left.timestamp || 0) - Number(right.timestamp || 0);
+  if (timeDiff !== 0) return timeDiff;
+  const sequenceDiff = Number(left.sequence || 0) - Number(right.sequence || 0);
+  if (sequenceDiff !== 0) return sequenceDiff;
+  return leftItem.index - rightItem.index;
+}
+
+export function taskRunTimingMatchesAwaitedTurn(
+  timing: ReturnType<typeof getTaskRunTiming>,
+  awaitedTurnId: string,
+  previousStartedEventId: string,
+) {
+  if (!awaitedTurnId) return false;
+  if (timing.latestStartedTurnId === awaitedTurnId || timing.latestTerminalTurnId === awaitedTurnId) return true;
+  if (!timing.latestStartedEventId || timing.latestStartedTurnId) return false;
+  return timing.latestStartedEventId !== previousStartedEventId;
+}
+
 type EventRecord = Record<string, unknown>;
 
 export function getMetadata(raw: unknown): EventRecord | undefined {
@@ -77,47 +170,88 @@ function isLocalEvent(evt: TaskEvent) {
   return evt.event_id.startsWith("local-");
 }
 
-function hasSequenceRegression(events: TaskEvent[]) {
-  let maxSeq = 0;
-  for (const event of events) {
-    if (isLocalEvent(event)) continue;
-    const seq = Number(event.sequence || 0);
-    if (seq <= 0) continue;
-    if (seq < maxSeq) return true;
-    maxSeq = seq;
+function numericMetadataField(evt: TaskEvent, ...keys: string[]) {
+  for (const source of [getMetadata(evt.data), getMetadata(evt.raw)]) {
+    for (const key of keys) {
+      const rawValue = source?.[key];
+      if (rawValue === undefined || rawValue === null || rawValue === "") continue;
+      const value = Number(rawValue);
+      if (Number.isFinite(value)) return value;
+    }
   }
-  return false;
+  return undefined;
+}
+
+function eventTurnIndex(evt: TaskEvent) {
+  return numericMetadataField(evt, "acpx_turn_index", "acpxTurnIndex");
+}
+
+function eventLogicalSequence(evt: TaskEvent) {
+  const explicit = numericMetadataField(evt, "_seq");
+  if (explicit !== undefined) return explicit;
+  if (eventTurnIndex(evt) !== undefined && evt.event_type === "user.prompt" && evt.source === "web") return 1;
+  if (eventTurnIndex(evt) !== undefined && isTerminalTaskEvent(evt)) return Number.MAX_SAFE_INTEGER;
+  const transport = Number(evt.sequence || 0);
+  return transport > 0 ? transport : undefined;
+}
+
+function hasCompleteIndexedTurnAnchors(events: TaskEvent[]) {
+  const anchors = events.filter((event) => (
+    event.event_type === "user.prompt" ||
+    event.event_type === "task.started" ||
+    isTerminalTaskEvent(event)
+  ));
+  return anchors.length > 0 && anchors.every((event) => eventTurnIndex(event) !== undefined);
 }
 
 export function sortTaskEventsForDisplay(events: TaskEvent[]) {
-  const sequenceRegression = hasSequenceRegression(events);
+  const useIndexedTurnOrder = hasCompleteIndexedTurnAnchors(events);
   return events
     .map((event, index) => ({ event, index }))
     .sort((leftItem, rightItem) => {
       const left = leftItem.event;
       const right = rightItem.event;
+      const leftTurn = eventTurnIndex(left);
+      const rightTurn = eventTurnIndex(right);
+      if (useIndexedTurnOrder && leftTurn !== undefined && rightTurn !== undefined && leftTurn !== rightTurn) {
+        return leftTurn - rightTurn;
+      }
+      if (useIndexedTurnOrder && (leftTurn === undefined) !== (rightTurn === undefined)) {
+        return leftTurn === undefined ? 1 : -1;
+      }
+      const toolLifecycleOrder = compareToolLifecycleEvents(left, right);
+      if (toolLifecycleOrder !== 0) return toolLifecycleOrder;
       const leftSeq = Number(left.sequence || 0);
       const rightSeq = Number(right.sequence || 0);
-      if (
-        !sequenceRegression &&
-        !isLocalEvent(left) &&
-        !isLocalEvent(right) &&
-        leftSeq > 0 &&
-        rightSeq > 0 &&
-        leftSeq !== rightSeq
-      ) {
-        return leftSeq - rightSeq;
+      if (useIndexedTurnOrder && (leftTurn === undefined) === (rightTurn === undefined)) {
+        const leftOrder = eventLogicalSequence(left);
+        const rightOrder = eventLogicalSequence(right);
+        if (leftOrder !== undefined && rightOrder !== undefined && leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
       }
-      if (sequenceRegression) {
-        return leftItem.index - rightItem.index;
+      if (!useIndexedTurnOrder && leftSeq > 0 && rightSeq > 0 && leftSeq !== rightSeq) {
+        return leftSeq - rightSeq;
       }
       const timeDiff = Number(left.timestamp || 0) - Number(right.timestamp || 0);
       if (timeDiff !== 0) return timeDiff;
       const rankDiff = eventDisplayRank(left.event_type) - eventDisplayRank(right.event_type);
       if (rankDiff !== 0) return rankDiff;
-      return leftSeq - rightSeq;
+      if (!isLocalEvent(left) && !isLocalEvent(right) && leftSeq !== rightSeq) {
+        return leftSeq - rightSeq;
+      }
+      return leftItem.index - rightItem.index;
     })
     .map((item) => item.event);
+}
+
+function compareToolLifecycleEvents(left: TaskEvent, right: TaskEvent) {
+  const toolTypes = new Set(["tool.call", "tool.output"]);
+  if (!toolTypes.has(left.event_type) || !toolTypes.has(right.event_type)) return 0;
+  const leftID = getToolEventId(getMetadata(left.data), getMetadata(left.raw), "");
+  const rightID = getToolEventId(getMetadata(right.data), getMetadata(right.raw), "");
+  if (!leftID || leftID !== rightID || left.event_type === right.event_type) return 0;
+  return left.event_type === "tool.call" ? -1 : 1;
 }
 
 export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
@@ -129,9 +263,14 @@ export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
     if (existingIds.has(event.event_id)) {
       const existingIndex = merged.findIndex((existing) => existing.event_id === event.event_id);
       if (existingIndex >= 0) {
-        const oldStableKey = taskEventStableKey(merged[existingIndex]);
+        const existing = merged[existingIndex];
+        const oldStableKey = taskEventStableKey(existing);
         if (oldStableKey) existingKeys.delete(oldStableKey);
-        merged[existingIndex] = event;
+        merged[existingIndex] = {
+          ...event,
+          sequence: Math.max(Number(existing.sequence || 0), Number(event.sequence || 0)),
+          timestamp: Math.max(Number(existing.timestamp || 0), Number(event.timestamp || 0)),
+        };
         if (stableKey) existingKeys.add(stableKey);
       }
       continue;
@@ -165,6 +304,7 @@ export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
               if (oldStableKey) existingKeys.delete(oldStableKey);
               merged[index] = {
                 ...event,
+                sequence: Math.max(Number(existing.sequence || 0), Number(event.sequence || 0)),
                 timestamp: existing.timestamp,
               };
               existingIds.add(event.event_id);
@@ -200,8 +340,28 @@ function shouldReplaceStableTaskEvent(event: TaskEvent) {
   return typeof data?.stream_id === "string" && data.stream_id.trim().length > 0;
 }
 
-export function makeLocalUserPromptEvent(taskID: string, turnID: string, prompt: string, sequence?: number): TaskEvent {
+export function nextTaskEventTurnIndex(events: TaskEvent[]) {
+  let maxTurn = -1;
+  for (const event of events) {
+    const turn = eventTurnIndex(event);
+    if (turn !== undefined && Number.isInteger(turn) && turn > maxTurn) maxTurn = turn;
+  }
+  return maxTurn + 1;
+}
+
+export function makeLocalUserPromptEvent(
+  taskID: string,
+  turnID: string,
+  prompt: string,
+  sequence?: number,
+  turnIndex?: number,
+): TaskEvent {
   const now = getUnixTimestamp();
+  const data: EventRecord = { prompt, turn_id: turnID };
+  if (turnIndex !== undefined && Number.isInteger(turnIndex) && turnIndex >= 0) {
+    data.acpx_turn_index = turnIndex;
+    data.acpx_event_key = `turn:${turnIndex}:user.prompt:0`;
+  }
   return {
     task_id: taskID,
     event_id: `local-user.prompt-${now}-${Math.random().toString(16).slice(2)}`,
@@ -209,8 +369,8 @@ export function makeLocalUserPromptEvent(taskID: string, turnID: string, prompt:
     source: "web",
     sequence: sequence !== undefined ? sequence : now,
     timestamp: now,
-    data: JSON.stringify({ prompt, turn_id: turnID }),
-    raw: JSON.stringify({ local: true, eventType: "user.prompt", prompt, turn_id: turnID }),
+    data: JSON.stringify(data),
+    raw: JSON.stringify({ local: true, eventType: "user.prompt", ...data }),
   };
 }
 
@@ -467,18 +627,20 @@ function appendTurnMessages(
       case "assistant.message": {
         const text = String(dataPayload?.text || "");
         const streamId = typeof dataPayload?.stream_id === "string" ? dataPayload.stream_id : "";
-        if (text && streamId) {
+        const hasVisibleText = text.trim().length > 0;
+        if (streamId) {
           const previous = assistantStreamMessages.get(streamId);
           if (previous) {
-            previous.content = dataPayload?.append === true ? previous.content + text : text;
-          } else {
+            if (dataPayload?.append === true) previous.content += text;
+            else if (hasVisibleText) previous.content = text;
+          } else if (hasVisibleText) {
             const message: ChatMessage = { id: evt.event_id, seq, kind: "assistant_message", content: text, createdAt, streamId };
             assistantStreamMessages.set(streamId, message);
             list.push(message);
           }
         } else {
           const signature = normalizeTextForDedup(text);
-          if (text && !assistantMessagesInTurn.has(signature)) {
+          if (hasVisibleText && !assistantMessagesInTurn.has(signature)) {
             assistantMessagesInTurn.add(signature);
             const last = list[list.length - 1];
             if (last?.kind === "assistant_message" && text.startsWith(last.content)) {

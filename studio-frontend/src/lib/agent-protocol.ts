@@ -496,11 +496,12 @@ export function buildAgentToolCallItems(
     }
 
     const nextStatus = mergeToolStatus(existing?.status, getToolStatus(update));
+    const incomingKind = getToolKind(update);
     const next: AgentToolCallItem = {
       id: toolId,
       title: getToolCardTitle(update, event.content, existing?.title),
       status: nextStatus,
-      kind: getToolKind(update) ?? existing?.kind,
+      kind: incomingKind || existing?.kind,
       input: hasToolValue(input) ? input : existing?.input,
       output: nextOutput,
       terminalId: getToolTerminalId(update) ?? existing?.terminalId,
@@ -535,6 +536,7 @@ function mergeToolStatus(existing?: string, incoming?: string) {
 function getToolUpdateFromEvent(
   event: AgentEventLike
 ): Record<string, unknown> | null {
+  const directMetadata = getProtocolRecord(event.metadata);
   const classified = classifyAgentProtocolEvent(event.metadata);
   if (
     classified?.kind === "tool_call" ||
@@ -545,7 +547,7 @@ function getToolUpdateFromEvent(
       getPermissionToolCall(classified.metadata) ??
       getProtocolRecord(classified.metadata);
     if (classifiedUpdate) {
-      return normalizeToolUpdate(classifiedUpdate);
+      return normalizeToolEventUpdate(classifiedUpdate, directMetadata);
     }
   }
 
@@ -557,16 +559,16 @@ function getToolUpdateFromEvent(
       sessionUpdateName === "tool_call_update" ||
       sessionUpdateName.includes("tool"))
   ) {
-    return normalizeToolUpdate(sessionUpdate);
+    return normalizeToolEventUpdate(sessionUpdate, directMetadata);
   }
 
   const permissionToolCall = getPermissionToolCall(event.metadata);
   if (permissionToolCall) {
-    return normalizeToolUpdate(permissionToolCall);
+    return normalizeToolEventUpdate(permissionToolCall, directMetadata);
   }
 
   if (event.kind === "tool_call" || event.kind === "permission_request") {
-    const direct = getProtocolRecord(event.metadata);
+    const direct = directMetadata;
     if (direct) {
       const nestedDirect =
         getProtocolSessionUpdate(direct) ??
@@ -587,11 +589,20 @@ function getToolUpdateFromEvent(
   return null;
 }
 
+function normalizeToolEventUpdate(
+  nested: Record<string, unknown>,
+  direct: Record<string, unknown> | null
+) {
+  if (!direct || !getToolCallId(direct)) {
+    return normalizeToolUpdate(nested);
+  }
+  return normalizeToolUpdate({ ...nested, ...direct });
+}
+
 function normalizeToolUpdate(record: Record<string, unknown>) {
   const toolCallId =
     record.toolCallId || record.tool_call_id || record.tool_use_id;
-  const title = getToolCardTitle(record, "");
-  const kind = inferAgentToolKind(record, title);
+  const kind = getToolKind(record);
   return {
     ...record,
     ...(kind ? { kind } : {}),
@@ -614,16 +625,29 @@ function getToolCardTitle(
   if (!record) {
     return existingTitle || fallback || "工具调用";
   }
-  return String(
+  const incomingTitle = String(
     record.title ||
       record.name ||
       record.toolName ||
       record.tool ||
-      existingTitle ||
       fallback ||
       displayToolKindForTitle(getRawToolKind(record)) ||
       "工具调用"
   );
+  if (existingTitle && isInformativeToolTitle(existingTitle)) {
+    return existingTitle;
+  }
+  return incomingTitle || existingTitle || "工具调用";
+}
+
+const GENERIC_TOOL_TITLES = new Set([
+  "tool", "tool_call", "tool_result", "terminal", "bash", "shell", "execute", "exec_command",
+  "search", "fetch", "websearch", "webfetch", "read", "write", "edit", "apply_patch",
+]);
+
+function isInformativeToolTitle(value: string) {
+  const normalized = normalizeAgentToolName(value);
+  return Boolean(value.trim()) && !GENERIC_TOOL_TITLES.has(normalized) && !IGNORED_TOOL_TYPE_NAMES.has(normalized);
 }
 
 function getRawToolKind(record: Record<string, unknown> | null) {
@@ -719,7 +743,17 @@ function getToolKind(record: Record<string, unknown> | null) {
   if (!record) {
     return undefined;
   }
-  return inferAgentToolKind(record, getToolCardTitle(record, ""));
+  return inferAgentToolKind(
+    record,
+    getStringFromRecord(record, ["title", "name", "toolName", "tool"])
+  );
+}
+
+export function resolveAgentToolKind(
+  item: Pick<AgentToolCallItem, "kind" | "title" | "input">
+) {
+  const record = item as unknown as Record<string, unknown>;
+  return inferAgentToolKind(record, item.title || "") || "tool";
 }
 
 function parseJsonRecord(value: string): Record<string, unknown> | null {
@@ -807,8 +841,8 @@ function inferAgentToolKind(
   }
 
   if (rawKind) return rawKind;
-  if (normalizedMeta !== "tool") return normalizedMeta;
-  if (normalizedTitle !== "tool") return normalizedTitle;
+  if (normalizedMeta && normalizedMeta !== "tool") return normalizedMeta;
+  if (normalizedTitle && normalizedTitle !== "tool") return normalizedTitle;
   return undefined;
 }
 

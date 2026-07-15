@@ -205,8 +205,8 @@ func TestNormalizeDirectACPAgentsLocalFallback(t *testing.T) {
 	} else if kiloAgent.Command != "kilo" {
 		t.Errorf("kilo Agent Command = %q, want \"kilo\"", kiloAgent.Command)
 	}
-	if len(kiloAgent.Args) != 1 || kiloAgent.Args[0] != "acp" {
-		t.Errorf("kilo Agent Args = %v, want [\"acp\"]", kiloAgent.Args)
+	if strings.Join(kiloAgent.Args, " ") != "acp --pure" {
+		t.Errorf("kilo Agent Args = %v, want [\"acp\", \"--pure\"]", kiloAgent.Args)
 	}
 
 	assertDirectACPAdapter(t, "claude", claudeAgent, "claude-agent-acp", []string{"-y", "@agentclientprotocol/claude-agent-acp@latest"})
@@ -217,6 +217,144 @@ func TestNormalizeDirectACPAgentsLocalFallback(t *testing.T) {
 		}
 	} else if qwenAgent.Command != "npx" || strings.Join(qwenAgent.Args, " ") != "-y @qwen-code/qwen-code@latest --acp" {
 		t.Errorf("qwen Agent = %q %v, want qwen-code npx fallback", qwenAgent.Command, qwenAgent.Args)
+	}
+}
+
+func TestLoadQualificationAgentConfigsLabelsPersistedAndDefaultAgents(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("POCKET_STUDIO_DAEMON_CONFIG_DIR", dir)
+	raw := []byte(`{
+		"direct_acp": {
+			"agents": {
+				"codex": {
+					"command": "/opt/custom/codex-acp",
+					"args": ["serve", "--custom"],
+					"env": {"QUALIFICATION_SECRET": "not-for-reporting"}
+				}
+			}
+		}
+	}`)
+	if err := os.WriteFile(filepath.Join(dir, ConfigFileName), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	agents, err := LoadQualificationAgentConfigs()
+	if err != nil {
+		t.Fatalf("LoadQualificationAgentConfigs() error = %v", err)
+	}
+	codex := agents["codex"]
+	if codex.Command != "/opt/custom/codex-acp" || strings.Join(codex.Args, " ") != "serve --custom" {
+		t.Fatalf("codex config = %#v, want persisted command and args", codex)
+	}
+	if codex.Source != "normalized_persisted_config" || codex.Env["QUALIFICATION_SECRET"] != "not-for-reporting" {
+		t.Fatalf("codex qualification metadata = %#v", codex)
+	}
+	encoded, err := json.Marshal(agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "not-for-reporting") || !strings.Contains(string(encoded), "QUALIFICATION_SECRET") {
+		t.Fatalf("serialized qualification config must contain env key but not value: %s", encoded)
+	}
+	if got := agents["qwen"].Source; got != "built_in_default" {
+		t.Fatalf("qwen source = %q, want built_in_default", got)
+	}
+}
+
+func TestNormalizeDirectACPAgentsMigratesLegacyCodexNpxPackage(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+		want    []string
+	}{
+		{"npx unversioned", "npx", []string{"@zed-industries/codex-acp"}, []string{"-y", "@agentclientprotocol/codex-acp@latest"}},
+		{"npx latest", "npx", []string{"@zed-industries/codex-acp@latest"}, []string{"-y", "@agentclientprotocol/codex-acp@latest"}},
+		{"npx yes unversioned", "npx", []string{"-y", "@zed-industries/codex-acp"}, []string{"-y", "@agentclientprotocol/codex-acp@latest"}},
+		{"npx yes latest", "npx", []string{"-y", "@zed-industries/codex-acp@latest"}, []string{"-y", "@agentclientprotocol/codex-acp@latest"}},
+		{"npx.cmd long yes", "npx.cmd", []string{"--yes", "@zed-industries/codex-acp"}, []string{"-y", "@agentclientprotocol/codex-acp@latest"}},
+		{"npx.cmd long yes latest", "npx.cmd", []string{"--yes", "@zed-industries/codex-acp@latest"}, []string{"-y", "@agentclientprotocol/codex-acp@latest"}},
+		{"pinned version", "npx.cmd", []string{"-y", "@zed-industries/codex-acp@0.16.0"}, []string{"-y", "@zed-industries/codex-acp@0.16.0"}},
+		{"custom trailing flag", "npx", []string{"-y", "@zed-industries/codex-acp", "--flag"}, []string{"-y", "@zed-industries/codex-acp", "--flag"}},
+		{"custom leading flag", "npx", []string{"--quiet", "@zed-industries/codex-acp"}, []string{"--quiet", "@zed-industries/codex-acp"}},
+		{"official package", "npx", []string{"-y", "@agentclientprotocol/codex-acp@latest"}, []string{"-y", "@agentclientprotocol/codex-acp@latest"}},
+		{"custom command", "codex-acp", []string{"@zed-industries/codex-acp@latest"}, []string{"@zed-industries/codex-acp@latest"}},
+		{"similar package", "npx", []string{"@zed-industries/codex-acp-helper"}, []string{"@zed-industries/codex-acp-helper"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"CODEX_ENV": "preserved"}
+			agents := normalizeDirectACPAgents(map[string]DirectACPAgentConfig{
+				" Codex ": {Command: tc.command, Args: tc.args, Env: env},
+			})
+			got := agents["codex"]
+			if strings.Join(got.Args, "\x00") != strings.Join(tc.want, "\x00") {
+				t.Fatalf("normalized args = %#v, want %#v", got.Args, tc.want)
+			}
+			if got.Command != tc.command || got.Env["CODEX_ENV"] != "preserved" {
+				t.Fatalf("normalized config = %#v, want command and Env preserved", got)
+			}
+		})
+	}
+}
+
+func TestNormalizeDirectACPAgentsPrefersInstalledOfficialCodexAdapter(t *testing.T) {
+	dir := t.TempDir()
+	adapter := filepath.Join(dir, "codex-acp")
+	if err := os.WriteFile(adapter, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	env := map[string]string{"CODEX_ENV": "preserved"}
+	agent := normalizeDirectACPAgents(map[string]DirectACPAgentConfig{
+		"codex": {Command: "npx", Args: []string{"@agentclientprotocol/codex-acp@latest"}, Env: env},
+	})["codex"]
+	if agent.Command != adapter || len(agent.Args) != 0 {
+		t.Fatalf("codex adapter = %q %#v, want installed adapter %q", agent.Command, agent.Args, adapter)
+	}
+	if agent.Env["CODEX_ENV"] != "preserved" {
+		t.Fatalf("codex env = %#v, want preserved", agent.Env)
+	}
+}
+
+func TestNormalizeDirectACPAgentsCodexFallbackIsNoninteractiveWithoutInstalledAdapter(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	agent := normalizeDirectACPAgents(nil)["codex"]
+	if agent.Command != "npx" || strings.Join(agent.Args, " ") != "-y @agentclientprotocol/codex-acp@latest" {
+		t.Fatalf("codex fallback = %q %#v, want noninteractive official npx fallback", agent.Command, agent.Args)
+	}
+}
+
+func TestNormalizeDirectACPAgentsMigratesLegacyKiloACPCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		args    []string
+		want    []string
+	}{
+		{"absolute kilo", "/opt/kilo/bin/kilo", []string{"acp"}, []string{"acp", "--pure"}},
+		{"windows kilocode", `C:\\Tools\\kilocode.cmd`, []string{"acp"}, []string{"acp", "--pure"}},
+		{"already pure", "kilo", []string{"acp", "--pure"}, []string{"acp", "--pure"}},
+		{"custom flags", "kilo", []string{"acp", "--port", "4321"}, []string{"acp", "--port", "4321"}},
+		{"custom wrapper", "/opt/bin/company-kilo", []string{"acp"}, []string{"acp"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"KILO_ENV": "preserved"}
+			agents := normalizeDirectACPAgents(map[string]DirectACPAgentConfig{
+				"kilo": {Command: tc.command, Args: tc.args, Env: env},
+			})
+			got := agents["kilo"]
+			if strings.Join(got.Args, "\x00") != strings.Join(tc.want, "\x00") {
+				t.Fatalf("normalized args = %#v, want %#v", got.Args, tc.want)
+			}
+			if got.Command != tc.command || got.Env["KILO_ENV"] != "preserved" {
+				t.Fatalf("normalized config = %#v, want command and Env preserved", got)
+			}
+		})
 	}
 }
 
@@ -233,43 +371,8 @@ func assertDirectACPAdapter(t *testing.T, agent string, got DirectACPAgentConfig
 	}
 }
 
-func TestAgentCapabilitiesOnlyReportInstalledAgents(t *testing.T) {
-	dir := t.TempDir()
-	for _, name := range []string{"qwen", "cursor-agent", "kilo", "agy"} {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("PATH", dir)
-
-	cfg := DefaultConfig()
-	cfg.ACPX.Enabled = true
-	cfg.ACPX.Agent = "qwen"
-	d := New(cfg)
-
-	got := capabilityNames(d.agentCapabilities())
-	want := []string{"qwen", "cursor", "kilocode", "antigravity"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("agentCapabilities() names = %v, want %v", got, want)
-	}
-}
-
-func TestAgentCapabilitiesReportEmptyListWhenNothingInstalled(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-
-	cfg := DefaultConfig()
-	cfg.ACPX.Enabled = true
-	d := New(cfg)
-
-	if got := d.agentCapabilities(); len(got) != 0 {
-		t.Fatalf("agentCapabilities() = %v, want empty", got)
-	}
-}
-
 func TestSupportsTaskAgentForRuntimeUsesDirectACPConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ACPX.Enabled = true
 	cfg.DirectACP.Enabled = true
 	cfg.DirectACP.Agents = map[string]DirectACPAgentConfig{
 		"kilo": {Command: "kilo", Args: []string{"acp"}},
@@ -278,9 +381,6 @@ func TestSupportsTaskAgentForRuntimeUsesDirectACPConfig(t *testing.T) {
 
 	if !d.supportsTaskAgentForRuntime("kilo", "direct_acp") {
 		t.Fatal("supportsTaskAgentForRuntime(kilo, direct_acp) = false, want true")
-	}
-	if !d.supportsTaskAgentForRuntime("kilo", "acpx") {
-		t.Fatal("supportsTaskAgentForRuntime(kilo, acpx) = false, want true with ACPX kilocode support")
 	}
 }
 

@@ -22,7 +22,7 @@ export interface StudioTab {
   agentSessionId?: string;
   agentSessionName?: string;
   agentKind?: string;
-  agentRuntime?: "acpx" | "direct_acp" | "gosdk";
+  agentRuntime?: "direct_acp";
   agentModelId?: string;
   projectId?: string;
 }
@@ -98,11 +98,11 @@ export function createAgentChatTab(
   agentKind: string,
   agentSessionId?: string,
   title?: string,
-  agentRuntime: StudioTab["agentRuntime"] = "acpx",
+  agentRuntime: StudioTab["agentRuntime"] = "direct_acp",
   projectId?: string,
   filePath?: string
 ): StudioTab {
-  const runtimeLabel = agentRuntime === "direct_acp" ? "Direct ACP" : (agentRuntime === "gosdk" ? "GoSDK" : "Agent");
+  const runtimeLabel = "Direct ACP";
   return {
     id: makeId("chat"),
     kind: "agent_chat",
@@ -320,11 +320,7 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): StudioTab | nul
     agentSessionId: typeof tab.agentSessionId === "string" ? tab.agentSessionId : undefined,
     agentSessionName: typeof tab.agentSessionName === "string" ? tab.agentSessionName : undefined,
     agentKind: typeof tab.agentKind === "string" ? tab.agentKind : undefined,
-    agentRuntime: tab.agentRuntime === "gosdk"
-      ? "gosdk"
-      : tab.agentRuntime === "direct_acp" || (tab.agentRuntime !== "acpx" && (tab.agentKind === "codex" || tab.agentKind === "kilo"))
-        ? "direct_acp"
-        : "acpx",
+    agentRuntime: "direct_acp",
     agentModelId: typeof tab.agentModelId === "string" ? tab.agentModelId : undefined,
     projectId: typeof tab.projectId === "string" ? tab.projectId : undefined,
   };

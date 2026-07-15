@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -23,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -35,28 +33,28 @@ import (
 type Daemon struct {
 	cfg Config
 
-	mu                  sync.Mutex
-	tasks               map[string]*runningTask
-	history             map[string]protocol.TaskRecord
-	projects            map[string]protocol.Project
-	projectStates       map[string]json.RawMessage
-	send                chan protocol.Envelope
-	sendBinary          chan []byte
-	terminalBinary      bool
-	termMu              sync.Mutex
-	terminalPTYs        map[string]*runningPTY
-	directTerminalConns map[string]map[*directTerminalSubscriber]struct{}
-	directACPXConns     map[string]map[*directACPXSubscriber]struct{}
-	directACPXProjects  map[string]string
-	hookURL             string
-	hookToken           string
-	hookAlerts          map[string]time.Time
-	directACP           map[string]*directACPSession
-	directACPStarts     map[string]*directACPStart
-	goSDKStarts         map[string]*directACPStart
-	startingTasks       map[string]struct{}
-	taskDispatchMu      map[string]*sync.Mutex
-	goSDKSessions       map[string]*goSDKSession
+	mu                      sync.Mutex
+	tasks                   map[string]*runningTask
+	history                 map[string]protocol.TaskRecord
+	projects                map[string]protocol.Project
+	projectStates           map[string]json.RawMessage
+	send                    chan protocol.Envelope
+	sendBinary              chan []byte
+	terminalBinary          bool
+	termMu                  sync.Mutex
+	terminalPTYs            map[string]*runningPTY
+	directTerminalConns     map[string]map[*directTerminalSubscriber]struct{}
+	directAgentChatConns    map[string]map[*directAgentChatSubscriber]struct{}
+	directAgentChatProjects map[string]string
+	hookURL                 string
+	hookToken               string
+	hookAlerts              map[string]time.Time
+	directACP               map[string]*directACPSession
+	directACPStarts         map[string]*directACPStart
+	startingTasks           map[string]struct{}
+	taskDispatchMu          map[string]*sync.Mutex
+	directACPStoreErr       error
+	shuttingDown            bool
 }
 
 const (
@@ -73,11 +71,18 @@ type runningTask struct {
 	cancel    context.CancelFunc
 	done      chan struct{}
 	workspace string
-	acpx      bool
 	agent     string
 	session   string
+	emitter   *taskEmitter
 	mu        sync.Mutex
 	stopping  bool
+	deleting  bool
+}
+
+type runningTaskSnapshot struct {
+	recordID string
+	session  string
+	cmd      *exec.Cmd
 }
 
 type directACPSession struct {
@@ -93,35 +98,36 @@ type directACPSession struct {
 }
 
 type directACPStart struct {
-	done chan struct{}
-	err  error
+	done   chan struct{}
+	cancel context.CancelFunc
+	err    error
 }
 
 func New(cfg Config) *Daemon {
 	return &Daemon{
-		cfg:                 cfg,
-		tasks:               make(map[string]*runningTask),
-		history:             make(map[string]protocol.TaskRecord),
-		projects:            make(map[string]protocol.Project),
-		projectStates:       make(map[string]json.RawMessage),
-		send:                make(chan protocol.Envelope, 128),
-		sendBinary:          make(chan []byte, 256),
-		terminalPTYs:        make(map[string]*runningPTY),
-		directTerminalConns: make(map[string]map[*directTerminalSubscriber]struct{}),
-		directACPXConns:     make(map[string]map[*directACPXSubscriber]struct{}),
-		directACPXProjects:  make(map[string]string),
-		hookToken:           randomHookToken(),
-		hookAlerts:          make(map[string]time.Time),
-		directACP:           make(map[string]*directACPSession),
-		directACPStarts:     make(map[string]*directACPStart),
-		goSDKStarts:         make(map[string]*directACPStart),
-		startingTasks:       make(map[string]struct{}),
-		taskDispatchMu:      make(map[string]*sync.Mutex),
-		goSDKSessions:       make(map[string]*goSDKSession),
+		cfg:                     cfg,
+		tasks:                   make(map[string]*runningTask),
+		history:                 make(map[string]protocol.TaskRecord),
+		projects:                make(map[string]protocol.Project),
+		projectStates:           make(map[string]json.RawMessage),
+		send:                    make(chan protocol.Envelope, 128),
+		sendBinary:              make(chan []byte, 256),
+		terminalPTYs:            make(map[string]*runningPTY),
+		directTerminalConns:     make(map[string]map[*directTerminalSubscriber]struct{}),
+		directAgentChatConns:    make(map[string]map[*directAgentChatSubscriber]struct{}),
+		directAgentChatProjects: make(map[string]string),
+		hookToken:               randomHookToken(),
+		hookAlerts:              make(map[string]time.Time),
+		directACP:               make(map[string]*directACPSession),
+		directACPStarts:         make(map[string]*directACPStart),
+		startingTasks:           make(map[string]struct{}),
+		taskDispatchMu:          make(map[string]*sync.Mutex),
 	}
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
+	defer d.shutdownPersistentSessions()
+
 	if strings.TrimSpace(d.cfg.DirectWeb.Token) == "" {
 		d.cfg.DirectWeb.Token = randomHookToken()
 	}
@@ -147,9 +153,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.loadDirectACPStore(); err != nil {
 		log.Printf("load direct acp sessions: %v", err)
 	}
-	if err := d.loadACPXHistoryStore(); err != nil {
-		log.Printf("load acpx history: %v", err)
-	}
 	nextDelay := reconnectInitialDelay
 	for {
 		started := time.Now()
@@ -167,6 +170,93 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(delay):
 		}
+	}
+}
+
+const daemonSessionShutdownTimeout = 2 * time.Second
+
+func (d *Daemon) shutdownPersistentSessions() {
+	d.mu.Lock()
+	if d.
+		shuttingDown {
+		d.mu.Unlock()
+		return
+	}
+	d.shuttingDown = true
+	tasks := make([]*runningTask,
+		0,
+		len(d.
+			tasks),
+	)
+	for _, task := range d.tasks {
+		tasks = append(tasks, task)
+	}
+	clients := make(map[*directACPClient]struct {
+	}, len(d.
+		directACP))
+	for _, session := range d.directACP {
+		if session !=
+			nil && session.client !=
+			nil {
+			clients[session.client] = struct{}{}
+		}
+	}
+	starts := make([]*directACPStart,
+		0, len(d.directACPStarts))
+	for _, start := range d.directACPStarts {
+		if start !=
+			nil {
+			starts = append(starts, start)
+		}
+	}
+	d.tasks = make(map[string]*runningTask)
+	d.directACP = make(map[string]*directACPSession)
+	d.startingTasks = make(map[string]struct{})
+	d.mu.Unlock()
+	for _, task := range tasks {
+		if task != nil && task.cancel != nil {
+			task.
+				cancel()
+		}
+	}
+	for _, start := range starts {
+		if start.cancel != nil {
+			start.cancel()
+		}
+	}
+	var closeWG sync.WaitGroup
+	closeWG.Add(
+		len(clients) + len(starts))
+	for client := range clients {
+		go func() {
+			defer closeWG.Done()
+			client.close()
+		}()
+	}
+	for _, start := range starts {
+		go func(start *directACPStart) {
+			defer closeWG.Done()
+			<-start.done
+		}(start)
+	}
+	closed := make(chan struct{})
+	go func() {
+		closeWG.Wait()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		return
+	case <-time.After(
+		daemonSessionShutdownTimeout):
+	}
+	for client := range clients {
+		killProcess(client.
+			cmd)
+	}
+	select {
+	case <-closed:
+	case <-time.After(250 * time.Millisecond):
 	}
 }
 
@@ -229,7 +319,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	}()
 
 	d.sendHello()
-	d.sendSnapshot()
+	d.sendSnapshot(connCtx)
 
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
@@ -291,10 +381,7 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 }
 
 func (d *Daemon) agentName() string {
-	if d.cfg.ACPX.Enabled {
-		return normalizeACPXAgentName(d.cfg.ACPX.Agent)
-	}
-	return "claude_code"
+	return "direct_acp"
 }
 
 func daemonConfigDir() string {
@@ -476,31 +563,104 @@ func (d *Daemon) loadDirectACPStore() error {
 	raw, err := os.ReadFile(daemonDirectACPSessionsPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			d.mu.Lock()
+			d.directACPStoreErr = nil
+			d.mu.Unlock()
 			return nil
 		}
+		d.mu.Lock()
+		d.directACPStoreErr = err
+		d.mu.Unlock()
 		return err
 	}
 	var store directACPStore
 	if err := json.Unmarshal(raw, &store); err != nil {
+		err = fmt.Errorf("decode direct ACP session store: %w", err)
+		d.mu.Lock()
+		d.directACPStoreErr = err
+		d.mu.Unlock()
+		return err
+	}
+	if store.Version != 1 {
+		err = fmt.Errorf("decode direct ACP session store: unsupported version %d", store.Version)
+		d.mu.Lock()
+		d.directACPStoreErr = err
+		d.mu.Unlock()
 		return err
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.directACPStoreErr = nil
+	changed := false
 	for _, record := range store.Tasks {
 		if record.TaskID == "" || !isDirectACPRecord(record) {
 			continue
 		}
 		record.DeviceID = d.cfg.Device.ID
-		if record.Status == "running" || record.Status == "stopping" {
-			record.Status = "interrupted"
-			record.UpdatedAt = protocolNow()
+		if restored, updated := restoreInterruptedTaskRecord(record); updated {
+			record = restored
+			changed = true
 		}
 		d.history[record.TaskID] = record
+	}
+	if changed {
+		return d.saveDirectACPStoreLocked()
 	}
 	return nil
 }
 
+func restoreInterruptedTaskRecord(record protocol.TaskRecord) (protocol.TaskRecord, bool) {
+	status := strings.ToLower(strings.TrimSpace(record.Status))
+	if status != "running" && status != "stopping" && status != "interrupted" {
+		return record, false
+	}
+	changed := status != "interrupted"
+	record.Status = "interrupted"
+	for index := len(record.Events) - 1; index >= 0; index-- {
+		event := record.Events[index]
+		if isTerminalTaskEventType(event.EventType) {
+			return record, changed
+		}
+		if event.EventType == "task.started" || event.EventType == "user.prompt" {
+			break
+		}
+	}
+
+	now := protocolNow()
+	data := map[string]any{
+		"error":  "task interrupted by daemon restart",
+		"reason": "interrupted",
+	}
+	if turnID := latestPromptTurnID(record.Events); turnID != "" {
+		data["turn_id"] = turnID
+	}
+	raw, _ := json.Marshal(data)
+	record.Events = append(record.Events, protocol.TaskEvent{
+		TaskID:    record.TaskID,
+		EventID:   protocol.NewID("evt"),
+		EventType: "task.failed",
+		Source:    "daemon",
+		Sequence:  nextHistoryEventSequence(record.Events),
+		Timestamp: now,
+		Data:      raw,
+	})
+	record.UpdatedAt = now
+	return record, true
+}
+
+func isTerminalTaskEventType(eventType string) bool {
+	switch eventType {
+	case "task.completed", "turn.completed", "task.failed", "turn.failed", "task.killed", "task.stopped":
+		return true
+	default:
+		return false
+	}
+}
+
 func (d *Daemon) saveDirectACPStoreLocked() error {
+	if d.directACPStoreErr != nil {
+		return fmt.Errorf("refusing to overwrite unreadable direct ACP session store: %w", d.directACPStoreErr)
+	}
 	tasks := make([]protocol.TaskRecord, 0)
 	for _, record := range d.history {
 		if !isDirectACPRecord(record) {
@@ -515,19 +675,16 @@ func (d *Daemon) saveDirectACPStoreLocked() error {
 	sort.Slice(tasks, func(i, j int) bool {
 		return tasks[i].UpdatedAt > tasks[j].UpdatedAt
 	})
-	if err := os.MkdirAll(daemonConfigDir(), 0o755); err != nil {
-		return err
-	}
 	raw, err := json.MarshalIndent(directACPStore{Version: 1, Tasks: tasks}, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(daemonDirectACPSessionsPath(), append(raw, '\n'), 0o600)
+	return writeFileAtomic(daemonDirectACPSessionsPath(), append(raw, '\n'), 0o600)
 }
 
 func isDirectACPRecord(record protocol.TaskRecord) bool {
 	rt := strings.TrimSpace(record.AgentRuntime)
-	return strings.EqualFold(rt, "direct_acp") || strings.EqualFold(rt, "gosdk")
+	return strings.EqualFold(rt, "direct_acp")
 }
 
 func (d *Daemon) workspacesSnapshot() []protocol.Workspace {
@@ -562,99 +719,35 @@ func (d *Daemon) agentLabel() string {
 }
 
 func (d *Daemon) agentCapabilities() []protocol.AgentCapability {
-	names := []string{
-		"claude",
-		"codex",
-		"gemini",
-		"cursor",
-		"copilot",
-		"qwen",
-		"opencode",
-		"openclaw",
-		"pi",
-		"droid",
-		"iflow",
-		"kilocode",
-		"kimi",
-		"kiro",
-		"qoder",
-		"trae",
-		"antigravity",
+	names := make([]string, 0,
+		len(d.cfg.DirectACP.
+			Agents))
+	for name, cfg := range d.cfg.DirectACP.
+		Agents {
+		if strings.
+			TrimSpace(cfg.
+				Command) !=
+			"" {
+			names = append(names,
+				name)
+		}
 	}
-	caps := make([]protocol.AgentCapability, 0, len(names))
-	preferred := normalizeAgentCapabilityName(d.cfg.ACPX.Agent)
-	if !d.cfg.ACPX.Enabled {
-		preferred = "claude"
-	}
-	if preferred != "" && installedAgentCommand(preferred) != "" {
-		caps = append(caps, protocol.AgentCapability{Name: preferred, Label: agentDisplayName(preferred)})
-	}
+	sort.
+		Strings(names)
+	caps := make([]protocol.
+		AgentCapability,
+
+		0, len(names))
 	for _, name := range names {
-		if name == preferred {
-			continue
-		}
-		if installedAgentCommand(name) == "" {
-			continue
-		}
-		caps = append(caps, protocol.AgentCapability{Name: name, Label: agentDisplayName(name)})
+		caps =
+			append(caps, protocol.AgentCapability{
+				Name: name, Label: agentDisplayName(name)})
 	}
 	return caps
 }
 
-func installedAgentCommand(agent string) string {
-	switch normalizeAgentCapabilityName(agent) {
-	case "claude":
-		return lookPathAny("claude")
-	case "codex":
-		return lookPathAny("codex")
-	case "gemini":
-		return lookPathAny("gemini")
-	case "cursor":
-		return lookPathAny("cursor-agent", "cursor")
-	case "copilot":
-		return lookPathAny("copilot")
-	case "qwen":
-		return lookPathAny("qwen")
-	case "opencode":
-		return lookPathAny("opencode")
-	case "openclaw":
-		return lookPathAny("openclaw")
-	case "pi":
-		return lookPathAny("pi")
-	case "droid":
-		return lookPathAny("droid", "factory-droid")
-	case "iflow":
-		return lookPathAny("iflow")
-	case "kilocode":
-		return lookPathAny("kilocode", "kilo")
-	case "kimi":
-		return lookPathAny("kimi")
-	case "kiro":
-		return lookPathAny("kiro")
-	case "qoder":
-		return lookPathAny("qoder")
-	case "trae":
-		return lookPathAny("trae")
-	case "antigravity":
-		return lookPathAny("agy", "antigravity")
-	default:
-		return ""
-	}
-}
-
-func lookPathAny(names ...string) string {
-	for _, name := range names {
-		if path, err := exec.LookPath(name); err == nil {
-			return path
-		}
-	}
-	return ""
-}
-
 func agentDisplayName(agent string) string {
 	switch normalizeAgentCapabilityName(agent) {
-	case "acpx", "online":
-		return "ACPX"
 	case "claude":
 		return "Claude Code"
 	case "codex":
@@ -867,25 +960,13 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	if isDirectACPRuntime(session.AgentRuntime) {
-		if err := d.ensureDirectACPSession(ctx, task, workspace.Path, session.TaskID); err != nil {
-			d.emitError(session.TaskID, "session_ensure_failed", err.Error())
-			return
-		}
-	} else if isGoSDKRuntime(session.AgentRuntime) {
-		if err := d.ensureGoSDKSession(ctx, task, workspace.Path, session.TaskID); err != nil {
-			d.emitError(session.TaskID, "session_ensure_failed", err.Error())
-			return
-		}
-	} else if d.cfg.ACPX.Enabled {
-		if recordID, sessionName, err := d.ensureACPXSession(ctx, task, workspace.Path, session.TaskID); err != nil {
-			d.emitError(session.TaskID, "session_ensure_failed", err.Error())
-			return
-		} else if sessionName != "" {
-			task.ResumeSessionID = recordID
-			session.SessionName = sessionName
-			task.SessionName = sessionName
-		}
+	if !isDirectACPRuntime(session.AgentRuntime) {
+		d.emitError(session.TaskID, "unsupported_runtime", "only direct_acp is supported")
+		return
+	}
+	if err := d.ensureDirectACPSession(ctx, task, workspace.Path, session.TaskID); err != nil {
+		d.emitError(session.TaskID, "session_ensure_failed", err.Error())
+		return
 	}
 	now := time.Now().Unix()
 	d.mu.Lock()
@@ -903,8 +984,10 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 	if task.ResumeSessionID != "" {
 		record.SessionID = task.ResumeSessionID
 	}
-	record.SessionName = taskSessionName(task, d.cfg.ACPX.SessionName)
-	record.Status = "created"
+	record.SessionName = strings.TrimSpace(task.SessionName)
+	if record.Status == "" {
+		record.Status = "created"
+	}
 	record.UpdatedAt = now
 	d.history[session.TaskID] = record
 	d.mu.Unlock()
@@ -935,106 +1018,11 @@ func (d *Daemon) sendTaskHistory(request protocol.TaskHistoryGet) {
 }
 
 func (d *Daemon) taskHistoryForRequest(taskID string, workspacePath string) protocol.TaskRecord {
+	_ = workspacePath
 	d.mu.Lock()
 	record := d.taskHistoryRecordLocked(taskID)
 	d.mu.Unlock()
-	if !d.shouldRestoreACPXTaskHistory(record) {
-		return record
-	}
-	if restored := d.restoreACPXTaskHistory(taskID, workspacePath); restored.TaskID != "" {
-		return restored
-	}
 	return record
-}
-
-func (d *Daemon) shouldRestoreACPXTaskHistory(record protocol.TaskRecord) bool {
-	if !d.cfg.ACPX.Enabled {
-		return false
-	}
-	if record.TaskID == "" {
-		return true
-	}
-	if isDirectACPRecord(record) {
-		return false
-	}
-	return record.AgentRuntime == "acpx"
-}
-
-func (d *Daemon) restoreACPXTaskHistory(taskID string, workspacePath string) protocol.TaskRecord {
-	if !d.cfg.ACPX.Enabled || strings.TrimSpace(taskID) == "" {
-		return protocol.TaskRecord{}
-	}
-	var best protocol.TaskRecord
-	for _, agent := range d.acpxSnapshotAgents() {
-		records, err := d.acpxSessionRecords(context.Background(), agent, workspacePath)
-		if err != nil {
-			continue
-		}
-		for _, record := range records {
-			if record.TaskID != taskID && record.SessionName != taskID && record.SessionID != taskID {
-				continue
-			}
-			if best.TaskID == "" || preferACPXRestoreCandidate(best, record, taskID) {
-				best = record
-			}
-		}
-	}
-	if best.TaskID == "" {
-		return protocol.TaskRecord{}
-	}
-	d.mu.Lock()
-	existing := d.taskHistoryRecordLocked(taskID)
-	if len(existing.Events) > 0 {
-		best.Events = compactStreamTaskEvents(mergeTaskEvents(best.Events, existing.Events))
-		if existing.Status != "" {
-			best.Status = existing.Status
-		}
-		if existing.UpdatedAt > best.UpdatedAt {
-			best.UpdatedAt = existing.UpdatedAt
-		}
-		if best.Prompt == "" {
-			best.Prompt = existing.Prompt
-		}
-	}
-	d.history[best.TaskID] = best
-	if best.TaskID != taskID {
-		aliasRecord := restoreTaskRecordForUI(best, taskID)
-		d.history[taskID] = aliasRecord
-		best = aliasRecord
-	}
-	d.mu.Unlock()
-	return best
-}
-
-func preferACPXRestoreCandidate(existing protocol.TaskRecord, candidate protocol.TaskRecord, taskID string) bool {
-	existingConversation := conversationEventCount(existing.Events)
-	candidateConversation := conversationEventCount(candidate.Events)
-	if existingConversation != candidateConversation {
-		return candidateConversation > existingConversation
-	}
-	if len(existing.Events) != len(candidate.Events) {
-		return len(candidate.Events) > len(existing.Events)
-	}
-	if (existing.Prompt == "") != (candidate.Prompt == "") {
-		return candidate.Prompt != ""
-	}
-	existingExact := existing.TaskID == taskID
-	candidateExact := candidate.TaskID == taskID
-	if existingExact != candidateExact {
-		return candidateExact
-	}
-	return candidate.UpdatedAt > existing.UpdatedAt
-}
-
-func conversationEventCount(events []protocol.TaskEvent) int {
-	count := 0
-	for _, event := range events {
-		switch event.EventType {
-		case "user.prompt", "assistant.message", "assistant.thinking", "tool.call", "tool.output":
-			count++
-		}
-	}
-	return count
 }
 
 func (d *Daemon) taskHistoryRecordLocked(taskID string) protocol.TaskRecord {
@@ -1069,26 +1057,6 @@ func restoreTaskRecordForUI(record protocol.TaskRecord, taskID string) protocol.
 	return record
 }
 
-// lockTaskDispatch serializes startTask calls for the same task ID. The
-// underlying ACPX CLI process handles one turn at a time; if a dispatch for
-// a task that's already running arrives (e.g. the browser looked idle after
-// a dropped connection but the previous turn's process never stopped),
-// racing a second process against the same session interleaves both
-// processes' output into one event stream. Waiting here instead makes the
-// daemon serialize turns regardless of what the client believes about the
-// task's state.
-func (d *Daemon) lockTaskDispatch(taskID string) func() {
-	d.mu.Lock()
-	mu, ok := d.taskDispatchMu[taskID]
-	if !ok {
-		mu = &sync.Mutex{}
-		d.taskDispatchMu[taskID] = mu
-	}
-	d.mu.Unlock()
-	mu.Lock()
-	return mu.Unlock
-}
-
 func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 	if task.TaskID == "" {
 		task.TaskID = protocol.NewID("tsk")
@@ -1103,292 +1071,35 @@ func (d *Daemon) startTask(parent context.Context, task protocol.TaskDispatch) {
 		return
 	}
 
-	if isDirectACPRuntime(task.AgentRuntime) {
-		d.startDirectACPTask(parent, task, workspace)
+	if !isDirectACPRuntime(task.AgentRuntime) {
+		d.emitError(task.TaskID, "unsupported_runtime", "only direct_acp is supported")
 		return
 	}
-	if isGoSDKRuntime(task.AgentRuntime) {
-		d.startGoSDKTask(parent, task, workspace)
-		return
-	}
-
-	unlock := d.lockTaskDispatch(task.TaskID)
-	defer unlock()
-
-	ctx, cancel := context.WithCancel(parent)
-	isACPXTask := d.usesACPXRuntime(task)
-	emitter := &taskEmitter{daemon: d, taskID: task.TaskID, acpx: isACPXTask}
-	turnID := task.TurnID
-	if turnID == "" {
-		turnID = protocol.NewID("turn")
-	}
-
-	rt := &runningTask{
-		id:        task.TaskID,
-		turnID:    turnID,
-		recordID:  providerResumeSessionID(task, ""),
-		cancel:    cancel,
-		done:      make(chan struct{}),
-		workspace: workspace.Path,
-		acpx:      isACPXTask,
-		agent:     acpxAgentName(task, d.cfg.ACPX.Agent),
-		session:   taskSessionName(task, d.cfg.ACPX.SessionName),
-	}
-	d.mu.Lock()
-	d.tasks[task.TaskID] = rt
-	d.mu.Unlock()
-
-	command, args, source := d.buildAgentCommand(task, workspace.Path)
-	if isACPXTask {
-		if recordID, sessionName, err := d.ensureACPXSession(ctx, task, workspace.Path, task.TaskID); err != nil {
-			cancel()
-			d.mu.Lock()
-			delete(d.tasks, task.TaskID)
-			d.mu.Unlock()
-			if rt.isStopping() {
-				emitter.emit("task.killed", map[string]any{"reason": "user_requested"}, nil)
-				return
-			}
-			d.emitError(task.TaskID, "session_ensure_failed", err.Error())
-			return
-		} else if sessionName != "" {
-			task.SessionName = sessionName
-			d.mu.Lock()
-			rt.session = sessionName
-			rt.recordID = recordID
-			d.mu.Unlock()
-		}
-	}
+	d.startDirectACPTask(parent, task, workspace)
+	return
 
 	// The prompt command uses an IDLE timeout, not a total one: a turn that is
 	// actively streaming output (thinking, tool calls, text) keeps resetting the
 	// timer and is never killed, no matter how long it legitimately runs. Only a
 	// turn that produces NO output for the whole idle window is treated as hung.
-	runCtx, runCancel := context.WithCancel(ctx)
-	defer runCancel()
 
-	idleTimeout := time.Duration(0)
-	if isACPXTask {
-		idleTimeout = d.acpxCommandTimeout(task.Options.TimeoutSeconds)
-	}
-	activityCh := make(chan struct{}, 1)
-	markActivity := func() {
-		select {
-		case activityCh <- struct{}{}:
-		default:
-		}
-	}
-	idleCh := make(chan struct{})
-	if idleTimeout > 0 {
-		go d.watchACPXIdle(runCtx, idleTimeout, activityCh, func() {
-			close(idleCh)
-			runCancel()
-		})
-	}
-
-	cmd := exec.CommandContext(runCtx, command, args...)
-	cmd.Dir = workspace.Path
-	configureCommandTermination(cmd)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		d.mu.Lock()
-		delete(d.tasks, task.TaskID)
-		d.mu.Unlock()
-		if rt.isStopping() {
-			emitter.emit("task.killed", map[string]any{"reason": "user_requested"}, nil)
-			return
-		}
-		d.emitError(task.TaskID, "stdout_pipe_failed", err.Error())
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		d.mu.Lock()
-		delete(d.tasks, task.TaskID)
-		d.mu.Unlock()
-		if rt.isStopping() {
-			emitter.emit("task.killed", map[string]any{"reason": "user_requested"}, nil)
-			return
-		}
-		d.emitError(task.TaskID, "stderr_pipe_failed", err.Error())
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		cancel()
-		d.mu.Lock()
-		delete(d.tasks, task.TaskID)
-		d.mu.Unlock()
-		if rt.isStopping() {
-			emitter.emit("task.killed", map[string]any{"reason": "user_requested"}, nil)
-			return
-		}
-		d.emitError(task.TaskID, "start_failed", err.Error())
-		return
-	}
-
-	d.mu.Lock()
-	rt.cmd = cmd
-	d.tasks[task.TaskID] = rt
-	now := time.Now().Unix()
-	record := d.taskHistoryRecordLocked(task.TaskID)
-	record = restoreTaskRecordForUI(record, task.TaskID)
-	if record.TaskID == "" {
-		record.TaskID = task.TaskID
-		record.StartedAt = now
-	}
-	record.WorkspaceID = workspace.ID
-	record.WorkspacePath = workspace.Path
-	record.DeviceID = d.cfg.Device.ID
-	record.Prompt = task.Prompt
-	record.ParentTaskID = task.ParentTaskID
-	if isACPXTask {
-		if rt.recordID != "" {
-			record.SessionID = rt.recordID
-		}
-	} else if task.ResumeSessionID != "" {
-		record.SessionID = task.ResumeSessionID
-	}
-	record.Agent = d.recordAgentNameForTask(task)
-	record.AgentRuntime = task.AgentRuntime
-	record.SessionName = taskSessionName(task, d.cfg.ACPX.SessionName)
-	if task.ModelID != "" {
-		record.ModelID = task.ModelID
-	}
-	record.Status = "running"
-	record.UpdatedAt = now
-	acpxTurnIndex := -1
-	if isACPXTask {
-		acpxTurnIndex = nextACPXTurnIndex(record.Events)
-		emitter.setACPXTurnIndex(acpxTurnIndex)
-	}
-	userEvent := userPromptTaskEvent(task.TaskID, turnID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events), acpxTurnIndex)
-	if userEvent.TaskID != "" {
-		record.Events = append(record.Events, userEvent)
-	}
-	d.history[task.TaskID] = record
-	d.mu.Unlock()
-
-	emitter.emit("task.started", map[string]any{
-		"turn_id":   turnID,
-		"workspace": workspace.Path,
-		"command":   command,
-		"args":      args,
-		"agent":     source,
-	}, nil)
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		d.scanOutput(stdout, "stdout", emitter, task.Prompt, markActivity)
-	}()
-	go func() {
-		defer wg.Done()
-		d.scanTextOutput(stderr, "stderr", emitter, markActivity)
-	}()
-
-	wg.Wait()
-	waitErr := cmd.Wait()
-	close(rt.done)
-	runCancel()
-	defer cancel()
-
-	d.mu.Lock()
-	delete(d.tasks, task.TaskID)
-	d.mu.Unlock()
-
-	if waitErr != nil {
-		if rt.isStopping() {
-			emitter.emit("task.killed", map[string]any{"reason": "user_requested"}, nil)
-			return
-		}
-		idleHit := false
-		select {
-		case <-idleCh:
-			idleHit = true
-		default:
-		}
-		if idleHit {
-			if d.tryClaudeFallback(ctx, task, workspace.Path, emitter) {
-				return
-			}
-			emitter.emit("task.failed", map[string]any{
-				"error":  fmt.Sprintf("acpx prompt produced no output for %s (idle timeout)", idleTimeout),
-				"reason": "idle_timeout",
-			}, nil)
-			return
-		}
-		if emitter.completedNormally() {
-			emitter.emit("task.completed", map[string]any{"exit_code": exitCodeFromError(waitErr), "stop_reason": "end_turn"}, nil)
-			return
-		}
-		errorText := waitErr.Error()
-		if acpxErr := strings.TrimSpace(emitter.errorText()); acpxErr != "" {
-			errorText = acpxErr
-		}
-		if d.shouldFallbackToClaudeOnACPXError(task, errorText) {
-			if d.tryClaudeFallback(ctx, task, workspace.Path, emitter) {
-				return
-			}
-		}
-		emitter.emit("task.failed", map[string]any{"error": errorText}, nil)
-		return
-	}
-	emitter.emit("task.completed", map[string]any{"exit_code": 0}, nil)
 }
 
 func (d *Daemon) supportsTaskAgent(agent string) bool {
-	agent = normalizeACPXAgentName(agent)
-	if agent == "" || agent == "acpx" {
-		return true
-	}
-	if d.cfg.ACPX.Enabled {
-		return isKnownACPXAgent(agent)
-	}
-	return agent == "claude_code" || agent == "claude" || agent == "claude-code"
-}
-
-func isGoSDKRuntime(runtime string) bool {
-	return strings.EqualFold(strings.TrimSpace(runtime), "gosdk")
+	_, ok := d.directACPAgentConfig(agent)
+	return ok
 }
 
 func (d *Daemon) supportsTaskAgentForRuntime(agent string, runtime string) bool {
-	if isDirectACPRuntime(runtime) || isGoSDKRuntime(runtime) {
-		_, ok := d.directACPAgentConfig(agent)
-		return ok
-	}
-	return d.supportsTaskAgent(agent)
+	return isDirectACPRuntime(runtime) && d.supportsTaskAgent(agent)
 }
 
 func (d *Daemon) recordAgentNameForTask(task protocol.TaskDispatch) string {
-	if isDirectACPRuntime(task.AgentRuntime) {
-		return taskAgentName(task, d.cfg.ACPX.Agent)
-	}
-	if d.cfg.ACPX.Enabled {
-		return acpxAgentName(task, d.cfg.ACPX.Agent)
-	}
-	return taskAgentName(task, d.cfg.ACPX.Agent)
+	return taskAgentName(task, "")
 }
 
 func isDirectACPRuntime(runtime string) bool {
 	return strings.EqualFold(strings.TrimSpace(runtime), "direct_acp")
-}
-
-func isACPXRuntime(runtime string) bool {
-	return strings.EqualFold(strings.TrimSpace(runtime), "acpx")
-}
-
-func (d *Daemon) usesACPXRuntime(task protocol.TaskDispatch) bool {
-	if isDirectACPRuntime(task.AgentRuntime) {
-		return false
-	}
-	if isACPXRuntime(task.AgentRuntime) {
-		return d.cfg.ACPX.Enabled
-	}
-	return d.cfg.ACPX.Enabled
 }
 
 func (d *Daemon) directACPAgentConfig(agent string) (DirectACPAgentConfig, bool) {
@@ -1408,7 +1119,7 @@ func (d *Daemon) directACPAgentConfig(agent string) (DirectACPAgentConfig, bool)
 
 func taskAgentName(task protocol.TaskDispatch, fallback string) string {
 	agent := strings.ToLower(strings.TrimSpace(task.Agent))
-	if agent == "" || agent == "acpx" {
+	if agent == "" {
 		agent = strings.ToLower(strings.TrimSpace(fallback))
 	}
 	if agent == "" {
@@ -1420,11 +1131,7 @@ func taskAgentName(task protocol.TaskDispatch, fallback string) string {
 	return agent
 }
 
-func acpxAgentName(task protocol.TaskDispatch, fallback string) string {
-	return normalizeACPXAgentName(taskAgentName(task, fallback))
-}
-
-func normalizeACPXAgentName(agent string) string {
+func normalizeAgentName(agent string) string {
 	agent = strings.ToLower(strings.TrimSpace(agent))
 	switch agent {
 	case "claude_code", "claude-code":
@@ -1437,7 +1144,7 @@ func normalizeACPXAgentName(agent string) string {
 }
 
 func normalizeAgentCapabilityName(agent string) string {
-	agent = normalizeACPXAgentName(agent)
+	agent = normalizeAgentName(agent)
 	switch agent {
 	case "agy":
 		return "antigravity"
@@ -1452,397 +1159,6 @@ func normalizeAgentCapabilityName(agent string) string {
 	}
 }
 
-func taskSessionName(task protocol.TaskDispatch, fallback string) string {
-	if sessionName := strings.TrimSpace(task.SessionName); sessionName != "" {
-		return sessionName
-	}
-	return strings.TrimSpace(fallback)
-}
-
-func isKnownACPXAgent(agent string) bool {
-	agent = normalizeACPXAgentName(agent)
-	for _, known := range knownACPXAgents() {
-		if agent == known {
-			return true
-		}
-	}
-	return false
-}
-
-func (d *Daemon) buildClaudeArgs(task protocol.TaskDispatch) []string {
-	args := append([]string{}, d.cfg.Claude.Args...)
-	if len(args) == 0 {
-		args = append(args, "--output-format", "stream-json")
-	}
-	args = ensureClaudeStreamJSONVerbose(args)
-	if task.ResumeSessionID != "" {
-		args = append(args, "--resume", task.ResumeSessionID)
-	}
-	args = append(args, "-p", task.Prompt)
-	if len(task.Options.AllowedTools) > 0 {
-		allowedTools := allowedToolsForTask(task)
-		if len(allowedTools) > 0 {
-			args = append(args, "--allowedTools", strings.Join(allowedTools, ","))
-		}
-	}
-	return args
-}
-
-func (d *Daemon) buildAgentCommand(task protocol.TaskDispatch, workspacePath string) (string, []string, string) {
-	if d.cfg.ACPX.Enabled {
-		agent := acpxAgentName(task, d.cfg.ACPX.Agent)
-		return d.cfg.ACPX.Command, d.buildACPXPromptArgs(task, workspacePath), agent
-	}
-	return d.cfg.Claude.Command, d.buildClaudeArgs(task), "claude_code"
-}
-
-func (d *Daemon) buildACPXPromptArgs(task protocol.TaskDispatch, workspacePath string) []string {
-	args := d.buildACPXPromptGlobalArgs(task, workspacePath)
-	args = append(args, acpxAgentName(task, d.cfg.ACPX.Agent))
-	args = append(args, "prompt")
-	if sessionName := d.acpxSessionNameForTask(task); sessionName != "" {
-		args = append(args, "--session", sessionName)
-	}
-	args = append(args, task.Prompt)
-	return args
-}
-
-func (d *Daemon) buildACPXSessionArgs(task protocol.TaskDispatch, workspacePath string, command string) []string {
-	args := d.buildACPXGlobalArgs(workspacePath)
-	args = append(args, acpxAgentName(task, d.cfg.ACPX.Agent), "sessions", command)
-	if sessionName := taskSessionName(task, d.cfg.ACPX.SessionName); sessionName != "" {
-		args = append(args, "--name", sessionName)
-	}
-	return args
-}
-
-func (d *Daemon) buildACPXSessionListArgs(workspacePath string, agent string) []string {
-	args := d.buildACPXGlobalArgs(workspacePath)
-	args = append(args, normalizeACPXAgentName(agent), "sessions", "list", "--local")
-	return args
-}
-
-func (d *Daemon) acpxSessionNameForTask(task protocol.TaskDispatch) string {
-	if sessionName := taskSessionName(task, d.cfg.ACPX.SessionName); sessionName != "" {
-		return sessionName
-	}
-	recordID := strings.TrimSpace(task.TaskID)
-	if recordID == "" {
-		return ""
-	}
-	d.mu.Lock()
-	if record := d.history[recordID]; record.SessionName != "" {
-		d.mu.Unlock()
-		return record.SessionName
-	}
-	d.mu.Unlock()
-	if record := readACPXSessionDiskRecord(recordID); record != nil {
-		return stringField(record, "name")
-	}
-	return ""
-}
-
-func (d *Daemon) buildACPXCancelArgs(workspacePath string, agent string, sessionName string) []string {
-	args := d.buildACPXGlobalArgs(workspacePath)
-	args = append(args, normalizeACPXAgentName(agent), "cancel")
-	if sessionName != "" {
-		args = append(args, "--session", sessionName)
-	}
-	return args
-}
-
-func (d *Daemon) buildACPXSessionCloseArgs(workspacePath string, agent string, sessionName string) []string {
-	args := d.buildACPXGlobalArgs(workspacePath)
-	args = append(args, normalizeACPXAgentName(agent), "sessions", "close")
-	if sessionName != "" {
-		args = append(args, sessionName)
-	}
-	return args
-}
-
-func (d *Daemon) buildACPXSetModelArgs(workspacePath string, agent string, sessionName string, modelID string) []string {
-	args := d.buildACPXGlobalArgs(workspacePath)
-	args = append(args, normalizeACPXAgentName(agent), "set", "model", modelID)
-	if sessionName != "" {
-		args = append(args, "--session", sessionName)
-	}
-	return args
-}
-
-func (d *Daemon) buildACPXGlobalArgs(workspacePath string) []string {
-	args := append([]string{}, d.cfg.ACPX.Args...)
-	args = ensureACPXApproveAll(args)
-	args = ensureACPXJSONFormat(args)
-	args = d.ensureACPXTtl(args)
-	args = append(args, "--cwd", workspacePath)
-	return args
-}
-
-func (d *Daemon) buildACPXPromptGlobalArgs(task protocol.TaskDispatch, workspacePath string) []string {
-	args := append([]string{}, d.cfg.ACPX.Args...)
-	args = ensureACPXApproveAll(args)
-	args = ensureACPXJSONFormat(args)
-	args = d.ensureACPXTtl(args)
-	agent := acpxAgentName(task, d.cfg.ACPX.Agent)
-	if agent != "opencode" && agent != "codex" {
-		args = ensureACPXModel(args, task.ModelID)
-	}
-	args = append(args, "--cwd", workspacePath)
-	return args
-}
-
-func (d *Daemon) ensureACPXTtl(args []string) []string {
-	if d.cfg.ACPX.TTLSeconds == 0 {
-		return args
-	}
-	for i, arg := range args {
-		if arg == "--ttl" && i+1 < len(args) {
-			return args
-		}
-		if strings.HasPrefix(arg, "--ttl=") {
-			return args
-		}
-	}
-	return append(args, "--ttl", fmt.Sprint(d.cfg.ACPX.TTLSeconds))
-}
-
-func (d *Daemon) acpxCommandTimeout(taskTimeoutSeconds int) time.Duration {
-	if taskTimeoutSeconds > 0 {
-		return time.Duration(taskTimeoutSeconds) * time.Second
-	}
-	if d.cfg.ACPX.CommandTimeoutSeconds <= 0 {
-		return 0
-	}
-	return time.Duration(d.cfg.ACPX.CommandTimeoutSeconds) * time.Second
-}
-
-func (d *Daemon) acpxCommandContext(parent context.Context, taskTimeoutSeconds int) (context.Context, context.CancelFunc) {
-	timeout := d.acpxCommandTimeout(taskTimeoutSeconds)
-	if timeout <= 0 {
-		return parent, func() {}
-	}
-	return context.WithTimeout(parent, timeout)
-}
-
-func (d *Daemon) watchACPXIdle(ctx context.Context, timeout time.Duration, activity <-chan struct{}, onIdle func()) {
-	if timeout <= 0 {
-		return
-	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-activity:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(timeout)
-		case <-timer.C:
-			if onIdle != nil {
-				onIdle()
-			}
-			return
-		}
-	}
-}
-
-func (d *Daemon) acpxTimeoutError(operation string, timeout time.Duration) string {
-	if timeout <= 0 {
-		return "acpx " + operation + " timed out"
-	}
-	return fmt.Sprintf("acpx %s timed out after %s", operation, timeout)
-}
-
-func configureCommandTermination(cmd *exec.Cmd) {
-	setProcessGroup(cmd)
-	cmd.Cancel = func() error {
-		terminateProcess(cmd)
-		return nil
-	}
-	cmd.WaitDelay = 5 * time.Second
-}
-
-func (d *Daemon) tryClaudeFallback(parent context.Context, task protocol.TaskDispatch, workspacePath string, emitter *taskEmitter) bool {
-	if !d.shouldFallbackToClaude(task) {
-		return false
-	}
-	emitter.emit("task.fallback", map[string]string{
-		"from":   "acpx",
-		"to":     "claude",
-		"reason": d.acpxTimeoutError("prompt", d.acpxCommandTimeout(task.Options.TimeoutSeconds)),
-	}, nil)
-
-	fallbackTask := task
-	fallbackTask.ResumeSessionID = ""
-	args := d.buildClaudeArgs(fallbackTask)
-	timeout := d.acpxCommandTimeout(task.Options.TimeoutSeconds)
-	if timeout <= 0 {
-		timeout = 2 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, d.cfg.Claude.Command, args...)
-	cmd.Dir = workspacePath
-	configureCommandTermination(cmd)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		emitter.emit("task.failed", map[string]any{"error": "claude fallback stdout pipe: " + err.Error()}, nil)
-		return true
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		emitter.emit("task.failed", map[string]any{"error": "claude fallback stderr pipe: " + err.Error()}, nil)
-		return true
-	}
-	if err := cmd.Start(); err != nil {
-		emitter.emit("task.failed", map[string]any{"error": "claude fallback start: " + err.Error()}, nil)
-		return true
-	}
-	emitter.emit("task.started", map[string]any{
-		"workspace": workspacePath,
-		"command":   d.cfg.Claude.Command,
-		"args":      args,
-		"agent":     "claude_code",
-		"fallback":  true,
-	}, nil)
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		d.scanOutput(stdout, "stdout", emitter, "", func() {})
-	}()
-	go func() {
-		defer wg.Done()
-		d.scanTextOutput(stderr, "stderr", emitter, func() {})
-	}()
-	wg.Wait()
-	waitErr := cmd.Wait()
-	if waitErr != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			emitter.emit("task.failed", map[string]any{"error": fmt.Sprintf("claude fallback timed out after %s", timeout)}, nil)
-			return true
-		}
-		emitter.emit("task.failed", map[string]any{"error": waitErr.Error()}, nil)
-		return true
-	}
-	emitter.emit("task.completed", map[string]any{"exit_code": 0, "fallback": "claude"}, nil)
-	return true
-}
-
-func (d *Daemon) shouldFallbackToClaude(task protocol.TaskDispatch) bool {
-	if !d.cfg.ACPX.Enabled {
-		return false
-	}
-	return acpxAgentName(task, d.cfg.ACPX.Agent) == "claude" && strings.TrimSpace(d.cfg.Claude.Command) != ""
-}
-
-func (d *Daemon) shouldFallbackToClaudeOnACPXError(task protocol.TaskDispatch, errorText string) bool {
-	if !d.shouldFallbackToClaude(task) {
-		return false
-	}
-	text := strings.ToLower(strings.TrimSpace(errorText))
-	if text == "" {
-		return false
-	}
-	return strings.Contains(text, "authentication required") ||
-		strings.Contains(text, "auth_required") ||
-		strings.Contains(text, "unauthorized")
-}
-
-func ensureACPXJSONFormat(args []string) []string {
-	for i, arg := range args {
-		if arg == "--format" && i+1 < len(args) {
-			return args
-		}
-		if strings.HasPrefix(arg, "--format=") {
-			return args
-		}
-	}
-	return append([]string{"--format", "json"}, args...)
-}
-
-func ensureACPXModel(args []string, modelID string) []string {
-	modelID = strings.TrimSpace(modelID)
-	if modelID == "" {
-		return args
-	}
-	for i, arg := range args {
-		if arg == "--model" && i+1 < len(args) {
-			return args
-		}
-		if strings.HasPrefix(arg, "--model=") {
-			return args
-		}
-	}
-	return append(args, "--model", modelID)
-}
-
-func ensureACPXApproveAll(args []string) []string {
-	next := args[:0]
-	skipNext := false
-	for _, arg := range args {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		switch arg {
-		case "--approve-all", "--approve-reads", "--deny-all", "--permission-policy", "--policy":
-			if arg == "--permission-policy" || arg == "--policy" {
-				skipNext = true
-			}
-			continue
-		default:
-			if strings.HasPrefix(arg, "--permission-policy=") || strings.HasPrefix(arg, "--policy=") {
-				continue
-			}
-			next = append(next, arg)
-		}
-	}
-	return append(next, "--approve-all")
-}
-
-func ensureClaudeStreamJSONVerbose(args []string) []string {
-	hasStreamJSON := false
-	hasVerbose := false
-	for i, arg := range args {
-		if arg == "--verbose" {
-			hasVerbose = true
-		}
-		if arg == "--output-format" && i+1 < len(args) && args[i+1] == "stream-json" {
-			hasStreamJSON = true
-		}
-		if strings.HasPrefix(arg, "--output-format=") && strings.TrimPrefix(arg, "--output-format=") == "stream-json" {
-			hasStreamJSON = true
-		}
-	}
-	if hasStreamJSON && !hasVerbose {
-		args = append(args, "--verbose")
-	}
-	return args
-}
-
-func allowedToolsForTask(task protocol.TaskDispatch) []string {
-	tools := make([]string, 0, len(task.Options.AllowedTools))
-	for _, tool := range task.Options.AllowedTools {
-		normalized := strings.ToLower(strings.TrimSpace(tool))
-		if normalized == "" {
-			continue
-		}
-		if !task.Options.AutoShell && (normalized == "bash" || normalized == "shell") {
-			continue
-		}
-		tools = append(tools, tool)
-	}
-	return tools
-}
-
 type taskEmitter struct {
 	mu        sync.Mutex
 	sequence  int64
@@ -1850,43 +1166,11 @@ type taskEmitter struct {
 	taskID    string
 	endTurn   bool
 	lastError string
-	acpx      bool
-	acpxTurn  int
+	rawTool   int
 }
 
 func (e *taskEmitter) emit(eventType string, data any, raw json.RawMessage) {
-	data = e.acpxEventDataForEmit(eventType, data)
 	e.daemon.emitTaskEventWithNextSequence(e.taskID, eventType, data, raw)
-}
-
-func (e *taskEmitter) acpxEventDataForEmit(eventType string, data any) any {
-	if e == nil || !e.acpx || !isACPXEventKeyedEvent(eventType) {
-		return data
-	}
-	base := mapFromEventData(data)
-	if base == nil {
-		base = map[string]any{}
-	}
-	turnIndex := e.acpxTurnIndex()
-	if _, ok := base["acpx_turn_index"]; !ok {
-		base["acpx_turn_index"] = turnIndex
-	}
-	if stringField(base, "acpx_event_key", "acpxEventKey") == "" && eventType != "assistant.message" && eventType != "assistant.thinking" && eventType != "tool.call" && eventType != "tool.output" {
-		base["acpx_event_key"] = acpxEventKey(turnIndex, eventType, 0)
-	}
-	return base
-}
-
-func (e *taskEmitter) setACPXTurnIndex(turnIndex int) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.acpxTurn = turnIndex
-}
-
-func (e *taskEmitter) acpxTurnIndex() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.acpxTurn
 }
 
 func (e *taskEmitter) markEndTurn() {
@@ -1911,278 +1195,7 @@ func (e *taskEmitter) markError(text string) {
 	e.lastError = text
 }
 
-func (e *taskEmitter) errorText() string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.lastError
-}
-
-func (d *Daemon) scanOutput(r io.Reader, stream string, emitter *taskEmitter, targetPrompt string, onActivity func()) {
-	historyUserPrompts := 0
-	if emitter != nil && emitter.taskID != "" {
-		d.mu.Lock()
-		record := d.history[emitter.taskID]
-		d.mu.Unlock()
-		lastPromptIdx := -1
-		for i, ev := range record.Events {
-			if ev.EventType == "user.prompt" {
-				historyUserPrompts++
-				lastPromptIdx = i
-			}
-		}
-		hasResponse := false
-		if lastPromptIdx >= 0 {
-			for j := lastPromptIdx + 1; j < len(record.Events); j++ {
-				evType := record.Events[j].EventType
-				if evType == "assistant.message" || evType == "assistant.thinking" ||
-					evType == "tool.call" || evType == "tool.output" ||
-					evType == "turn.completed" || evType == "task.completed" ||
-					evType == "task.failed" || evType == "task.killed" {
-					hasResponse = true
-					break
-				}
-			}
-		}
-		if historyUserPrompts > 0 && !hasResponse {
-			historyUserPrompts--
-		}
-	}
-
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	adapter := newAgentOutputAdapter(emitter, historyUserPrompts, targetPrompt)
-	defer adapter.flush()
-	for scanner.Scan() {
-		if onActivity != nil {
-			onActivity()
-		}
-		line := scanner.Bytes()
-		var raw json.RawMessage
-		if json.Valid(line) {
-			raw = append(raw, line...)
-			adapter.handle(raw)
-			continue
-		}
-		adapter.flush()
-		emitter.emit("tool.output", map[string]string{
-			"stream": stream,
-			"text":   string(line),
-		}, nil)
-	}
-}
-
-func (d *Daemon) ensureACPXSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) (string, string, error) {
-	return d.syncACPXSession(ctx, task, workspacePath, taskID, "ensure")
-}
-
-func (d *Daemon) createACPXSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) (string, string, error) {
-	return d.syncACPXSession(ctx, task, workspacePath, taskID, "new")
-}
-
-func (d *Daemon) syncACPXSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string, command string) (string, string, error) {
-	agentName := acpxAgentName(task, d.cfg.ACPX.Agent)
-	var conflictingDirectACPs []string
-	var conflictingGoSDKs []string
-	d.mu.Lock()
-	for id, session := range d.directACP {
-		if normalizeACPXAgentName(session.agent) == agentName {
-			conflictingDirectACPs = append(conflictingDirectACPs, id)
-		}
-	}
-	for id, session := range d.goSDKSessions {
-		if normalizeACPXAgentName(session.agent) == agentName {
-			conflictingGoSDKs = append(conflictingGoSDKs, id)
-		}
-	}
-	d.mu.Unlock()
-
-	for _, id := range conflictingDirectACPs {
-		log.Printf("[Daemon] Stopping conflicting Direct ACP session %q for agent %q because ACPX command %q is starting", id, agentName, command)
-		d.stopDirectACPTask(id)
-	}
-	for _, id := range conflictingGoSDKs {
-		log.Printf("[Daemon] Stopping conflicting GoSDK session %q for agent %q because ACPX command %q is starting", id, agentName, command)
-		d.stopGoSDKTask(id)
-	}
-
-	commandCtx, cancel := d.acpxCommandContext(ctx, task.Options.TimeoutSeconds)
-	defer cancel()
-
-	args := d.buildACPXSessionArgs(task, workspacePath, command)
-	cmd := exec.CommandContext(commandCtx, d.cfg.ACPX.Command, args...)
-	cmd.Dir = workspacePath
-	configureCommandTermination(cmd)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
-			return "", "", fmt.Errorf("%s", d.acpxTimeoutError("session "+command, d.acpxCommandTimeout(task.Options.TimeoutSeconds)))
-		}
-		text := strings.TrimSpace(stderr.String())
-		if text == "" {
-			text = strings.TrimSpace(stdout.String())
-		}
-		if text == "" {
-			text = err.Error()
-		}
-		return "", "", fmt.Errorf("%s: %s", err, text)
-	}
-	recordID := ""
-	sessionName := taskSessionName(task, d.cfg.ACPX.SessionName)
-	var raw json.RawMessage
-	output := bytes.TrimSpace(stdout.Bytes())
-	if json.Valid(output) {
-		raw = append(raw, output...)
-		data := map[string]any{
-			"agent":        acpxAgentName(task, d.cfg.ACPX.Agent),
-			"session_name": taskSessionName(task, d.cfg.ACPX.SessionName),
-		}
-		var session map[string]any
-		if err := json.Unmarshal(raw, &session); err == nil {
-			recordID = stringField(session, "acpxRecordId", "acpx_record_id")
-			sessionName = firstNonEmpty(stringField(session, "name"), sessionName)
-			for _, key := range []string{"acpxRecordId", "acpxSessionId", "agentSessionId", "name"} {
-				if value, ok := session[key]; ok {
-					data[key] = value
-				}
-			}
-		}
-		d.emitTaskEvent(taskID, "acpx.session", 0, data, raw)
-	}
-	d.emitACPXStatus(ctx, task, workspacePath, taskID)
-	return recordID, sessionName, nil
-}
-
-func (d *Daemon) emitACPXStatus(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) {
-	args := d.buildACPXGlobalArgs(workspacePath)
-	args = append(args, acpxAgentName(task, d.cfg.ACPX.Agent), "status")
-	if sessionName := taskSessionName(task, d.cfg.ACPX.SessionName); sessionName != "" {
-		args = append(args, "--session", sessionName)
-	}
-	statusCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(statusCtx, d.cfg.ACPX.Command, args...)
-	cmd.Dir = workspacePath
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		d.emitTaskEvent(taskID, "acpx.status_failed", 0, map[string]string{
-			"error": strings.TrimSpace(stderr.String()),
-		}, nil)
-		return
-	}
-	raw := bytes.TrimSpace(stdout.Bytes())
-	data := map[string]any{
-		"ttl_seconds": d.cfg.ACPX.TTLSeconds,
-		"agent":       acpxAgentName(task, d.cfg.ACPX.Agent),
-		"session":     taskSessionName(task, d.cfg.ACPX.SessionName),
-	}
-	if json.Valid(raw) {
-		var status map[string]any
-		if err := json.Unmarshal(raw, &status); err == nil {
-			for key, value := range status {
-				data[key] = value
-			}
-			d.emitTaskEvent(taskID, "acpx.status", 0, data, append(json.RawMessage(nil), raw...))
-			if !d.emitACPXModelList(taskID, status) {
-				d.emitACPXModelListFromSessions(ctx, task, workspacePath, taskID)
-			}
-			return
-		}
-		d.emitTaskEvent(taskID, "acpx.status", 0, data, append(json.RawMessage(nil), raw...))
-		return
-	}
-	text := strings.TrimSpace(stdout.String())
-	if text != "" {
-		data["text"] = text
-	}
-	d.emitTaskEvent(taskID, "acpx.status", 0, data, nil)
-}
-
-func (d *Daemon) emitACPXModelList(taskID string, status map[string]any) bool {
-	if status == nil {
-		return false
-	}
-	if acpx, _ := status["acpx"].(map[string]any); acpx != nil {
-		if raw := acpxModelListRaw(status, acpx); raw != nil {
-			d.emitTaskEvent(taskID, "model.list", 0, raw, mustJSON(raw))
-			return true
-		}
-		return false
-	}
-	if raw := acpxModelListRaw(status, status); raw != nil {
-		d.emitTaskEvent(taskID, "model.list", 0, raw, mustJSON(raw))
-		return true
-	}
-	return false
-}
-
-func (d *Daemon) emitACPXModelListFromSessions(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) {
-	listCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	agent := acpxAgentName(task, d.cfg.ACPX.Agent)
-	cmd := exec.CommandContext(listCtx, d.cfg.ACPX.Command, d.buildACPXSessionListArgs(workspacePath, agent)...)
-	cmd.Dir = workspacePath
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	if err := cmd.Run(); err != nil {
-		return
-	}
-	var records []map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &records); err != nil {
-		return
-	}
-	sessionName := taskSessionName(task, d.cfg.ACPX.SessionName)
-	for _, record := range records {
-		if stringField(record, "name") != sessionName {
-			continue
-		}
-		acpx, _ := record["acpx"].(map[string]any)
-		if acpx == nil {
-			continue
-		}
-		if raw := acpxModelListRaw(record, acpx); raw != nil {
-			d.emitTaskEvent(taskID, "model.list", 0, raw, mustJSON(raw))
-		}
-		return
-	}
-}
-
-func (d *Daemon) scanTextOutput(r io.Reader, stream string, emitter *taskEmitter, onActivity func()) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		if onActivity != nil {
-			onActivity()
-		}
-		text := scanner.Text()
-		if d.cfg.ACPX.Enabled {
-			emitter.markError(extractACPXErrorText(text))
-		}
-		if d.cfg.ACPX.Enabled && isACPXStatusLine(text) {
-			emitter.emit("acpx.raw", map[string]string{
-				"stream": stream,
-				"text":   text,
-			}, nil)
-			continue
-		}
-		emitter.emit("tool.output", map[string]string{
-			"stream": stream,
-			"text":   text,
-		}, nil)
-	}
-}
-
-func isACPXStatusLine(text string) bool {
-	return strings.HasPrefix(strings.TrimSpace(text), "[acpx] ")
-}
-
-func extractACPXErrorText(text string) string {
+func extractACPErrorText(text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" || !json.Valid([]byte(text)) {
 		return ""
@@ -2223,7 +1236,7 @@ type agentOutputAdapter struct {
 	thinkingStreamID   string
 	thinkingEventKey   string
 	streamCounter      int64
-	acpxTurnIndex      int
+	turnIndex          int
 	assistantOrdinal   int
 	thinkingOrdinal    int
 	toolOrdinal        int
@@ -2232,29 +1245,38 @@ type agentOutputAdapter struct {
 	userStreaming      bool
 	targetPrompt       string
 	reachedNewPrompt   bool
+	startupInfo        map[string]*oneShotTextSuppressor
+	startupInfoOrder   []string
+	toolUpdates        map[string]toolUpdateState
+}
+
+type toolUpdateState struct {
+	name        string
+	kind        string
+	status      string
+	input       any
+	streamID    string
+	callEmitted bool
 }
 
 func newAgentOutputAdapter(emitter *taskEmitter, historyUserPrompts int, targetPrompt string) *agentOutputAdapter {
-	acpxTurnIndex := 0
-	if emitter != nil {
-		acpxTurnIndex = emitter.acpxTurnIndex()
-	}
 	return &agentOutputAdapter{
 		emitter:            emitter,
 		streamPrefix:       protocol.NewID("stream"),
-		acpxTurnIndex:      acpxTurnIndex,
 		historyUserPrompts: historyUserPrompts,
 		targetPrompt:       strings.TrimSpace(targetPrompt),
+		startupInfo:        make(map[string]*oneShotTextSuppressor),
+		toolUpdates:        make(map[string]toolUpdateState),
 	}
 }
 
 func (a *agentOutputAdapter) handle(raw json.RawMessage) {
-	if a.handleACPXJSONRPC(raw) {
+	if a.handleACPJSONRPC(raw) {
 		return
 	}
 	a.flush()
 	if !a.reachedNewPrompt && a.historyUserPrompts > 0 && a.seenUserPrompts <= a.historyUserPrompts {
-		if text := extractACPXErrorText(string(raw)); text != "" {
+		if text := extractACPErrorText(string(raw)); text != "" {
 			a.emitter.markError(text)
 			a.emitter.emit("task.error", map[string]string{"error": text}, raw)
 		}
@@ -2263,7 +1285,7 @@ func (a *agentOutputAdapter) handle(raw json.RawMessage) {
 	eventType := classifyClaudeEvent(raw)
 	if eventType == "tool.call" || eventType == "tool.output" {
 		if data := claudeToolEventData(raw); data != nil {
-			data = a.acpxEventData(eventType, data, "")
+			data = a.indexedEventData(eventType, data, "")
 			a.emitter.emit(eventType, data, raw)
 			return
 		}
@@ -2309,7 +1331,7 @@ func (a *agentOutputAdapter) handle(raw json.RawMessage) {
 								}
 							}
 							if text != "" {
-								a.emitter.emit("assistant.thinking", a.acpxEventData("assistant.thinking", map[string]any{"text": text}, ""), raw)
+								a.emitter.emit("assistant.thinking", a.indexedEventData("assistant.thinking", map[string]any{"text": text}, ""), raw)
 							}
 						} else if t == "text" {
 							text := stringField(part, "text")
@@ -2331,6 +1353,11 @@ func (a *agentOutputAdapter) handle(raw json.RawMessage) {
 }
 
 func (a *agentOutputAdapter) flush() {
+	for _, sessionID := range a.startupInfoOrder {
+		if text := a.startupInfo[sessionID].flush(); text != "" {
+			a.appendAssistantText(text, nil)
+		}
+	}
 	a.flushThinking()
 	a.flushAssistant()
 	a.userStreaming = false
@@ -2378,7 +1405,7 @@ func (a *agentOutputAdapter) flushThinking() {
 	a.emitter.emit("assistant.thinking", a.nextThinkingEventDataWithKey(map[string]any{"text": text}, eventKey), raw)
 }
 
-func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
+func (a *agentOutputAdapter) handleACPJSONRPC(raw json.RawMessage) bool {
 	var msg map[string]any
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return false
@@ -2386,9 +1413,17 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 	if msg["jsonrpc"] != "2.0" {
 		return false
 	}
+	if sessionID, startupInfo := piStartupInfoFromJSONRPC(msg); sessionID != "" && startupInfo != "" {
+		if _, exists := a.startupInfo[sessionID]; !exists {
+			suppressor := &oneShotTextSuppressor{}
+			suppressor.arm(startupInfo)
+			a.startupInfo[sessionID] = suppressor
+			a.startupInfoOrder = append(a.startupInfoOrder, sessionID)
+		}
+	}
 	method, _ := msg["method"].(string)
 	if method != "session/update" {
-		if text := extractACPXErrorText(string(raw)); text != "" {
+		if text := extractACPErrorText(string(raw)); text != "" {
 			a.flush()
 			a.emitter.markError(text)
 			a.emitter.emit("task.error", map[string]string{"error": text}, raw)
@@ -2420,18 +1455,18 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 		a.userStreaming = false
 		if method == "session/prompt" {
 			a.seenUserPrompts++
-			var promptText string
 			if params, _ := msg["params"].(map[string]any); params != nil {
-				if promptArr, _ := params["prompt"].([]any); len(promptArr) > 0 {
-					if first, _ := promptArr[0].(map[string]any); first != nil {
-						promptText, _ = first["text"].(string)
-					}
+				promptText := acpContentText(params["prompt"])
+				// ACP emits this outbound request only for the prompt command that
+				// owns this stdout stream. Loaded history arrives as user chunks.
+				if promptText != "" && (a.targetPrompt == "" || promptTextMatchesTarget(promptText, a.targetPrompt)) {
+					a.reachedNewPrompt = true
 				}
 			}
-			if promptText != "" && a.observedPromptIsCurrent(promptText) {
-				a.reachedNewPrompt = true
-			}
 		}
+	}
+	if !a.reachedNewPrompt && a.historyUserPrompts > 0 && a.seenUserPrompts == 0 && acpMessageStartsTurnContent(msg) {
+		a.reachedNewPrompt = true
 	}
 
 	if !a.reachedNewPrompt && a.historyUserPrompts > 0 && a.seenUserPrompts <= a.historyUserPrompts {
@@ -2463,12 +1498,13 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 		return true
 	}
 	params, _ := msg["params"].(map[string]any)
+	sessionID := stringField(params, "sessionId", "session_id")
 	update, _ := params["update"].(map[string]any)
 	updateType, _ := update["sessionUpdate"].(string)
 	switch updateType {
 	case "agent_message_chunk":
 		a.flushThinking()
-		a.appendAssistantChunk(update, raw)
+		a.appendAssistantChunk(sessionID, update, raw)
 	case "agent_thought_chunk":
 		a.appendThinkingChunk(update, raw)
 	case "available_commands_update":
@@ -2479,7 +1515,7 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 		a.emitter.emit("mode.updated", nil, raw)
 	case "user_message_chunk", "config_option_update", "session_info_update":
 		a.flush()
-		a.emitter.emit("acpx.raw", nil, raw)
+		a.emitter.emit("provider.raw", nil, raw)
 	case "usage_update":
 		a.flush()
 		a.emitter.emit("metric.updated", nil, raw)
@@ -2488,9 +1524,27 @@ func (a *agentOutputAdapter) handleACPXJSONRPC(raw json.RawMessage) bool {
 		a.emitRawToolUpdate(update, raw)
 	default:
 		a.flush()
-		a.emitter.emit("acpx.raw", nil, raw)
+		a.emitter.emit("provider.raw", nil, raw)
 	}
 	return true
+}
+
+func acpMessageStartsTurnContent(msg map[string]any) bool {
+	method := stringField(msg, "method")
+	if method == "session/request_permission" {
+		return true
+	}
+	if method != "session/update" {
+		return false
+	}
+	params, _ := msg["params"].(map[string]any)
+	update, _ := params["update"].(map[string]any)
+	switch stringField(update, "sessionUpdate") {
+	case "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *agentOutputAdapter) observedPromptIsCurrent(promptText string) bool {
@@ -2515,11 +1569,78 @@ func promptTextMatchesTarget(promptText string, targetPrompt string) bool {
 	return strings.Contains(targetPrompt, promptText) || strings.Contains(promptText, targetPrompt)
 }
 
-func (a *agentOutputAdapter) appendAssistantChunk(update map[string]any, raw json.RawMessage) {
-	text := textFromACPXContent(update["content"])
+func (a *agentOutputAdapter) appendAssistantChunk(sessionID string, update map[string]any, raw json.RawMessage) {
+	text := textFromACPContent(update["content"])
 	if text == "" {
 		return
 	}
+	if suppressor := a.startupInfo[sessionID]; suppressor != nil {
+		text = suppressor.filter(text)
+		if text == "" {
+			return
+		}
+	}
+	if diagnostic, remainder, ok := splitACPProviderDiagnostic(text); ok {
+		a.flushAssistant()
+		a.emitter.emit("provider.raw", map[string]any{"stream": "assistant", "text": diagnostic}, raw)
+		text = remainder
+		if text == "" {
+			return
+		}
+	}
+	a.appendAssistantText(text, raw)
+}
+
+func splitACPProviderDiagnostic(text string) (string, string, bool) {
+	trimmed := strings.TrimSpace(text)
+	if isACPReconnectStatus(trimmed) {
+		return trimmed, "", true
+	}
+	return splitCodexModelMetadataWarning(text)
+}
+
+func isACPReconnectStatus(text string) bool {
+	const prefix = "Reconnecting... "
+	progress, ok := strings.CutPrefix(text, prefix)
+	if !ok {
+		return false
+	}
+	current, total, ok := strings.Cut(progress, "/")
+	return ok && !strings.Contains(total, "/") && decimalDigits(current) && decimalDigits(total)
+}
+
+func decimalDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func splitCodexModelMetadataWarning(text string) (string, string, bool) {
+	const prefix = "Warning: Model metadata for "
+	const suffix = " not found. Defaulting to fallback metadata; this can degrade performance and cause issues."
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	if !strings.HasPrefix(trimmed, prefix) {
+		return "", text, false
+	}
+	end := strings.Index(trimmed, suffix)
+	if end < 0 {
+		return "", text, false
+	}
+	end += len(suffix)
+	for end < len(trimmed) && (trimmed[end] == '\r' || trimmed[end] == '\n') {
+		end++
+	}
+	diagnostic := strings.TrimSpace(trimmed[:end])
+	return diagnostic, trimmed[end:], true
+}
+
+func (a *agentOutputAdapter) appendAssistantText(text string, raw json.RawMessage) {
 	a.assistantText.WriteString(text)
 	a.assistantRaw = raw
 	a.assistantStreaming = true
@@ -2530,15 +1651,81 @@ func (a *agentOutputAdapter) appendAssistantChunk(update map[string]any, raw jso
 	if a.assistantEventKey == "" {
 		a.assistantEventKey = a.nextAssistantEventKey()
 	}
-	a.emitter.emit("assistant.message", a.acpxEventData("assistant.message", map[string]any{
+	a.emitter.emit("assistant.message", a.indexedEventData("assistant.message", map[string]any{
 		"text":      a.assistantText.String(),
 		"replace":   true,
 		"stream_id": a.assistantStreamID,
 	}, a.assistantEventKey), raw)
 }
 
+type oneShotTextSuppressor struct {
+	target     string
+	pending    string
+	armed      bool
+	configured bool
+}
+
+func (s *oneShotTextSuppressor) arm(target string) {
+	if target == "" || s.configured {
+		return
+	}
+	s.target = target
+	s.armed = true
+	s.configured = true
+}
+
+func (s *oneShotTextSuppressor) filter(text string) string {
+	if !s.armed {
+		return text
+	}
+	s.pending += text
+	if strings.HasPrefix(s.target, s.pending) {
+		if len(s.pending) < len(s.target) {
+			return ""
+		}
+		s.armed = false
+		s.pending = ""
+		return ""
+	}
+	if strings.HasPrefix(s.pending, s.target) {
+		remainder := strings.TrimPrefix(s.pending, s.target)
+		s.armed = false
+		s.pending = ""
+		return remainder
+	}
+	pending := s.pending
+	s.armed = false
+	s.pending = ""
+	return pending
+}
+
+func (s *oneShotTextSuppressor) flush() string {
+	if !s.armed || s.pending == "" {
+		return ""
+	}
+	pending := s.pending
+	s.armed = false
+	s.pending = ""
+	return pending
+}
+
+func piStartupInfoFromJSONRPC(msg map[string]any) (string, string) {
+	result, _ := msg["result"].(map[string]any)
+	if result == nil {
+		return "", ""
+	}
+	meta, _ := result["_meta"].(map[string]any)
+	return stringField(result, "sessionId", "session_id"), piStartupInfoFromMeta(meta)
+}
+
+func piStartupInfoFromMeta(meta map[string]any) string {
+	piMeta, _ := meta["piAcp"].(map[string]any)
+	startupInfo, _ := piMeta["startupInfo"].(string)
+	return startupInfo
+}
+
 func (a *agentOutputAdapter) appendThinkingChunk(update map[string]any, raw json.RawMessage) {
-	text := textFromACPXContent(update["content"])
+	text := textFromACPContent(update["content"])
 	if text == "" {
 		return
 	}
@@ -2552,7 +1739,7 @@ func (a *agentOutputAdapter) appendThinkingChunk(update map[string]any, raw json
 	if a.thinkingEventKey == "" {
 		a.thinkingEventKey = a.nextThinkingEventKey()
 	}
-	a.emitter.emit("assistant.thinking", a.acpxEventData("assistant.thinking", map[string]any{
+	a.emitter.emit("assistant.thinking", a.indexedEventData("assistant.thinking", map[string]any{
 		"text":      a.thinkingText.String(),
 		"replace":   true,
 		"stream_id": a.thinkingStreamID,
@@ -2564,49 +1751,154 @@ func (a *agentOutputAdapter) emitRawToolUpdate(update map[string]any, raw json.R
 	if id == "" {
 		id = protocol.NewID("tool")
 	}
-	output := firstPresentValue(update, "rawOutput", "raw_output", "output", "result", "content")
-	data := map[string]any{
-		"tool_use_id": id,
-		"name":        stringField(update, "title", "kind", "name"),
-		"status":      stringField(update, "status"),
-		"input":       firstPresentValue(update, "rawInput", "raw_input", "input"),
-		"output":      output,
+	state := a.toolUpdates[id]
+	if name := stringField(update, "title", "kind", "name"); name != "" {
+		state.name = name
+	}
+	if kind := stringField(update, "kind"); kind != "" {
+		state.kind = kind
+	}
+	if status := stringField(update, "status"); status != "" {
+		state.status = status
+	}
+	if input, ok := firstNonNilPresentValue(update, "rawInput", "raw_input", "input"); ok {
+		state.input = input
 	}
 	if streamID := stringField(update, "streamId", "stream_id", "outputStreamId", "output_stream_id"); streamID != "" {
-		data["stream_id"] = streamID
+		state.streamID = streamID
+	}
+
+	updateType := stringField(update, "sessionUpdate")
+	output, hasOutput := firstNonNilPresentValue(update, "rawOutput", "raw_output", "output", "result")
+	if !hasOutput && updateType != "tool_call" {
+		output, hasOutput = firstNonNilPresentValue(update, "content")
+	}
+	appendOutput := false
+	if hasAnyKey(update, "outputDelta", "output_delta", "rawOutputDelta", "raw_output_delta") {
+		output = firstPresentValue(update, "outputDelta", "output_delta", "rawOutputDelta", "raw_output_delta")
+		hasOutput = true
+		appendOutput = true
+	}
+	if delta, terminalID, ok := terminalOutputDelta(update); ok {
+		output = delta
+		hasOutput = true
+		appendOutput = true
+		if state.streamID == "" {
+			state.streamID = terminalID
+		}
+	}
+	var webSearchOutput map[string]any
+	synthesizeWebSearchOutput := false
+	if !hasOutput {
+		webSearchOutput, synthesizeWebSearchOutput = completedWebSearchOutput(state.input, state.status)
+	}
+	if synthesizeWebSearchOutput && state.kind == "" {
+		state.kind = "search"
+	}
+
+	data := map[string]any{
+		"tool_use_id": id,
+		"name":        state.name,
+		"status":      state.status,
+		"input":       state.input,
+		"output":      output,
+	}
+	if state.kind != "" {
+		data["kind"] = state.kind
+	}
+	if state.streamID != "" {
+		data["stream_id"] = state.streamID
 	}
 	if appendValue, ok := boolField(update, "append", "isDelta", "is_delta", "delta"); ok {
 		data["append"] = appendValue
 	}
-	if hasAnyKey(update, "outputDelta", "output_delta", "rawOutputDelta", "raw_output_delta") {
-		data["output"] = firstPresentValue(update, "outputDelta", "output_delta", "rawOutputDelta", "raw_output_delta")
+	if appendOutput {
 		data["append"] = true
 	}
+	if synthesizeWebSearchOutput {
+		if !state.callEmitted {
+			a.emitToolUpdateEvent("tool.call", id, data, raw)
+			state.callEmitted = true
+		}
+		data["output"] = webSearchOutput
+		a.toolUpdates[id] = state
+		a.emitToolUpdateEvent("tool.output", id, data, raw)
+		return
+	}
 	eventType := "tool.call"
-	if hasAnyKey(update, "rawOutput", "raw_output", "output", "result", "content", "outputDelta", "output_delta", "rawOutputDelta", "raw_output_delta") {
+	if hasOutput {
 		eventType = "tool.output"
-	} else if status := stringField(update, "status"); statusIndicatesError(status) {
+	} else if statusIndicatesError(state.status) {
 		eventType = "tool.output"
 	}
+	if eventType == "tool.call" {
+		state.callEmitted = true
+	}
+	a.toolUpdates[id] = state
+	a.emitToolUpdateEvent(eventType, id, data, raw)
+}
+
+func (a *agentOutputAdapter) emitToolUpdateEvent(eventType, id string, data map[string]any, raw json.RawMessage) {
 	eventKey := ""
 	if id != "" {
-		eventKey = "turn:" + strconv.Itoa(a.acpxTurnIndex) + ":" + eventType + ":" + id
+		eventKey = "turn:" + strconv.Itoa(a.turnIndex) + ":" + eventType + ":" + id
 	} else {
-		eventKey = acpxEventKey(a.acpxTurnIndex, eventType, a.toolOrdinal)
+		eventKey = indexedEventKey(a.turnIndex, eventType, a.toolOrdinal)
 		a.toolOrdinal++
 	}
-	data = acpxEventData(data, a.acpxTurnIndex, eventType, eventKey)
+	data = a.indexedEventData(eventType, data, eventKey)
 	a.emitter.emit(eventType, data, raw)
 }
 
+func completedWebSearchOutput(input any, status string) (map[string]any, bool) {
+	if !statusIndicatesCompleted(status) {
+		return nil, false
+	}
+	inputMap, _ := input.(map[string]any)
+	if inputMap == nil || !strings.EqualFold(strings.ReplaceAll(stringField(inputMap, "type"), "_", ""), "websearch") {
+		return nil, false
+	}
+	action, _ := inputMap["action"].(map[string]any)
+	if len(action) == 0 {
+		return nil, false
+	}
+	output := map[string]any{
+		"action": action,
+		"status": status,
+		"type":   inputMap["type"],
+	}
+	if query, ok := firstNonNilPresentValue(inputMap, "query", "search_query", "searchQuery"); ok {
+		output["query"] = query
+	}
+	if queries, ok := firstNonNilPresentValue(action, "queries"); ok {
+		output["queries"] = queries
+	} else if queries, ok := firstNonNilPresentValue(inputMap, "queries"); ok {
+		output["queries"] = queries
+	}
+	return output, true
+}
+
+func terminalOutputDelta(update map[string]any) (any, string, bool) {
+	meta, _ := update["_meta"].(map[string]any)
+	delta, _ := meta["terminal_output_delta"].(map[string]any)
+	if delta == nil {
+		return nil, "", false
+	}
+	value, ok := delta["data"]
+	if !ok {
+		return nil, "", false
+	}
+	return value, stringField(delta, "terminal_id", "terminalId"), true
+}
+
 func (a *agentOutputAdapter) nextAssistantEventKey() string {
-	eventKey := acpxEventKey(a.acpxTurnIndex, "assistant.message", a.assistantOrdinal)
+	eventKey := indexedEventKey(a.turnIndex, "assistant.message", a.assistantOrdinal)
 	a.assistantOrdinal++
 	return eventKey
 }
 
 func (a *agentOutputAdapter) nextThinkingEventKey() string {
-	eventKey := acpxEventKey(a.acpxTurnIndex, "assistant.thinking", a.thinkingOrdinal)
+	eventKey := indexedEventKey(a.turnIndex, "assistant.thinking", a.thinkingOrdinal)
 	a.thinkingOrdinal++
 	return eventKey
 }
@@ -2619,21 +1911,20 @@ func (a *agentOutputAdapter) nextAssistantEventDataWithKey(data map[string]any, 
 	if eventKey == "" {
 		eventKey = a.nextAssistantEventKey()
 	}
-	return a.acpxEventData("assistant.message", data, eventKey)
+	return a.indexedEventData("assistant.message", data, eventKey)
 }
 
 func (a *agentOutputAdapter) nextThinkingEventDataWithKey(data map[string]any, eventKey string) map[string]any {
 	if eventKey == "" {
 		eventKey = a.nextThinkingEventKey()
 	}
-	return a.acpxEventData("assistant.thinking", data, eventKey)
+	return a.indexedEventData("assistant.thinking", data, eventKey)
 }
 
-func (a *agentOutputAdapter) acpxEventData(eventType string, data map[string]any, eventKey string) map[string]any {
-	if a == nil || a.emitter == nil || !a.emitter.acpx {
-		return data
-	}
-	return acpxEventData(data, a.acpxTurnIndex, eventType, eventKey)
+func (a *agentOutputAdapter) indexedEventData(eventType string, data map[string]any, eventKey string) map[string]any {
+	_ = eventType
+	_ = eventKey
+	return data
 }
 
 func firstPresentValue(values map[string]any, keys ...string) any {
@@ -2643,6 +1934,15 @@ func firstPresentValue(values map[string]any, keys ...string) any {
 		}
 	}
 	return nil
+}
+
+func firstNonNilPresentValue(values map[string]any, keys ...string) (any, bool) {
+	for _, key := range keys {
+		if value, ok := values[key]; ok && value != nil {
+			return value, true
+		}
+	}
+	return nil, false
 }
 
 func boolField(values map[string]any, keys ...string) (bool, bool) {
@@ -2666,7 +1966,7 @@ func boolField(values map[string]any, keys ...string) (bool, bool) {
 	return false, false
 }
 
-func textFromACPXContent(value any) string {
+func textFromACPContent(value any) string {
 	switch content := value.(type) {
 	case string:
 		return content
@@ -2707,28 +2007,6 @@ func stringField(source map[string]any, keys ...string) string {
 	return ""
 }
 
-func intFieldOK(source map[string]any, keys ...string) (int, bool) {
-	for _, key := range keys {
-		switch value := source[key].(type) {
-		case int:
-			return value, true
-		case int64:
-			return int(value), true
-		case float64:
-			return int(value), true
-		case json.Number:
-			if parsed, err := value.Int64(); err == nil {
-				return int(parsed), true
-			}
-		case string:
-			if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
-				return parsed, true
-			}
-		}
-	}
-	return 0, false
-}
-
 func hasAnyKey(source map[string]any, keys ...string) bool {
 	for _, key := range keys {
 		if _, ok := source[key]; ok {
@@ -2748,6 +2026,15 @@ func hasAvailableModels(msg map[string]any) bool {
 func statusIndicatesError(status string) bool {
 	normalized := strings.ToLower(status)
 	return strings.Contains(normalized, "error") || strings.Contains(normalized, "fail")
+}
+
+func statusIndicatesCompleted(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "complete", "success", "succeeded", "done":
+		return true
+	default:
+		return false
+	}
 }
 
 func exitCodeFromError(err error) int {
@@ -2876,11 +2163,11 @@ func textFromAssistantMessageObject(obj map[string]any) string {
 			return text
 		}
 		if content, ok := message["content"]; ok {
-			return acpxContentText(content)
+			return acpContentText(content)
 		}
 	}
 	if content, ok := obj["content"]; ok {
-		return acpxContentText(content)
+		return acpContentText(content)
 	}
 	return ""
 }
@@ -2889,152 +2176,41 @@ func (d *Daemon) stopTask(taskID string) {
 	if d.stopDirectACPTask(taskID) {
 		return
 	}
-	if d.stopGoSDKTask(taskID) {
-		return
-	}
-	d.mu.Lock()
-	rt := d.tasks[taskID]
-	d.mu.Unlock()
-	if rt == nil {
-		d.emitError(taskID, "task_not_found", "task is not running")
-		return
-	}
-	rt.markStopping()
-	d.emitTaskEvent(taskID, "task.stopping", 0, map[string]string{"reason": "user_requested"}, nil)
-	if rt.acpx {
-		d.cancelACPXTask(rt)
-	}
-	if rt.cancel != nil {
-		rt.cancel()
-	}
-	if !rt.acpx && rt.cmd != nil {
-		terminateProcess(rt.cmd)
-	}
-	select {
-	case <-rt.done:
-	case <-time.After(5 * time.Second):
-		if rt.cmd != nil {
-			if rt.acpx {
-				d.forceKillACPXSession(rt.recordID)
-			}
-			killProcess(rt.cmd)
-		}
-	}
-}
-
-func (d *Daemon) cancelACPXTask(rt *runningTask) {
-	if rt.workspace == "" {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// 1. Cooperatively cancel the current active prompt
-	cmdCancel := exec.CommandContext(ctx, d.cfg.ACPX.Command, d.buildACPXCancelArgs(rt.workspace, rt.agent, rt.session)...)
-	cmdCancel.Dir = rt.workspace
-	_ = cmdCancel.Run()
-}
-
-func (d *Daemon) forceKillACPXSession(recordID string) {
-	if recordID == "" {
-		return
-	}
-	path := acpxSessionFilePath(recordID, ".stream.lock")
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var lockData struct {
-		Pid int `json:"pid"`
-	}
-	if err := json.Unmarshal(raw, &lockData); err == nil && lockData.Pid > 0 {
-		killProcessesRecursively(lockData.Pid)
-	}
-	_ = os.Remove(path)
+	d.emitError(
+		taskID, "task_not_found",
+		"direct ACP task is not running",
+	)
 }
 
 func (d *Daemon) setTaskModel(parent context.Context, change protocol.TaskSetModel) {
-	taskID := strings.TrimSpace(change.TaskID)
+	taskID :=
+		strings.TrimSpace(change.
+			TaskID)
 	modelID := strings.TrimSpace(change.ModelID)
-	if taskID == "" || modelID == "" {
-		if taskID == "" {
-			d.emitRequestError(change.RequestID, "bad_payload", "task.set_model requires task_id and model_id")
+	if taskID ==
+		"" ||
+		modelID ==
+			"" {
+		if taskID ==
+			"" {
+			d.emitRequestError(change.RequestID,
+				"bad_payload",
+				"task.set_model requires task_id and model_id",
+			)
 			return
+
 		}
-		d.emitError(taskID, "bad_payload", "task.set_model requires task_id and model_id")
+		d.emitError(taskID,
+			"bad_payload", "task.set_model requires task_id and model_id",
+		)
+
 		return
 	}
 	if d.setDirectACPModel(parent, change) {
 		return
 	}
-	if !d.cfg.ACPX.Enabled {
-		d.emitTaskEvent(taskID, "model.update_failed", 0, map[string]string{
-			"model_id": modelID,
-			"error":    "model switching requires acpx",
-		}, nil)
-		return
-	}
-	d.mu.Lock()
-	record := d.history[taskID]
-	rt := d.tasks[taskID]
-	d.mu.Unlock()
-	workspacePath := record.WorkspacePath
-	agent := normalizeACPXAgentName(taskAgentName(protocol.TaskDispatch{Agent: record.Agent}, d.cfg.ACPX.Agent))
-	sessionName := strings.TrimSpace(record.SessionName)
-	if rt != nil {
-		if rt.workspace != "" {
-			workspacePath = rt.workspace
-		}
-		if rt.agent != "" {
-			agent = rt.agent
-		}
-		if rt.session != "" {
-			sessionName = rt.session
-		}
-	}
-	if workspacePath == "" {
-		d.emitTaskEvent(taskID, "model.update_failed", 0, map[string]string{
-			"model_id": modelID,
-			"error":    "task has no workspace",
-		}, nil)
-		return
-	}
-	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, d.cfg.ACPX.Command, d.buildACPXSetModelArgs(workspacePath, agent, sessionName, modelID)...)
-	cmd.Dir = workspacePath
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		text := strings.TrimSpace(stderr.String())
-		if text == "" {
-			text = strings.TrimSpace(stdout.String())
-		}
-		if text == "" {
-			text = err.Error()
-		}
-		d.emitTaskEvent(taskID, "model.update_failed", 0, map[string]string{
-			"model_id": modelID,
-			"error":    text,
-		}, nil)
-		return
-	}
-	d.mu.Lock()
-	record = d.history[taskID]
-	record.ModelID = modelID
-	record.UpdatedAt = time.Now().Unix()
-	d.history[taskID] = record
-	d.mu.Unlock()
-	raw := bytes.TrimSpace(stdout.Bytes())
-	var rawJSON json.RawMessage
-	if json.Valid(raw) {
-		rawJSON = append(rawJSON, raw...)
-	}
-	d.emitTaskEvent(taskID, "model.updated", 0, map[string]string{
-		"model_id": modelID,
-	}, rawJSON)
+	d.emitTaskEvent(taskID, "model.update_failed",
+		0, map[string]string{"model_id": modelID, "error": "model switching requires an active direct ACP session"}, nil)
 }
 
 func (d *Daemon) setTaskConfigOption(parent context.Context, change protocol.TaskSetConfigOption) {
@@ -3059,67 +2235,27 @@ func (d *Daemon) setTaskConfigOption(parent context.Context, change protocol.Tas
 }
 
 func (d *Daemon) deleteSession(parent context.Context, remove protocol.SessionDelete) {
-	taskID := strings.TrimSpace(remove.TaskID)
-	if taskID == "" {
-		d.emitRequestError(remove.RequestID, "bad_payload", "session.delete requires task_id")
+	_ = parent
+	taskID := strings.TrimSpace(remove.
+		TaskID)
+	if taskID ==
+		"" {
+		d.emitRequestError(remove.
+			RequestID,
+			"bad_payload",
+
+			"session.delete requires task_id",
+		)
 		return
 	}
-	d.mu.Lock()
-	record := d.history[taskID]
-	rt := d.tasks[taskID]
-	d.mu.Unlock()
-	workspacePath := firstNonEmpty(remove.WorkspacePath, record.WorkspacePath, d.defaultACPXWorkspace())
-	agent := normalizeACPXAgentName(taskAgentName(protocol.TaskDispatch{Agent: firstNonEmpty(remove.Agent, record.Agent)}, d.cfg.ACPX.Agent))
-	sessionName := firstNonEmpty(remove.SessionName, record.SessionName)
-	if rt != nil {
-		rt.markStopping()
-	}
-	if isDirectACPRuntime(firstNonEmpty(remove.AgentRuntime, record.AgentRuntime)) {
-		d.deleteDirectACPSession(taskID)
-	} else if isGoSDKRuntime(firstNonEmpty(remove.AgentRuntime, record.AgentRuntime)) {
-		d.deleteGoSDKSession(taskID)
-	} else if d.cfg.ACPX.Enabled && workspacePath != "" {
-		if err := d.deleteACPXSession(parent, rt, workspacePath, agent, sessionName); err != nil {
-			text := strings.TrimSpace(err.Error())
-			d.emitTaskEvent(taskID, "session.delete_failed", 0, map[string]string{"error": text}, nil)
-			return
-		}
-	}
-	d.mu.Lock()
-	delete(d.history, taskID)
-	delete(d.tasks, taskID)
-	d.mu.Unlock()
-	d.sendSnapshot()
-}
+	d.
+		deleteDirectACPSession(taskID)
+	d.
+		sendTaskSnapshot(context.
+			Background(),
 
-func (d *Daemon) deleteACPXSession(parent context.Context, rt *runningTask, workspacePath string, agent string, sessionName string) error {
-	if rt != nil {
-		if rt.acpx {
-			d.cancelACPXTask(rt)
-		}
-		if rt.cancel != nil {
-			rt.cancel()
-		}
-	}
-	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, d.cfg.ACPX.Command, d.buildACPXSessionCloseArgs(workspacePath, agent, sessionName)...)
-	cmd.Dir = workspacePath
-	var stderr bytes.Buffer
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		text := strings.TrimSpace(stderr.String())
-		if text == "" {
-			text = strings.TrimSpace(stdout.String())
-		}
-		if text == "" {
-			text = err.Error()
-		}
-		return errors.New(text)
-	}
-	return nil
+			[]string{taskID})
+	d.sendSnapshot(context.Background())
 }
 
 func firstNonEmpty(values ...string) string {
@@ -3706,32 +2842,13 @@ func (d *Daemon) runningTaskIDs() []string {
 	return ids
 }
 
-func (d *Daemon) sendSnapshot() {
-	if d.cfg.ACPX.Enabled {
-		for _, agent := range d.acpxSnapshotAgents() {
-			if tasks, err := d.acpxSessionRecords(context.Background(), agent); err == nil {
-				d.mu.Lock()
-				for _, record := range tasks {
-					if existing := d.history[record.TaskID]; existing.TaskID != "" && isDirectACPRecord(existing) {
-						continue
-					}
-					if existing := d.history[record.TaskID]; len(existing.Events) > 0 {
-						record.Events = compactStreamTaskEvents(mergeTaskEvents(record.Events, existing.Events))
-						if existing.Status == "running" || existing.Status == "stopping" {
-							record.Status = existing.Status
-						}
-						if existing.UpdatedAt > record.UpdatedAt {
-							record.UpdatedAt = existing.UpdatedAt
-						}
-					}
-					d.history[record.TaskID] = record
-				}
-				d.mu.Unlock()
-			} else {
-				log.Printf("acpx sessions list for agent %q failed: %v", agent, err)
-			}
-		}
-	}
+func (d *Daemon) sendSnapshot(ctx context.Context) {
+	d.
+		sendTaskSnapshot(ctx,
+			nil)
+}
+
+func (d *Daemon) sendTaskSnapshot(ctx context.Context, deletedTaskIDs []string) {
 	d.mu.Lock()
 	tasks := make([]protocol.TaskRecord, 0, len(d.history))
 	for _, record := range d.history {
@@ -3739,174 +2856,18 @@ func (d *Daemon) sendSnapshot() {
 		tasks = append(tasks, record)
 	}
 	d.mu.Unlock()
-	d.send <- protocol.NewEnvelope(protocol.TypeTaskSnapshot, "daemon", protocol.TaskSnapshot{
-		DeviceID: d.cfg.Device.ID,
-		Tasks:    tasks,
+	envelope := protocol.NewEnvelope(protocol.TypeTaskSnapshot, "daemon", protocol.TaskSnapshot{
+		DeviceID:       d.cfg.Device.ID,
+		Tasks:          tasks,
+		DeletedTaskIDs: deletedTaskIDs,
 	})
+	select {
+	case d.send <- envelope:
+	case <-ctx.Done():
+	}
 }
 
-func (d *Daemon) acpxSnapshotAgents() []string {
-	configuredAgent := normalizeACPXAgentName(d.cfg.ACPX.Agent)
-	agents := make([]string, 0, len(knownACPXAgents())+1)
-	if configuredAgent != "" {
-		agents = append(agents, configuredAgent)
-	}
-	for _, agent := range knownACPXAgents() {
-		if agent != configuredAgent {
-			agents = append(agents, agent)
-		}
-	}
-	return agents
-}
-
-func knownACPXAgents() []string {
-	return []string{"claude", "opencode", "pi", "codex", "kilocode", "gemini", "cursor", "copilot", "qwen", "openclaw", "droid", "iflow", "kimi", "kiro", "qoder", "trae"}
-}
-
-func (d *Daemon) acpxSessionRecords(ctx context.Context, agent string, workspacePath ...string) ([]protocol.TaskRecord, error) {
-	workspace := d.defaultACPXWorkspace()
-	targetWorkspace := ""
-	if len(workspacePath) > 0 && strings.TrimSpace(workspacePath[0]) != "" {
-		targetWorkspace = strings.TrimSpace(workspacePath[0])
-		workspace = targetWorkspace
-	}
-	if agent == "" {
-		agent = normalizeACPXAgentName(d.cfg.ACPX.Agent)
-	}
-	if agent == "" {
-		agent = "claude"
-	}
-	agent = normalizeACPXAgentName(agent)
-	listCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(listCtx, d.cfg.ACPX.Command, d.buildACPXSessionListArgs(workspace, agent)...)
-	cmd.Dir = workspace
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		text := strings.TrimSpace(stderr.String())
-		if text == "" {
-			text = strings.TrimSpace(stdout.String())
-		}
-		if text == "" {
-			text = err.Error()
-		}
-		return nil, fmt.Errorf("%s: %s", err, text)
-	}
-	var records []map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &records); err != nil {
-		return nil, err
-	}
-	taskByID := make(map[string]protocol.TaskRecord, len(records))
-	for _, item := range records {
-		recordID := stringField(item, "acpxRecordId", "acpx_record_id")
-		if recordID == "" {
-			continue
-		}
-		item = mergeACPXSessionDiskRecord(item, recordID)
-		sessionName := stringField(item, "name")
-		closed, _ := item["closed"].(bool)
-		taskID := acpxTaskIDForRecord(recordID, sessionName)
-		cwd := stringField(item, "cwd")
-		if targetWorkspace != "" && cwd != "" && !sameWorkspacePath(cwd, targetWorkspace) {
-			continue
-		}
-		modelID := ""
-		if acpx, _ := item["acpx"].(map[string]any); acpx != nil {
-			modelID = stringField(acpx, "current_model_id")
-		}
-		status := "created"
-		if closed {
-			status = "closed"
-		}
-		createdAt := parseACPXTime(stringField(item, "createdAt", "created_at"))
-		updatedAt := parseACPXTime(stringField(item, "lastUsedAt", "last_used_at"))
-		if updatedAt == 0 {
-			updatedAt = parseACPXTime(stringField(item, "updated_at"))
-		}
-		if updatedAt == 0 {
-			updatedAt = createdAt
-		}
-		events := acpxSessionHistoryEvents(taskID, item, createdAt, updatedAt)
-		events = appendMissingACPXPromptEvents(events, taskID, recordID, createdAt, updatedAt)
-		prompt := latestPromptFromEvents(events)
-		record := protocol.TaskRecord{
-			TaskID:        taskID,
-			DeviceID:      d.cfg.Device.ID,
-			WorkspaceID:   workspaceIDForPath(cwd),
-			WorkspacePath: cwd,
-			Agent:         agent,
-			AgentRuntime:  "acpx",
-			SessionName:   sessionName,
-			ModelID:       modelID,
-			Prompt:        prompt,
-			Status:        status,
-			SessionID:     recordID,
-			StartedAt:     createdAt,
-			UpdatedAt:     updatedAt,
-			Events:        events,
-		}
-		if previous, ok := taskByID[taskID]; ok && preferACPXTaskRecord(previous, record) {
-			continue
-		}
-		taskByID[taskID] = record
-	}
-	tasks := make([]protocol.TaskRecord, 0, len(taskByID))
-	for _, record := range taskByID {
-		tasks = append(tasks, record)
-	}
-	sort.Slice(tasks, func(i, j int) bool {
-		return tasks[i].UpdatedAt > tasks[j].UpdatedAt
-	})
-	return tasks, nil
-}
-
-func preferACPXTaskRecord(existing protocol.TaskRecord, candidate protocol.TaskRecord) bool {
-	existingConversation := conversationEventCount(existing.Events)
-	candidateConversation := conversationEventCount(candidate.Events)
-	if existingConversation != candidateConversation {
-		return existingConversation > candidateConversation
-	}
-	if len(existing.Events) != len(candidate.Events) {
-		return len(existing.Events) > len(candidate.Events)
-	}
-	if existing.Prompt != "" && candidate.Prompt == "" {
-		return true
-	}
-	if existing.Prompt == "" && candidate.Prompt != "" {
-		return false
-	}
-	return existing.UpdatedAt >= candidate.UpdatedAt
-}
-
-func sameWorkspacePath(left string, right string) bool {
-	left = strings.TrimSpace(left)
-	right = strings.TrimSpace(right)
-	if left == "" || right == "" {
-		return false
-	}
-	leftAbs, leftErr := filepath.Abs(filepath.Clean(left))
-	rightAbs, rightErr := filepath.Abs(filepath.Clean(right))
-	if leftErr != nil || rightErr != nil {
-		return left == right
-	}
-	if leftReal, err := filepath.EvalSymlinks(leftAbs); err == nil {
-		leftAbs = leftReal
-	}
-	if rightReal, err := filepath.EvalSymlinks(rightAbs); err == nil {
-		rightAbs = rightReal
-	}
-	return leftAbs == rightAbs
-}
-
-func acpxTaskIDForRecord(recordID string, sessionName string) string {
-	return recordID
-}
-
-func acpxEventKey(turnIndex int, eventType string, ordinal int) string {
+func indexedEventKey(turnIndex int, eventType string, ordinal int) string {
 	if turnIndex < 0 {
 		turnIndex = 0
 	}
@@ -3916,570 +2877,14 @@ func acpxEventKey(turnIndex int, eventType string, ordinal int) string {
 	return fmt.Sprintf("turn:%d:%s:%d", turnIndex, eventType, ordinal)
 }
 
-func acpxEventData(data map[string]any, turnIndex int, eventType string, eventKey string) map[string]any {
-	if data == nil {
-		data = map[string]any{}
-	}
-	if eventKey == "" {
-		eventKey = acpxEventKey(turnIndex, eventType, 0)
-	}
-	data["acpx_turn_index"] = turnIndex
-	data["acpx_event_key"] = eventKey
-	return data
-}
-
-func mapFromEventData(data any) map[string]any {
-	switch typed := data.(type) {
-	case nil:
-		return nil
-	case map[string]any:
-		next := make(map[string]any, len(typed))
-		for key, value := range typed {
-			next[key] = value
-		}
-		return next
-	case map[string]string:
-		next := make(map[string]any, len(typed))
-		for key, value := range typed {
-			next[key] = value
-		}
-		return next
-	default:
-		return nil
-	}
-}
-
-func isACPXEventKeyedEvent(eventType string) bool {
-	switch eventType {
-	case "task.started", "user.prompt", "assistant.message", "assistant.thinking", "tool.call", "tool.output",
-		"task.completed", "turn.completed", "task.failed", "turn.failed", "task.killed", "task.stopped":
-		return true
-	default:
-		return false
-	}
-}
-
-func isRunningACPXSessionRecord(record map[string]any) bool {
-	if closed, ok := record["closed"].(bool); ok {
-		return !closed
-	}
-	status := strings.ToLower(strings.TrimSpace(stringField(record, "status", "state")))
-	switch status {
-	case "closed", "completed", "complete", "failed", "cancelled", "canceled", "interrupted", "stopped":
-		return false
-	case "running", "active", "created", "pending", "working":
-		return true
-	}
-	return true
-}
-
-func mergeACPXSessionDiskRecord(record map[string]any, recordID string) map[string]any {
-	disk := readACPXSessionDiskRecord(recordID)
-	if disk == nil {
-		return record
-	}
-	merged := make(map[string]any, len(disk)+len(record))
-	for key, value := range disk {
-		merged[key] = value
-	}
-	for key, value := range record {
-		if isEmptyACPXRecordValue(value) {
-			continue
-		}
-		merged[key] = value
-	}
-	return merged
-}
-
-func readACPXSessionDiskRecord(recordID string) map[string]any {
-	path := acpxSessionFilePath(recordID, ".json")
-	raw, err := os.ReadFile(path)
-	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
-		return nil
-	}
-	var record map[string]any
-	if err := json.Unmarshal(raw, &record); err != nil {
-		return nil
-	}
-	return record
-}
-
-func acpxSessionFilePath(recordID string, suffix string) string {
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".acpx", "sessions", recordID+suffix)
-	}
-	return filepath.Join(".acpx", "sessions", recordID+suffix)
-}
-
-func isEmptyACPXRecordValue(value any) bool {
-	switch typed := value.(type) {
-	case nil:
-		return true
-	case string:
-		return strings.TrimSpace(typed) == ""
-	case []any:
-		return len(typed) == 0
-	case map[string]any:
-		return len(typed) == 0
-	default:
-		return false
-	}
-}
-
-func acpxSessionHistoryEvents(taskID string, record map[string]any, createdAt int64, updatedAt int64) []protocol.TaskEvent {
-	events := make([]protocol.TaskEvent, 0)
-	seq := int64(1)
-	activeTurnStartedAt := int64(0)
-	activeTurnID := ""
-	activeTurnIndex := -1
-	add := func(eventType string, data any, raw any) {
-		timestamp := createdAt
-		if timestamp == 0 {
-			timestamp = updatedAt
-		}
-		if timestamp != 0 {
-			timestamp += seq - 1
-			if updatedAt != 0 && timestamp > updatedAt {
-				timestamp = updatedAt
-			}
-		}
-		event := protocol.TaskEvent{
-			TaskID:    taskID,
-			EventID:   fmt.Sprintf("%s_%d", taskID, seq),
-			EventType: eventType,
-			Source:    "acpx",
-			Sequence:  seq,
-			Timestamp: timestamp,
-			Data:      mustJSON(data),
-			Raw:       mustJSON(raw),
-		}
-		events = append(events, event)
-		seq++
-	}
-	addAt := func(eventType string, timestamp int64, data any, raw any) {
-		if timestamp == 0 {
-			timestamp = updatedAt
-			if timestamp == 0 {
-				timestamp = createdAt
-			}
-		}
-		event := protocol.TaskEvent{
-			TaskID:    taskID,
-			EventID:   fmt.Sprintf("%s_%d", taskID, seq),
-			EventType: eventType,
-			Source:    "acpx",
-			Sequence:  seq,
-			Timestamp: timestamp,
-			Data:      mustJSON(data),
-			Raw:       mustJSON(raw),
-		}
-		events = append(events, event)
-		seq++
-	}
-	eventTimestamp := func(offset int64) int64 {
-		timestamp := createdAt
-		if timestamp == 0 {
-			timestamp = updatedAt
-		}
-		if timestamp == 0 {
-			return 0
-		}
-		timestamp += offset
-		if updatedAt != 0 && timestamp > updatedAt {
-			timestamp = updatedAt
-		}
-		return timestamp
-	}
-	closeActiveTurn := func(endTimestamp int64) {
-		if activeTurnStartedAt == 0 {
-			return
-		}
-		if endTimestamp == 0 {
-			endTimestamp = updatedAt
-		}
-		if endTimestamp == 0 || endTimestamp < activeTurnStartedAt {
-			endTimestamp = activeTurnStartedAt
-		}
-		data := map[string]any{"exit_code": 0, "stop_reason": "history"}
-		if activeTurnID != "" {
-			data["turn_id"] = activeTurnID
-		}
-		if activeTurnIndex >= 0 {
-			data = acpxEventData(data, activeTurnIndex, "task.completed", acpxEventKey(activeTurnIndex, "task.completed", 0))
-		}
-		addAt("task.completed", endTimestamp, data, nil)
-		activeTurnStartedAt = 0
-		activeTurnID = ""
-		activeTurnIndex = -1
-	}
-
-	if acpx, _ := record["acpx"].(map[string]any); acpx != nil {
-		if raw := acpxModelListRaw(record, acpx); raw != nil {
-			add("model.list", raw, raw)
-		}
-		if raw := acpxCommandsRaw(record, acpx); raw != nil {
-			add("commands.updated", raw, raw)
-		}
-	}
-
-	messages, _ := record["messages"].([]any)
-	turnIndex := -1
-	assistantOrdinal := 0
-	thinkingOrdinal := 0
-	for _, item := range messages {
-		message, _ := item.(map[string]any)
-		if message == nil {
-			continue
-		}
-		if user, _ := message["User"].(map[string]any); user != nil {
-			prompt := acpxContentText(user["content"])
-			if strings.TrimSpace(prompt) != "" {
-				turnIndex++
-				assistantOrdinal = 0
-				thinkingOrdinal = 0
-				promptTimestamp := eventTimestamp(seq - 1)
-				closeActiveTurn(promptTimestamp - 1)
-				activeTurnID = fmt.Sprintf("history-turn-%d", turnIndex)
-				activeTurnIndex = turnIndex
-				activeTurnStartedAt = promptTimestamp
-				addAt("task.started", activeTurnStartedAt, acpxEventData(map[string]any{
-					"agent":           stringField(record, "agent"),
-					"source":          "acpx.history",
-					"turn_id":         activeTurnID,
-					"session_id":      stringField(record, "acpxRecordId", "acpx_record_id"),
-					"acpx_turn_index": turnIndex,
-				}, turnIndex, "task.started", acpxEventKey(turnIndex, "task.started", 0)), nil)
-				raw := map[string]any{
-					"type": "user",
-					"message": map[string]any{
-						"role":    "user",
-						"content": []any{map[string]any{"type": "text", "text": prompt}},
-					},
-				}
-				add("user.prompt", acpxEventData(map[string]any{"prompt": prompt, "turn_id": activeTurnID}, turnIndex, "user.prompt", acpxEventKey(turnIndex, "user.prompt", 0)), raw)
-			}
-			continue
-		}
-		agent, _ := message["Agent"].(map[string]any)
-		if agent == nil {
-			continue
-		}
-		content, _ := agent["content"].([]any)
-		for _, partValue := range content {
-			part, _ := partValue.(map[string]any)
-			if part == nil {
-				continue
-			}
-			t, _ := part["type"].(string)
-			if t == "thinking" || part["Thinking"] != nil {
-				thinkingVal := part["Thinking"]
-				if thinkingVal == nil {
-					thinkingVal = part["thinking"]
-				}
-				if thinkingVal == nil {
-					thinkingVal = part
-				}
-				text := acpxThinkingText(thinkingVal)
-				if text == "" {
-					if sig := stringField(part, "signature"); sig != "" {
-						var sigObj map[string]any
-						if json.Unmarshal([]byte(sig), &sigObj) == nil && sigObj != nil {
-							text = stringField(sigObj, "thinking", "text")
-						}
-					}
-				}
-				if strings.TrimSpace(text) != "" {
-					eventKey := acpxEventKey(turnIndex, "assistant.thinking", thinkingOrdinal)
-					thinkingOrdinal++
-					add("assistant.thinking", acpxEventData(map[string]any{"text": text}, turnIndex, "assistant.thinking", eventKey), map[string]any{"type": "thinking", "text": text})
-				}
-				continue
-			}
-			if t == "text" || part["Text"] != nil {
-				textVal := part["Text"]
-				if textVal == nil {
-					textVal = part["text"]
-				}
-				text := acpxTextPart(textVal)
-				if strings.TrimSpace(text) != "" {
-					eventKey := acpxEventKey(turnIndex, "assistant.message", assistantOrdinal)
-					assistantOrdinal++
-					raw := map[string]any{
-						"type": "assistant",
-						"message": map[string]any{
-							"role":    "assistant",
-							"content": []any{map[string]any{"type": "text", "text": text}},
-						},
-					}
-					add("assistant.message", acpxEventData(map[string]any{"text": text}, turnIndex, "assistant.message", eventKey), raw)
-				}
-				continue
-			}
-			if t == "tool_use" || t == "tool_call" || part["ToolUse"] != nil {
-				toolUse := part["ToolUse"]
-				if toolUse == nil {
-					toolUse = part["tool_use"]
-				}
-				if toolUse == nil {
-					toolUse = part["tool_call"]
-				}
-				if toolUse == nil {
-					toolUse = part
-				}
-				toolUseMap, _ := toolUse.(map[string]any)
-				if toolUseMap != nil {
-					id := stringField(toolUseMap, "id", "tool_use_id", "toolCallId")
-					name := stringField(toolUseMap, "name", "title")
-					input := acpxToolInput(toolUseMap)
-					eventKey := "turn:" + strconv.Itoa(turnIndex) + ":tool.call:" + id
-					if id == "" {
-						eventKey = acpxEventKey(turnIndex, "tool.call", 0)
-					}
-					raw := map[string]any{
-						"type": "assistant",
-						"message": map[string]any{
-							"role": "assistant",
-							"content": []any{map[string]any{
-								"type":  "tool_use",
-								"id":    id,
-								"name":  name,
-								"input": input,
-							}},
-						},
-					}
-					add("tool.call", acpxEventData(map[string]any{"tool_use_id": id, "name": name, "input": input}, turnIndex, "tool.call", eventKey), raw)
-				}
-			}
-		}
-		results, _ := agent["tool_results"].(map[string]any)
-		for id, resultValue := range results {
-			result, _ := resultValue.(map[string]any)
-			if result == nil {
-				continue
-			}
-			toolUseID := firstNonEmpty(stringField(result, "tool_use_id", "toolUseId", "id"), id)
-			text := acpxToolResultText(result)
-			isError, _ := result["is_error"].(bool)
-			eventKey := "turn:" + strconv.Itoa(turnIndex) + ":tool.output:" + toolUseID
-			if toolUseID == "" {
-				eventKey = acpxEventKey(turnIndex, "tool.output", 0)
-			}
-			raw := map[string]any{
-				"type": "user",
-				"message": map[string]any{
-					"role": "user",
-					"content": []any{map[string]any{
-						"type":        "tool_result",
-						"tool_use_id": toolUseID,
-						"content":     text,
-						"is_error":    isError,
-					}},
-				},
-				"tool_use_result": map[string]any{
-					"stdout":   text,
-					"stderr":   "",
-					"is_error": isError,
-				},
-			}
-			add("tool.output", acpxEventData(map[string]any{"tool_use_id": toolUseID, "text": text, "is_error": isError}, turnIndex, "tool.output", eventKey), raw)
-		}
-	}
-	closeActiveTurn(updatedAt)
-	return events
-}
-
-func appendMissingACPXPromptEvents(events []protocol.TaskEvent, taskID string, recordID string, createdAt int64, updatedAt int64) []protocol.TaskEvent {
-	if hasACPXUserPromptEvent(events) {
-		return events
-	}
-	prompts := acpxPromptsFromStream(recordID)
-	if len(prompts) == 0 {
-		return events
-	}
-	seq := int64(len(events) + 1)
-	for _, prompt := range prompts {
-		prompt = strings.TrimSpace(prompt)
-		if prompt == "" {
-			continue
-		}
-		timestamp := createdAt
-		if timestamp == 0 {
-			timestamp = updatedAt
-		}
-		if timestamp != 0 {
-			timestamp += seq - 1
-			if updatedAt != 0 && timestamp > updatedAt {
-				timestamp = updatedAt
-			}
-		}
-		raw := map[string]any{
-			"jsonrpc": "2.0",
-			"method":  "session/prompt",
-			"params": map[string]any{
-				"sessionId": recordID,
-				"prompt":    []any{map[string]any{"type": "text", "text": prompt}},
-			},
-		}
-		events = append(events, protocol.TaskEvent{
-			TaskID:    taskID,
-			EventID:   fmt.Sprintf("%s_%d", taskID, seq),
-			EventType: "user.prompt",
-			Source:    "acpx",
-			Sequence:  seq,
-			Timestamp: timestamp,
-			Data:      mustJSON(map[string]any{"prompt": prompt}),
-			Raw:       mustJSON(raw),
-		})
-		seq++
-	}
-	return events
-}
-
-func hasACPXUserPromptEvent(events []protocol.TaskEvent) bool {
-	for _, event := range events {
-		if event.EventType == "user.prompt" {
-			return true
-		}
-	}
-	return false
-}
-
-func acpxPromptsFromStream(recordID string) []string {
-	path := acpxSessionFilePath(recordID, ".stream.ndjson")
-	file, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer file.Close()
-	prompts := make([]string, 0)
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		var msg map[string]any
-		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
-			continue
-		}
-		if stringField(msg, "method") != "session/prompt" {
-			continue
-		}
-		params, _ := msg["params"].(map[string]any)
-		if params == nil {
-			continue
-		}
-		prompt := acpxContentText(params["prompt"])
-		if strings.TrimSpace(prompt) != "" {
-			prompts = append(prompts, prompt)
-		}
-	}
-	return prompts
-}
-
-func acpxModelListRaw(record map[string]any, acpx map[string]any) map[string]any {
-	available, ok := acpx["available_models"].([]any)
-	if !ok || len(available) == 0 {
-		if modelConfig := acpxModelConfigOption(acpx); modelConfig != nil {
-			available, _ = modelConfig["options"].([]any)
-		}
-	}
-	models := make([]any, 0, len(available))
-	for _, value := range available {
-		id, name := acpxModelOptionIDName(value)
-		if id == "" {
-			continue
-		}
-		models = append(models, map[string]any{"modelId": id, "name": firstNonEmpty(name, id)})
-	}
-	if len(models) == 0 {
-		return nil
-	}
-	currentModelID := stringField(acpx, "current_model_id", "currentModelId")
-	if currentModelID == "" {
-		if modelConfig := acpxModelConfigOption(acpx); modelConfig != nil {
-			currentModelID = stringField(modelConfig, "currentValue", "current_value", "value")
-		}
-	}
-	return map[string]any{
-		"jsonrpc": "2.0",
-		"id":      2,
-		"result": map[string]any{
-			"sessionId": stringField(record, "acpSessionId", "acp_session_id", "acpxRecordId", "acpx_record_id"),
-			"models": map[string]any{
-				"currentModelId":  currentModelID,
-				"availableModels": models,
-			},
-		},
-	}
-}
-
-func acpxModelConfigOption(acpx map[string]any) map[string]any {
-	options, _ := acpx["config_options"].([]any)
-	if len(options) == 0 {
-		options, _ = acpx["configOptions"].([]any)
-	}
-	for _, value := range options {
-		option, _ := value.(map[string]any)
-		if option == nil {
-			continue
-		}
-		category := strings.ToLower(strings.TrimSpace(stringField(option, "category")))
-		id := strings.TrimSpace(stringField(option, "id", "configId", "config_id"))
-		if category == "model" || id == "model" {
-			return option
-		}
-	}
-	return nil
-}
-
-func acpxModelOptionIDName(value any) (string, string) {
-	if record, _ := value.(map[string]any); record != nil {
-		id := strings.TrimSpace(firstNonEmpty(
-			stringField(record, "value", "modelId", "model_id", "id"),
-			fmt.Sprint(record["name"]),
-		))
-		name := strings.TrimSpace(firstNonEmpty(stringField(record, "name", "label"), id))
-		return id, name
-	}
-	id := strings.TrimSpace(fmt.Sprint(value))
-	return id, id
-}
-
-func acpxCommandsRaw(record map[string]any, acpx map[string]any) map[string]any {
-	available, ok := acpx["available_commands"].([]any)
-	if !ok || len(available) == 0 {
-		return nil
-	}
-	commands := make([]any, 0, len(available))
-	for _, value := range available {
-		name := strings.TrimSpace(fmt.Sprint(value))
-		if name == "" {
-			continue
-		}
-		commands = append(commands, map[string]any{"name": name})
-	}
-	if len(commands) == 0 {
-		return nil
-	}
-	return map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "session/update",
-		"params": map[string]any{
-			"sessionId": stringField(record, "acpSessionId", "acp_session_id", "acpxRecordId", "acpx_record_id"),
-			"update": map[string]any{
-				"sessionUpdate":     "available_commands_update",
-				"availableCommands": commands,
-			},
-		},
-	}
-}
-
-func acpxContentText(value any) string {
+func acpContentText(value any) string {
 	items, ok := value.([]any)
 	if !ok {
-		return acpxTextPart(value)
+		return acpTextPart(value)
 	}
 	parts := make([]string, 0, len(items))
 	for _, item := range items {
-		text := acpxTextPart(item)
+		text := acpTextPart(item)
 		if strings.TrimSpace(text) != "" {
 			parts = append(parts, text)
 		}
@@ -4487,7 +2892,7 @@ func acpxContentText(value any) string {
 	return strings.Join(parts, "\n")
 }
 
-func acpxTextPart(value any) string {
+func acpTextPart(value any) string {
 	switch typed := value.(type) {
 	case nil:
 		return ""
@@ -4497,7 +2902,7 @@ func acpxTextPart(value any) string {
 			var parsed map[string]any
 			if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil && parsed != nil {
 				if content, ok := parsed["content"]; ok {
-					return acpxContentText(content)
+					return acpContentText(content)
 				}
 				if text := stringField(parsed, "Text", "text", "content"); text != "" {
 					return text
@@ -4507,238 +2912,19 @@ func acpxTextPart(value any) string {
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
 			var parsed []any
 			if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
-				return acpxContentText(parsed)
+				return acpContentText(parsed)
 			}
 		}
 		return typed
 	case map[string]any:
 		if text := stringField(typed, "Text", "text", "content"); text != "" {
-			return acpxTextPart(text)
+			return acpTextPart(text)
 		}
 		if nested, ok := typed["Text"]; ok {
-			return acpxTextPart(nested)
+			return acpTextPart(nested)
 		}
 	}
 	return stringifyValue(value)
-}
-
-func acpxThinkingText(value any) string {
-	if thinking, _ := value.(map[string]any); thinking != nil {
-		return stringField(thinking, "text", "Text", "content")
-	}
-	return acpxTextPart(value)
-}
-
-func acpxToolInput(toolUse map[string]any) map[string]any {
-	if input, _ := toolUse["input"].(map[string]any); input != nil {
-		return input
-	}
-	rawInput := strings.TrimSpace(stringField(toolUse, "raw_input", "rawInput"))
-	if rawInput == "" {
-		return map[string]any{}
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(rawInput), &parsed); err == nil && parsed != nil {
-		return parsed
-	}
-	return map[string]any{"input": rawInput}
-}
-
-func acpxToolResultText(result map[string]any) string {
-	if content, ok := result["content"]; ok {
-		text := acpxContentText(content)
-		if _, isMap := content.(map[string]any); isMap {
-			return text
-		}
-		if _, isSlice := content.([]any); isSlice {
-			return text
-		}
-	}
-	if output, ok := result["output"]; ok {
-		if outputMap, _ := output.(map[string]any); outputMap != nil {
-			if content, ok := outputMap["content"]; ok {
-				return acpxContentText(content)
-			}
-			if text, _ := outputMap["text"].(string); text != "" {
-				return text
-			}
-		}
-		return stringifyValue(output)
-	}
-	return stringifyValue(result)
-}
-
-func latestPromptFromEvents(events []protocol.TaskEvent) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].EventType != "user.prompt" || len(events[i].Data) == 0 {
-			continue
-		}
-		var data map[string]any
-		if err := json.Unmarshal(events[i].Data, &data); err == nil {
-			if prompt := stringField(data, "prompt"); prompt != "" {
-				return prompt
-			}
-		}
-	}
-	return ""
-}
-
-func mergeTaskEvents(base []protocol.TaskEvent, extra []protocol.TaskEvent) []protocol.TaskEvent {
-	if len(base) == 0 {
-		return orderTaskEvents(compactStreamTaskEvents(append([]protocol.TaskEvent(nil), extra...)))
-	}
-	base = compactStreamTaskEvents(append([]protocol.TaskEvent(nil), base...))
-	extra = compactStreamTaskEvents(append([]protocol.TaskEvent(nil), extra...))
-	extra = rebaseACPXEventsAfterBase(base, extra)
-	merged := append([]protocol.TaskEvent(nil), base...)
-	seen := make(map[string]struct{}, len(merged))
-	for _, event := range merged {
-		for _, signature := range taskEventSignatures(event) {
-			seen[signature] = struct{}{}
-		}
-	}
-	for _, event := range extra {
-		signatures := taskEventSignatures(event)
-		if hasSeenTaskEventSignature(seen, signatures) {
-			if updated, ok := replaceExistingTaskEventByStableKey(merged, event); ok {
-				merged = updated
-			}
-			continue
-		}
-		merged = append(merged, event)
-		for _, signature := range signatures {
-			seen[signature] = struct{}{}
-		}
-	}
-	return orderTaskEvents(compactStreamTaskEvents(merged))
-}
-
-func replaceExistingTaskEventByStableKey(events []protocol.TaskEvent, event protocol.TaskEvent) ([]protocol.TaskEvent, bool) {
-	if key := taskEventACPXEventKey(event); key != "" && shouldReplaceACPXKeyedEvent(event) {
-		for index, existing := range events {
-			if taskEventACPXEventKey(existing) != key {
-				continue
-			}
-			event.EventID = existing.EventID
-			event.Sequence = existing.Sequence
-			event.Timestamp = existing.Timestamp
-			next := append([]protocol.TaskEvent(nil), events...)
-			next[index] = event
-			return next, true
-		}
-	}
-	return events, false
-}
-
-func rebaseACPXEventsAfterBase(base []protocol.TaskEvent, extra []protocol.TaskEvent) []protocol.TaskEvent {
-	if len(base) == 0 || len(extra) == 0 {
-		return extra
-	}
-	if !hasACPXEventKeyedEvents(base) || !hasACPXTurnZero(extra) {
-		return extra
-	}
-	if hasSharedACPXEventKey(base, extra) && !hasConflictingSharedACPXEventKey(base, extra) {
-		return extra
-	}
-	offset := maxACPXTurnIndex(base) + 1
-	if offset <= 0 {
-		return extra
-	}
-	rebased := make([]protocol.TaskEvent, len(extra))
-	for i, event := range extra {
-		rebased[i] = rebaseACPXEvent(event, offset)
-	}
-	return rebased
-}
-
-func hasACPXEventKeyedEvents(events []protocol.TaskEvent) bool {
-	for _, event := range events {
-		if taskEventACPXEventKey(event) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func hasACPXTurnZero(events []protocol.TaskEvent) bool {
-	for _, event := range events {
-		if turnIndex, ok := taskEventACPXTurnIndex(event); ok && turnIndex == 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func hasSharedACPXEventKey(left []protocol.TaskEvent, right []protocol.TaskEvent) bool {
-	keys := make(map[string]struct{})
-	for _, event := range left {
-		if key := taskEventACPXEventKey(event); key != "" {
-			keys[key] = struct{}{}
-		}
-	}
-	for _, event := range right {
-		if key := taskEventACPXEventKey(event); key != "" {
-			if _, ok := keys[key]; ok {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func hasConflictingSharedACPXEventKey(left []protocol.TaskEvent, right []protocol.TaskEvent) bool {
-	byKey := make(map[string]protocol.TaskEvent)
-	for _, event := range left {
-		if key := taskEventACPXEventKey(event); key != "" {
-			byKey[key] = event
-		}
-	}
-	for _, event := range right {
-		key := taskEventACPXEventKey(event)
-		if key == "" {
-			continue
-		}
-		existing, ok := byKey[key]
-		if !ok {
-			continue
-		}
-		if !sameACPXKeyedEvent(existing, event) {
-			return true
-		}
-	}
-	return false
-}
-
-func sameACPXKeyedEvent(left protocol.TaskEvent, right protocol.TaskEvent) bool {
-	if left.EventType != right.EventType {
-		return false
-	}
-	leftText := taskEventComparableText(left)
-	rightText := taskEventComparableText(right)
-	if leftText != "" && rightText != "" {
-		return leftText == rightText
-	}
-	return true
-}
-
-func taskEventComparableText(event protocol.TaskEvent) string {
-	switch event.EventType {
-	case "user.prompt":
-		if text := textFieldFromEventJSON(event.Data, "prompt"); text != "" {
-			return text
-		}
-		return textFieldFromEventJSON(event.Raw, "prompt")
-	case "assistant.message", "assistant.thinking":
-		if text := textFieldFromEventJSON(event.Data, "text", "content"); text != "" {
-			return text
-		}
-		if text := assistantTextFromRawMessage(event.Raw); text != "" {
-			return text
-		}
-		return textFieldFromEventJSON(event.Raw, "text", "content")
-	default:
-		return ""
-	}
 }
 
 func textFieldFromEventJSON(raw json.RawMessage, keys ...string) string {
@@ -4750,105 +2936,6 @@ func textFieldFromEventJSON(raw json.RawMessage, keys ...string) string {
 		return ""
 	}
 	return strings.Join(strings.Fields(stringField(data, keys...)), " ")
-}
-
-func maxACPXTurnIndex(events []protocol.TaskEvent) int {
-	maxTurn := -1
-	for _, event := range events {
-		if turnIndex, ok := taskEventACPXTurnIndex(event); ok && turnIndex > maxTurn {
-			maxTurn = turnIndex
-		}
-	}
-	return maxTurn
-}
-
-func rebaseACPXEvent(event protocol.TaskEvent, offset int) protocol.TaskEvent {
-	for _, target := range []*json.RawMessage{&event.Data, &event.Raw} {
-		if target == nil || len(*target) == 0 {
-			continue
-		}
-		var data map[string]any
-		if err := json.Unmarshal(*target, &data); err != nil {
-			continue
-		}
-		turnIndex, ok := intFieldOK(data, "acpx_turn_index", "acpxTurnIndex")
-		if !ok {
-			continue
-		}
-		newTurnIndex := turnIndex + offset
-		data["acpx_turn_index"] = newTurnIndex
-		if eventKey := stringField(data, "acpx_event_key", "acpxEventKey"); eventKey != "" {
-			data["acpx_event_key"] = rebaseACPXEventKey(eventKey, newTurnIndex)
-			delete(data, "acpxEventKey")
-		}
-		if raw, err := json.Marshal(data); err == nil {
-			*target = raw
-		}
-	}
-	return event
-}
-
-func rebaseACPXEventKey(eventKey string, turnIndex int) string {
-	parts := strings.Split(eventKey, ":")
-	if len(parts) >= 4 && parts[0] == "turn" {
-		parts[1] = strconv.Itoa(turnIndex)
-		return strings.Join(parts, ":")
-	}
-	return eventKey
-}
-
-func taskEventTypeRank(eventType string) int {
-	switch eventType {
-	case "task.started":
-		return 0
-	case "user.prompt", "permission.request":
-		return 1
-	case "assistant.thinking":
-		return 2
-	case "assistant.message":
-		return 3
-	case "tool.call":
-		return 4
-	case "tool.output":
-		return 5
-	case "task.completed", "task.failed", "task.killed", "task.error":
-		return 6
-	default:
-		return 7
-	}
-}
-
-func orderTaskEvents(events []protocol.TaskEvent) []protocol.TaskEvent {
-	ordered := append([]protocol.TaskEvent(nil), events...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		turnI, okI := taskEventACPXTurnIndex(ordered[i])
-		turnJ, okJ := taskEventACPXTurnIndex(ordered[j])
-		if okI && okJ {
-			if turnI != turnJ {
-				return turnI < turnJ
-			}
-			rankI := taskEventTypeRank(ordered[i].EventType)
-			rankJ := taskEventTypeRank(ordered[j].EventType)
-			if rankI != rankJ {
-				return rankI < rankJ
-			}
-		}
-
-		if ordered[i].Timestamp != ordered[j].Timestamp {
-			if ordered[i].Timestamp == 0 {
-				return false
-			}
-			if ordered[j].Timestamp == 0 {
-				return true
-			}
-			return ordered[i].Timestamp < ordered[j].Timestamp
-		}
-		if ordered[i].Sequence != ordered[j].Sequence {
-			return ordered[i].Sequence < ordered[j].Sequence
-		}
-		return ordered[i].EventID < ordered[j].EventID
-	})
-	return ordered
 }
 
 func compactStreamTaskEvents(events []protocol.TaskEvent) []protocol.TaskEvent {
@@ -4906,123 +2993,6 @@ func streamTaskEventKey(event protocol.TaskEvent) (string, map[string]any, bool)
 	return event.EventType + ":" + streamID, data, true
 }
 
-func taskEventSignature(event protocol.TaskEvent) string {
-	signatures := taskEventSignatures(event)
-	if len(signatures) > 0 {
-		return signatures[0]
-	}
-	return fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID)
-}
-
-func taskEventSignatures(event protocol.TaskEvent) []string {
-	signatures := make([]string, 0, 3)
-	if eventKey := taskEventACPXEventKey(event); eventKey != "" {
-		signatures = append(signatures, "acpx:"+eventKey)
-		return signatures
-	}
-	if semantic := semanticTaskEventSignature(event); semantic != "" {
-		signatures = append(signatures, semantic)
-	}
-	if turnID := taskEventTurnID(event); turnID != "" && isTurnScopedTaskEvent(event.EventType) {
-		signatures = append(signatures, event.EventType+":turn:"+turnID)
-	}
-	if event.EventType == "user.prompt" {
-		if event.EventID != "" {
-			signatures = append(signatures, event.EventType+":id:"+event.EventID)
-		}
-		return signatures
-	}
-	if len(event.Data) > 0 {
-		signatures = append(signatures, event.EventType+":"+string(event.Data))
-		return signatures
-	}
-	if len(event.Raw) > 0 {
-		signatures = append(signatures, event.EventType+":"+string(event.Raw))
-		return signatures
-	}
-	signatures = append(signatures, fmt.Sprintf("%s:%d:%s", event.EventType, event.Sequence, event.EventID))
-	return signatures
-}
-
-func taskEventACPXEventKey(event protocol.TaskEvent) string {
-	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
-		if len(raw) == 0 {
-			continue
-		}
-		var data map[string]any
-		if err := json.Unmarshal(raw, &data); err != nil {
-			continue
-		}
-		if key := stringField(data, "acpx_event_key", "acpxEventKey"); key != "" {
-			return key
-		}
-	}
-	return ""
-}
-
-func nextACPXTurnIndex(events []protocol.TaskEvent) int {
-	maxTurn := -1
-	promptCount := 0
-	for _, event := range events {
-		if turnIndex, ok := taskEventACPXTurnIndex(event); ok && turnIndex > maxTurn {
-			maxTurn = turnIndex
-		}
-		if event.EventType == "user.prompt" {
-			promptCount++
-		}
-	}
-	if maxTurn >= 0 {
-		return maxTurn + 1
-	}
-	return promptCount
-}
-
-func taskEventACPXTurnIndex(event protocol.TaskEvent) (int, bool) {
-	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
-		if len(raw) == 0 {
-			continue
-		}
-		var data map[string]any
-		if err := json.Unmarshal(raw, &data); err != nil {
-			continue
-		}
-		if turnIndex, ok := intFieldOK(data, "acpx_turn_index", "acpxTurnIndex"); ok {
-			return turnIndex, true
-		}
-	}
-	return 0, false
-}
-
-func hasSeenTaskEventSignature(seen map[string]struct{}, signatures []string) bool {
-	for _, signature := range signatures {
-		if _, ok := seen[signature]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func semanticTaskEventSignature(event protocol.TaskEvent) string {
-	switch event.EventType {
-	case "user.prompt":
-		return ""
-	case "task.completed", "turn.completed", "task.failed", "turn.failed", "task.killed", "task.stopped":
-		if turnID := taskEventTurnID(event); turnID != "" {
-			return event.EventType + ":turn:" + turnID
-		}
-	}
-	return ""
-}
-
-func isTurnScopedTaskEvent(eventType string) bool {
-	switch eventType {
-	case "task.started", "user.prompt", "task.completed", "turn.completed", "task.failed", "turn.failed", "task.killed", "task.stopped":
-		return true
-	default:
-		return false
-	}
-}
-
 func taskEventTurnID(event protocol.TaskEvent) string {
 	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
 		if len(raw) == 0 {
@@ -5039,25 +3009,20 @@ func taskEventTurnID(event protocol.TaskEvent) string {
 	return ""
 }
 
-func (d *Daemon) defaultACPXWorkspace() string {
-	if len(d.cfg.Workspaces) > 0 && d.cfg.Workspaces[0].Path != "" {
-		return d.cfg.Workspaces[0].Path
+func latestPromptTurnID(events []protocol.TaskEvent) string {
+	var selected protocol.TaskEvent
+	found := false
+	for _, event := range events {
+		if event.EventType != "user.prompt" || taskEventTurnID(event) == "" {
+			continue
+		}
+		if !found || event.Sequence > selected.Sequence ||
+			(event.Sequence == selected.Sequence && event.Timestamp >= selected.Timestamp) {
+			selected = event
+			found = true
+		}
 	}
-	home, err := os.UserHomeDir()
-	if err == nil && home != "" {
-		return home
-	}
-	return "."
-}
-
-func parseACPXTime(value string) int64 {
-	if value == "" {
-		return 0
-	}
-	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
-		return parsed.Unix()
-	}
-	return 0
+	return taskEventTurnID(selected)
 }
 
 func (d *Daemon) emitError(taskID, code, message string) {
@@ -5126,48 +3091,7 @@ func (d *Daemon) emitTaskEventWithNextSequence(taskID, eventType string, data an
 }
 
 func upsertTaskEvent(events []protocol.TaskEvent, event protocol.TaskEvent) []protocol.TaskEvent {
-	if key := taskEventACPXEventKey(event); key != "" && shouldReplaceACPXKeyedEvent(event) {
-		for index, existing := range events {
-			if taskEventACPXEventKey(existing) != key {
-				continue
-			}
-			event.EventID = existing.EventID
-			event.Sequence = existing.Sequence
-			event.Timestamp = existing.Timestamp
-			next := append([]protocol.TaskEvent(nil), events...)
-			next[index] = event
-			return next
-		}
-	}
 	return append(events, event)
-}
-
-func shouldReplaceACPXKeyedEvent(event protocol.TaskEvent) bool {
-	switch event.EventType {
-	case "assistant.message", "assistant.thinking":
-		data := taskEventDataMap(event)
-		if streamID := stringField(data, "stream_id", "streamId"); streamID == "" {
-			return false
-		}
-		return true
-	case "tool.call", "tool.output":
-		return true
-	default:
-		return false
-	}
-}
-
-func taskEventDataMap(event protocol.TaskEvent) map[string]any {
-	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
-		if len(raw) == 0 {
-			continue
-		}
-		var data map[string]any
-		if err := json.Unmarshal(raw, &data); err == nil {
-			return data
-		}
-	}
-	return nil
 }
 
 func (d *Daemon) emitTaskEvent(taskID, eventType string, sequence int64, data any, raw json.RawMessage) {
@@ -5192,7 +3116,7 @@ func (d *Daemon) emitTaskEvent(taskID, eventType string, sequence int64, data an
 
 func (d *Daemon) sendTaskEvent(event protocol.TaskEvent) {
 	d.send <- protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", event)
-	d.broadcastDirectACPXEvent(event)
+	d.broadcastDirectAgentChatEvent(event)
 }
 
 func injectUniqueFields(data any, seq int64) any {
@@ -5220,7 +3144,8 @@ func injectUniqueFields(data any, seq int64) any {
 	return data
 }
 
-func userPromptTaskEvent(taskID, turnID, prompt string, timestamp int64, sequence int64, acpxTurnIndex int) protocol.TaskEvent {
+func userPromptTaskEvent(taskID, turnID, prompt string, timestamp int64, sequence int64, turnIndex int) protocol.TaskEvent {
+	_ = turnIndex
 	prompt = strings.TrimSpace(prompt)
 	if taskID == "" || prompt == "" {
 		return protocol.TaskEvent{}
@@ -5228,9 +3153,6 @@ func userPromptTaskEvent(taskID, turnID, prompt string, timestamp int64, sequenc
 	data := map[string]any{"prompt": prompt}
 	if turnID != "" {
 		data["turn_id"] = turnID
-	}
-	if acpxTurnIndex >= 0 {
-		data = acpxEventData(data, acpxTurnIndex, "user.prompt", acpxEventKey(acpxTurnIndex, "user.prompt", 0))
 	}
 	dataRaw, _ := json.Marshal(data)
 	if timestamp == 0 {
@@ -5252,7 +3174,8 @@ func normalizedTaskHistoryEvents(record protocol.TaskRecord) []protocol.TaskEven
 	if strings.TrimSpace(record.Prompt) == "" || hasUserPromptEvent(events) {
 		return events
 	}
-	promptEvent := userPromptTaskEvent(record.TaskID, "", record.Prompt, firstNonZero(record.StartedAt, record.UpdatedAt, protocolNow()), 0, -1)
+	turnID, turnIndex := historyPromptTurnMetadata(record.Events, record.AgentRuntime)
+	promptEvent := userPromptTaskEvent(record.TaskID, turnID, record.Prompt, firstNonZero(record.StartedAt, record.UpdatedAt, protocolNow()), 0, turnIndex)
 	if promptEvent.TaskID == "" {
 		return events
 	}
@@ -5262,6 +3185,28 @@ func normalizedTaskHistoryEvents(record protocol.TaskRecord) []protocol.TaskEven
 	copy(events[insertAt+1:], events[insertAt:])
 	events[insertAt] = promptEvent
 	return events
+}
+
+func historyPromptTurnMetadata(events []protocol.TaskEvent, agentRuntime string) (string, int) {
+	turnID := ""
+	turnIndex := -1
+	for index := len(events) - 1; index >= 0; index-- {
+		event := events[index]
+		if event.EventType != "task.started" {
+			continue
+		}
+		turnID = taskEventTurnID(event)
+		break
+	}
+	_ = agentRuntime
+	if turnID == "" {
+		identityIndex := turnIndex
+		if identityIndex < 0 {
+			identityIndex = 0
+		}
+		turnID = fmt.Sprintf("history-turn-%d", identityIndex)
+	}
+	return turnID, turnIndex
 }
 
 func hasUserPromptEvent(events []protocol.TaskEvent) bool {
@@ -5356,7 +3301,7 @@ func isAgentCompletionEvent(eventType string) bool {
 
 func isAgentChatRecord(record protocol.TaskRecord) bool {
 	runtime := strings.ToLower(strings.TrimSpace(record.AgentRuntime))
-	return runtime == "acpx" || runtime == "direct_acp"
+	return runtime == "direct_acp"
 }
 
 func agentCompletionMessage(eventType string) string {
@@ -5611,17 +3556,11 @@ func (d *Daemon) agentCompletionAlert(projectID string, hostProjectID string, pa
 
 func agentNotificationTitle(agent string, runtime string) string {
 	agent = strings.TrimSpace(agent)
-	runtime = strings.TrimSpace(runtime)
-	if runtime == "direct_acp" {
+	_ = runtime
+	if agent != "" {
 		return "Direct ACP对话 (" + agent + ")"
 	}
-	if runtime == "acpx" {
-		return "ACPX会话 (" + agent + ")"
-	}
-	if agent != "" {
-		return "Agent对话 (" + agent + ")"
-	}
-	return "Agent对话"
+	return "Direct ACP对话"
 }
 
 func extractSessionID(event protocol.TaskEvent) string {
@@ -5650,6 +3589,25 @@ func extractSessionID(event protocol.TaskEvent) string {
 	return ""
 }
 
+type taskLifecycleState struct {
+	status     string
+	turn       int
+	hasTurn    bool
+	order      int64
+	hasOrder   bool
+	timestamp  int64
+	sequence   int64
+	eventIndex int
+}
+
+type taskTurn struct {
+	index      int
+	hasIndex   bool
+	id         string
+	startIndex int
+	hasPrompt  bool
+}
+
 func statusFromEvent(eventType, fallback string) string {
 	switch eventType {
 	case "task.started":
@@ -5668,14 +3626,6 @@ func statusFromEvent(eventType, fallback string) string {
 		}
 		return fallback
 	}
-}
-
-func appendBounded[T any](items []T, item T, max int) []T {
-	items = append(items, item)
-	if len(items) <= max {
-		return items
-	}
-	return append([]T(nil), items[len(items)-max:]...)
 }
 
 func hasFeature(features []string, target string) bool {
@@ -5706,11 +3656,6 @@ func enableTCPNoDelay(conn *websocket.Conn) {
 	}
 }
 
-func mustJSON(value any) json.RawMessage {
-	raw, _ := json.Marshal(value)
-	return raw
-}
-
 func randomHookToken() string {
 	var buf [24]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -5731,9 +3676,24 @@ type runningPTY struct {
 }
 
 const (
-	tmuxSocketName   = "pocket-studio"
-	tmuxHistoryLimit = 50000
+	defaultTmuxSocketName = "pocket-studio"
+	tmuxHistoryLimit      = 50000
 )
+
+func tmuxSocketName() string {
+	value := strings.TrimSpace(os.Getenv("POCKET_STUDIO_TMUX_SOCKET"))
+	if value == "" || len(value) > 80 {
+		return defaultTmuxSocketName
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '-' || char == '_' || char == '.' {
+			continue
+		}
+		return defaultTmuxSocketName
+	}
+	return value
+}
 
 func (d *Daemon) startTerminalStream(parent context.Context, req protocol.TerminalStreamStart) {
 	workspace, err := d.resolveWorkspacePath("", req.WorkspacePath)
@@ -5766,7 +3726,7 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 		cmd = nil
 	}
 	if cmd != nil {
-		cmd.Env = terminalEnv(agentHooks.env...)
+		cmd.Env = tmuxProcessEnv(agentHooks.env...)
 	}
 
 	var ptyFile *os.File
@@ -6094,7 +4054,7 @@ func tmuxTitleLooksInitialPlaceholder(title string, command string) bool {
 		return false
 	}
 	switch title {
-	case "Shell", "Claude Code", "Codex", "OpenCode", "Kilo Code", "Pi", "Antigravity", "Qwen Code", "Kimi", "GitHub Copilot", "Cursor Agent", "OpenClaw", "ACPX":
+	case "Shell", "Claude Code", "Codex", "OpenCode", "Kilo Code", "Pi", "Antigravity", "Qwen Code", "Kimi", "GitHub Copilot", "Cursor Agent", "OpenClaw":
 		return title != commandTitle
 	default:
 		return false
@@ -6107,8 +4067,6 @@ func knownTerminalTitleForCommand(command string) (string, bool) {
 		return "Shell", command != ""
 	}
 	switch {
-	case command == "online" || command == "acpx" || strings.HasPrefix(command, "acpx "):
-		return "ACPX", true
 	case strings.Contains(command, "claude"):
 		return "Claude Code", true
 	case strings.Contains(command, "codex"):
@@ -6209,7 +4167,7 @@ func tmuxNewSessionCommand(sessionName string, initialTitle string, workspacePat
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"-u", "-L", tmuxSocketName, "-f", configPath, "start-server", ";", "source-file", configPath, ";", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspacePath}
+	args := []string{"-u", "-L", tmuxSocketName(), "-f", configPath, "start-server", ";", "source-file", configPath, ";", "new-session", "-A", "-s", sessionName, "-n", initialTitle, "-c", workspacePath}
 	for _, item := range env {
 		key, _, ok := strings.Cut(item, "=")
 		if !ok || strings.TrimSpace(key) == "" {
@@ -6232,7 +4190,7 @@ func tmuxNewSessionCommand(sessionName string, initialTitle string, workspacePat
 }
 
 func tmuxCommand(args ...string) *exec.Cmd {
-	fullArgs := append([]string{"-L", tmuxSocketName}, args...)
+	fullArgs := append([]string{"-L", tmuxSocketName()}, args...)
 	return exec.Command("tmux", fullArgs...)
 }
 
@@ -6343,6 +4301,18 @@ func terminalEnv(extra ...string) []string {
 	return append(env, extra...)
 }
 
+func tmuxProcessEnv(extra ...string) []string {
+	env := terminalEnv(extra...)
+	filtered := env[:0]
+	for _, item := range env {
+		if strings.HasPrefix(item, "POCKET_E2E_PROCESS_OWNER=") {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
 func userShell() string {
 	if runtime.GOOS != "windows" {
 		if zsh, err := exec.LookPath("zsh"); err == nil && zsh != "" {
@@ -6392,8 +4362,6 @@ func initialTerminalTitle(command string, fallback string) string {
 		return "Shell"
 	}
 	switch {
-	case command == "online" || command == "acpx" || strings.HasPrefix(command, "acpx "):
-		return "ACPX"
 	case strings.Contains(command, "claude"):
 		return "Claude Code"
 	case strings.Contains(command, "codex"):
@@ -6422,11 +4390,7 @@ func initialTerminalTitle(command string, fallback string) string {
 }
 
 func (d *Daemon) normalizeTerminalCommand(command string) string {
-	command = strings.TrimSpace(command)
-	if command == "online" {
-		return shellCommand([]string{d.cfg.ACPX.Command, acpxAgentName(protocol.TaskDispatch{}, d.cfg.ACPX.Agent)})
-	}
-	return command
+	return strings.TrimSpace(command)
 }
 
 type terminalAgentHooks struct {
@@ -7155,15 +5119,13 @@ func agentTerminalCommand(command string) string {
 		base = filepath.Base(fields[0])
 	}
 	switch base {
-	case "claude", "codex", "opencode", "kilo", "kilocode", "pi", "agy", "antigravity", "acpx", "qwen", "kimi", "copilot", "cursor-agent", "cursor", "openclaw":
+	case "claude", "codex", "opencode", "kilo", "kilocode", "pi", "agy", "antigravity", "qwen", "kimi", "copilot", "cursor-agent", "cursor", "openclaw":
 		if base == "cursor-agent" {
 			return "cursor"
 		}
 		return base
 	}
 	switch {
-	case command == "online" || strings.HasPrefix(command, "acpx "):
-		return "acpx"
 	case strings.Contains(command, "opencode"):
 		return "opencode"
 	case strings.Contains(command, "kilocode"):
@@ -7245,62 +5207,4 @@ func (d *Daemon) exitTerminalStream(req protocol.TerminalStreamExit) {
 			_ = killTmuxSession(rPty.sessionName)
 		}
 	}
-}
-
-func killProcessesRecursively(parentPID int) {
-	parentToChildren := make(map[int][]int)
-	files, err := os.ReadDir("/proc")
-	if err != nil {
-		return
-	}
-	for _, f := range files {
-		if !f.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(f.Name())
-		if err != nil {
-			continue
-		}
-		ppid := getParentPID(pid)
-		if ppid > 0 {
-			parentToChildren[ppid] = append(parentToChildren[ppid], pid)
-		}
-	}
-
-	var descendants []int
-	var collect func(pid int)
-	collect = func(pid int) {
-		for _, child := range parentToChildren[pid] {
-			descendants = append(descendants, child)
-			collect(child)
-		}
-	}
-	collect(parentPID)
-
-	// Kill descendants first (depth-first: leaf to root)
-	for i := len(descendants) - 1; i >= 0; i-- {
-		pid := descendants[i]
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	}
-
-	// Kill parent process group and process itself
-	_ = syscall.Kill(-parentPID, syscall.SIGKILL)
-	_ = syscall.Kill(parentPID, syscall.SIGKILL)
-}
-
-func getParentPID(pid int) int {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0
-	}
-	parts := strings.SplitAfter(string(data), ")")
-	if len(parts) < 2 {
-		return 0
-	}
-	fields := strings.Fields(parts[1])
-	if len(fields) < 2 {
-		return 0
-	}
-	ppid, _ := strconv.Atoi(fields[1])
-	return ppid
 }

@@ -71,7 +71,7 @@ interface FileExplorerTabProps {
   devices?: Device[];
   onCreateTab?: (kind: TerminalKind, tabProjectId?: string, filePath?: string) => void;
   onCreateFileExplorer?: (tabProjectId?: string, filePath?: string) => void;
-  onCreateAgentChat?: (agentKind: string, agentRuntime?: "acpx" | "direct_acp" | "gosdk", tabProjectId?: string, filePath?: string) => void;
+  onCreateAgentChat?: (agentKind: string, agentRuntime?: "direct_acp", tabProjectId?: string, filePath?: string) => void;
 }
 
 function FileExplorerTabView({

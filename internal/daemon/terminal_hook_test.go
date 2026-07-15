@@ -44,22 +44,22 @@ func TestAgentCompletionAlertMapsTaskToSavedAgentTab(t *testing.T) {
 				{
 					"id": "chat-1",
 					"kind": "agent_chat",
-					"agentSessionId": "acpx-task-1",
-					"agentRuntime": "acpx",
+					"agentSessionId": "direct-task-1",
+					"agentRuntime": "direct_acp",
 					"agentKind": "opencode"
 				}
 			]
 		}
 	}`)
 
-	d.history["acpx-task-1"] = protocol.TaskRecord{
-		TaskID:        "acpx-task-1",
+	d.history["direct-task-1"] = protocol.TaskRecord{
+		TaskID:        "direct-task-1",
 		WorkspacePath: workspace,
 		Agent:         "opencode",
-		AgentRuntime:  "acpx",
-		SessionName:   "acpx-task-1",
+		AgentRuntime:  "direct_acp",
+		SessionName:   "direct-task-1",
 	}
-	d.emitTaskEvent("acpx-task-1", "task.completed", 0, map[string]any{"exit_code": 0}, nil)
+	d.emitTaskEvent("direct-task-1", "task.completed", 0, map[string]any{"exit_code": 0}, nil)
 
 	events := drainEnvelopes(d.send)
 	var alert protocol.TerminalStreamAlert
@@ -77,8 +77,8 @@ func TestAgentCompletionAlertMapsTaskToSavedAgentTab(t *testing.T) {
 	if alert.HostProjectID != projectID || alert.PanelID != "panel-1" {
 		t.Fatalf("alert host = %q panel = %q, want project %q panel-1", alert.HostProjectID, alert.PanelID, projectID)
 	}
-	if alert.Title != "ACPX会话 (opencode)" {
-		t.Fatalf("alert title = %q, want ACPX title", alert.Title)
+	if alert.Title != "Direct ACP对话 (opencode)" {
+		t.Fatalf("alert title = %q, want Direct ACP title", alert.Title)
 	}
 }
 
@@ -96,8 +96,8 @@ func TestAgentCompletionAlertMapsCrossProjectTaskToHostLayout(t *testing.T) {
 				{
 					"id": "chat-host",
 					"kind": "agent_chat",
-					"agentSessionId": "acpx-task-cross",
-					"agentRuntime": "acpx",
+					"agentSessionId": "direct-task-cross",
+					"agentRuntime": "direct_acp",
 					"agentKind": "opencode",
 					"projectId": "` + taskProjectID + `"
 				}
@@ -105,14 +105,14 @@ func TestAgentCompletionAlertMapsCrossProjectTaskToHostLayout(t *testing.T) {
 		}
 	}`)
 
-	d.history["acpx-task-cross"] = protocol.TaskRecord{
-		TaskID:        "acpx-task-cross",
+	d.history["direct-task-cross"] = protocol.TaskRecord{
+		TaskID:        "direct-task-cross",
 		WorkspacePath: workspace,
 		Agent:         "opencode",
-		AgentRuntime:  "acpx",
-		SessionName:   "acpx-task-cross",
+		AgentRuntime:  "direct_acp",
+		SessionName:   "direct-task-cross",
 	}
-	d.emitTaskEvent("acpx-task-cross", "task.completed", 0, map[string]any{"exit_code": 0}, nil)
+	d.emitTaskEvent("direct-task-cross", "task.completed", 0, map[string]any{"exit_code": 0}, nil)
 
 	events := drainEnvelopes(d.send)
 	var alert protocol.TerminalStreamAlert
@@ -459,36 +459,6 @@ func TestPrepareTerminalAgentHooksSkipsUnknownAgents(t *testing.T) {
 	}
 }
 
-func TestOnlineTerminalCommandMapsToACPX(t *testing.T) {
-	d := New(Config{
-		ACPX: ACPXConfig{
-			Command: "acpx",
-			Agent:   "claude",
-		},
-	})
-	if got := d.normalizeTerminalCommand("online"); got != "acpx claude" {
-		t.Fatalf("normalizeTerminalCommand() = %q, want acpx claude", got)
-	}
-	if got := d.normalizeTerminalCommand("acpx"); got != "acpx" {
-		t.Fatalf("normalizeTerminalCommand(acpx) = %q, want explicit command preserved", got)
-	}
-	if got := d.normalizeTerminalCommand("acpx codex"); got != "acpx codex" {
-		t.Fatalf("normalizeTerminalCommand(acpx codex) = %q, want explicit command preserved", got)
-	}
-	if got := initialTerminalTitle("acpx claude", ""); got != "ACPX" {
-		t.Fatalf("initialTerminalTitle(acpx claude) = %q, want ACPX", got)
-	}
-	if got := agentTerminalCommand("acpx claude"); got != "acpx" {
-		t.Fatalf("agentTerminalCommand(acpx claude) = %q, want acpx", got)
-	}
-	if got := agentDisplayName("acpx"); got != "ACPX" {
-		t.Fatalf("agentDisplayName(acpx) = %q, want ACPX", got)
-	}
-	if supportsPluginTerminalAgent("acpx") {
-		t.Fatal("supportsPluginTerminalAgent(acpx) = true, want false")
-	}
-}
-
 func TestKnownTerminalTitlesForAdditionalAgents(t *testing.T) {
 	tests := []struct {
 		command string
@@ -567,6 +537,33 @@ func TestTmuxNewSessionCommandInjectsHookEnv(t *testing.T) {
 		if !strings.Contains(args, want) {
 			t.Fatalf("tmuxNewSessionCommand() args missing %q in %#v", want, cmd.Args)
 		}
+	}
+}
+
+func TestTmuxSocketNameUsesValidatedEnvironmentOverride(t *testing.T) {
+	t.Setenv("POCKET_STUDIO_TMUX_SOCKET", "pocket-e2e.case_123")
+	if got := tmuxSocketName(); got != "pocket-e2e.case_123" {
+		t.Fatalf("tmuxSocketName() = %q", got)
+	}
+	if args := strings.Join(tmuxCommand("list-sessions").Args, "\x00"); !strings.Contains(args, "-L\x00pocket-e2e.case_123") {
+		t.Fatalf("tmuxCommand() did not use override: %q", args)
+	}
+
+	t.Setenv("POCKET_STUDIO_TMUX_SOCKET", "../../shared")
+	if got := tmuxSocketName(); got != defaultTmuxSocketName {
+		t.Fatalf("invalid tmux socket = %q, want default", got)
+	}
+}
+
+func TestTmuxProcessEnvKeepsCaseMarkerWithoutDaemonOwner(t *testing.T) {
+	t.Setenv("POCKET_E2E_CASE_MARKER", "/tmp/case")
+	t.Setenv("POCKET_E2E_PROCESS_OWNER", "/tmp/case:daemon-1")
+	env := tmuxProcessEnv()
+	if got := envValue(env, "POCKET_E2E_CASE_MARKER"); got != "/tmp/case" {
+		t.Fatalf("case marker = %q", got)
+	}
+	if got := envValue(env, "POCKET_E2E_PROCESS_OWNER"); got != "" {
+		t.Fatalf("tmux inherited daemon owner marker %q", got)
 	}
 }
 

@@ -55,10 +55,8 @@ export function terminalType(value: TerminalKind) {
   return TERMINAL_TYPES.find((item) => item.value === value) || TERMINAL_TYPES[0];
 }
 
-export function agentNameForRuntime(agentKind: string | undefined, agentRuntime: "acpx" | "direct_acp" | "gosdk" | undefined) {
-  const normalized = normalizeAgentKind(agentKind);
-  if (agentRuntime === "acpx" && normalized === "kilo") return "kilocode";
-  return normalized;
+export function agentNameForRuntime(agentKind: string | undefined, _agentRuntime: "direct_acp" | undefined) {
+  return normalizeAgentKind(agentKind);
 }
 
 export function terminalKindFromAgentKind(agentKind: string | undefined): TerminalKind {
@@ -184,7 +182,7 @@ function knownTerminalTitleForCommand(command: string) {
   const normalized = command.trim().toLowerCase();
   if (!normalized) return "";
   if (normalized === "bash" || normalized === "zsh" || normalized === "sh") return "Shell";
-  if (normalized === "online" || normalized === "acpx" || normalized.startsWith("acpx ")) return "ACPX";
+  if (normalized === "online") return "ACP";
   if (normalized.includes("claude")) return "Claude Code";
   if (normalized.includes("codex")) return "Codex";
   if (normalized.includes("cursor-agent") || normalized === "cursor" || normalized.startsWith("cursor ")) return "Cursor Agent";
@@ -200,7 +198,7 @@ function knownTerminalTitleForCommand(command: string) {
 }
 
 function isDefaultTerminalTitle(title: string) {
-  return ["Shell", "Claude Code", "Codex", "OpenCode", "Kilo Code", "Pi", "Antigravity", "Qwen Code", "Kimi", "GitHub Copilot", "Cursor Agent", "OpenClaw", "ACPX"].includes(title);
+  return ["Shell", "Claude Code", "Codex", "OpenCode", "Kilo Code", "Pi", "Antigravity", "Qwen Code", "Kimi", "GitHub Copilot", "Cursor Agent", "OpenClaw", "ACP"].includes(title);
 }
 
 function extractQuotedPocketTitle(title: string) {

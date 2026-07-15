@@ -131,6 +131,8 @@ export function StudioWorkspace({
     setIsDraggingTab,
     terminalTitles,
     workspaceSwitchToken,
+    stateLoaded,
+    loadedProjectId,
     layoutVersion,
     setLayoutVersion,
     addMenuPanelId,
@@ -471,6 +473,9 @@ export function StudioWorkspace({
 
   return (
     <div
+      data-testid="studio-workspace"
+      data-project-id={projectId}
+      data-state-loaded={stateLoaded && loadedProjectId === projectId ? "true" : "false"}
       onClick={() => {
         setAddMenuPanelId(null);
         setThemeMenuOpen(false);

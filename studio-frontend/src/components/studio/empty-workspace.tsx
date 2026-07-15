@@ -38,6 +38,7 @@ export function EmptyWorkspace({
             <button
               key={item.value}
               type="button"
+              data-testid={`empty-create-${item.value}`}
               onClick={() => onCreate(item.value)}
               className="flex items-center gap-2 border border-slate-200 bg-white px-3 py-2 text-left text-xs font-semibold text-slate-700 transition-colors hover:border-indigo-300 hover:bg-indigo-50/60 hover:text-indigo-700"
             >

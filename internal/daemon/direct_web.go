@@ -25,7 +25,7 @@ type directTerminalSubscriber struct {
 	mu   sync.Mutex
 }
 
-type directACPXSubscriber struct {
+type directAgentChatSubscriber struct {
 	conn *websocket.Conn
 	mu   sync.Mutex
 }
@@ -33,7 +33,7 @@ type directACPXSubscriber struct {
 var directWebUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 const directTerminalWriteTimeout = 2 * time.Second
-const directACPXWriteTimeout = 2 * time.Second
+const directAgentChatWriteTimeout = 2 * time.Second
 
 func (d *Daemon) startDirectWebServer(ctx context.Context) (func(), error) {
 	if !d.cfg.DirectWeb.Enabled {
@@ -41,7 +41,7 @@ func (d *Daemon) startDirectWebServer(ctx context.Context) (func(), error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/terminal", d.handleDirectTerminalWebSocket)
-	mux.HandleFunc("/ws/acpx", d.handleDirectACPXWebSocket)
+	mux.HandleFunc("/ws/agent", d.handleDirectAgentChatWebSocket)
 	listener, err := net.Listen("tcp", d.cfg.DirectWeb.ListenAddr)
 	if err != nil {
 		return nil, err
@@ -149,7 +149,7 @@ func (d *Daemon) handleDirectTerminalWebSocket(w http.ResponseWriter, r *http.Re
 	}
 }
 
-func (d *Daemon) handleDirectACPXWebSocket(w http.ResponseWriter, r *http.Request) {
+func (d *Daemon) handleDirectAgentChatWebSocket(w http.ResponseWriter, r *http.Request) {
 	if !d.cfg.DirectWeb.Enabled {
 		http.Error(w, "direct websocket disabled", http.StatusNotFound)
 		return
@@ -179,16 +179,16 @@ func (d *Daemon) handleDirectACPXWebSocket(w http.ResponseWriter, r *http.Reques
 	}
 	conn, err := directWebUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("upgrade direct acpx websocket: %v", err)
+		log.Printf("upgrade direct agent chat websocket: %v", err)
 		return
 	}
 	defer conn.Close()
 	enableTCPNoDelay(conn)
 
-	key := directACPXKey(projectID, taskID)
-	subscriber := &directACPXSubscriber{conn: conn}
-	d.addDirectACPXSubscriber(projectID, taskID, subscriber)
-	defer d.removeDirectACPXSubscriber(key, subscriber)
+	key := directAgentChatKey(projectID, taskID)
+	subscriber := &directAgentChatSubscriber{conn: conn}
+	d.addDirectAgentChatSubscriber(projectID, taskID, subscriber)
+	defer d.removeDirectAgentChatSubscriber(key, subscriber)
 
 	historyEvents := d.sendDirectTaskHistory(subscriber, taskID, project.WorkspacePath)
 	_ = subscriber.writeEnvelope(protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "daemon", protocol.TaskHistoryReady{
@@ -208,8 +208,8 @@ func (d *Daemon) handleDirectACPXWebSocket(w http.ResponseWriter, r *http.Reques
 			_ = subscriber.writeEnvelope(protocol.NewEnvelope("pong", "daemon", nil))
 			continue
 		}
-		if !isDirectACPXCommandType(env.Type) {
-			_ = subscriber.writeEnvelope(directServerError("unsupported_type", "unsupported ACPX websocket message type", env.ID))
+		if !isDirectAgentChatCommandType(env.Type) {
+			_ = subscriber.writeEnvelope(directServerError("unsupported_type", "unsupported agent chat websocket message type", env.ID))
 			continue
 		}
 		if !envelopeMatchesDirectTask(env, taskID) {
@@ -219,8 +219,8 @@ func (d *Daemon) handleDirectACPXWebSocket(w http.ResponseWriter, r *http.Reques
 		if env.To.DeviceID == "" {
 			env.To.DeviceID = d.cfg.Device.ID
 		}
-		if !d.handleDirectACPXEnvelope(env) {
-			_ = subscriber.writeEnvelope(directServerError("bad_payload", "invalid ACPX websocket message payload", env.ID))
+		if !d.handleDirectAgentChatEnvelope(env) {
+			_ = subscriber.writeEnvelope(directServerError("bad_payload", "invalid agent chat websocket message payload", env.ID))
 		}
 	}
 }
@@ -288,36 +288,36 @@ func terminalKey(projectID string, terminalID string) string {
 	return projectID + "::" + terminalID
 }
 
-func directACPXKey(projectID string, taskID string) string {
+func directAgentChatKey(projectID string, taskID string) string {
 	return projectID + "::" + taskID
 }
 
-func (d *Daemon) addDirectACPXSubscriber(projectID string, taskID string, subscriber *directACPXSubscriber) {
-	key := directACPXKey(projectID, taskID)
+func (d *Daemon) addDirectAgentChatSubscriber(projectID string, taskID string, subscriber *directAgentChatSubscriber) {
+	key := directAgentChatKey(projectID, taskID)
 	d.termMu.Lock()
-	if d.directACPXConns[key] == nil {
-		d.directACPXConns[key] = make(map[*directACPXSubscriber]struct{})
+	if d.directAgentChatConns[key] == nil {
+		d.directAgentChatConns[key] = make(map[*directAgentChatSubscriber]struct{})
 	}
-	d.directACPXConns[key][subscriber] = struct{}{}
-	d.directACPXProjects[taskID] = projectID
+	d.directAgentChatConns[key][subscriber] = struct{}{}
+	d.directAgentChatProjects[taskID] = projectID
 	d.termMu.Unlock()
 }
 
-func (d *Daemon) removeDirectACPXSubscriber(key string, subscriber *directACPXSubscriber) {
+func (d *Daemon) removeDirectAgentChatSubscriber(key string, subscriber *directAgentChatSubscriber) {
 	d.termMu.Lock()
-	if subscribers := d.directACPXConns[key]; subscribers != nil {
+	if subscribers := d.directAgentChatConns[key]; subscribers != nil {
 		delete(subscribers, subscriber)
 		if len(subscribers) == 0 {
-			delete(d.directACPXConns, key)
-			if _, taskID, ok := splitDirectACPXKey(key); ok {
-				delete(d.directACPXProjects, taskID)
+			delete(d.directAgentChatConns, key)
+			if _, taskID, ok := splitDirectAgentChatKey(key); ok {
+				delete(d.directAgentChatProjects, taskID)
 			}
 		}
 	}
 	d.termMu.Unlock()
 }
 
-func splitDirectACPXKey(key string) (string, string, bool) {
+func splitDirectAgentChatKey(key string) (string, string, bool) {
 	before, after, ok := strings.Cut(key, "::")
 	if !ok || before == "" || after == "" {
 		return "", "", false
@@ -325,37 +325,37 @@ func splitDirectACPXKey(key string) (string, string, bool) {
 	return before, after, true
 }
 
-func (d *Daemon) directACPXSubscribers(projectID string, taskID string) []*directACPXSubscriber {
+func (d *Daemon) directAgentChatSubscribers(projectID string, taskID string) []*directAgentChatSubscriber {
 	d.termMu.Lock()
 	defer d.termMu.Unlock()
-	subscribers := d.directACPXConns[directACPXKey(projectID, taskID)]
-	out := make([]*directACPXSubscriber, 0, len(subscribers))
+	subscribers := d.directAgentChatConns[directAgentChatKey(projectID, taskID)]
+	out := make([]*directAgentChatSubscriber, 0, len(subscribers))
 	for subscriber := range subscribers {
 		out = append(out, subscriber)
 	}
 	return out
 }
 
-func (d *Daemon) broadcastDirectACPXEvent(event protocol.TaskEvent) {
+func (d *Daemon) broadcastDirectAgentChatEvent(event protocol.TaskEvent) {
 	if event.TaskID == "" {
 		return
 	}
-	projectID := d.projectIDForDirectACPXTask(event.TaskID)
+	projectID := d.projectIDForDirectAgentChatTask(event.TaskID)
 	if projectID == "" {
 		return
 	}
 	env := protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", event)
-	for _, subscriber := range d.directACPXSubscribers(projectID, event.TaskID) {
+	for _, subscriber := range d.directAgentChatSubscribers(projectID, event.TaskID) {
 		if err := subscriber.writeEnvelope(env); err != nil {
-			d.removeDirectACPXSubscriber(directACPXKey(projectID, event.TaskID), subscriber)
+			d.removeDirectAgentChatSubscriber(directAgentChatKey(projectID, event.TaskID), subscriber)
 			_ = subscriber.conn.Close()
 		}
 	}
 }
 
-func (d *Daemon) projectIDForDirectACPXTask(taskID string) string {
+func (d *Daemon) projectIDForDirectAgentChatTask(taskID string) string {
 	d.termMu.Lock()
-	projectID := d.directACPXProjects[taskID]
+	projectID := d.directAgentChatProjects[taskID]
 	d.termMu.Unlock()
 	if projectID != "" {
 		return projectID
@@ -373,7 +373,7 @@ func (d *Daemon) projectIDForTask(taskID string) string {
 	return d.projectIDForWorkspacePath(record.WorkspacePath)
 }
 
-func (d *Daemon) sendDirectTaskHistory(subscriber *directACPXSubscriber, taskID string, workspacePath string) int {
+func (d *Daemon) sendDirectTaskHistory(subscriber *directAgentChatSubscriber, taskID string, workspacePath string) int {
 	record := d.taskHistoryForRequest(taskID, workspacePath)
 	if record.TaskID == "" {
 		return 0
@@ -392,7 +392,7 @@ func (d *Daemon) sendDirectTaskHistory(subscriber *directACPXSubscriber, taskID 
 	return sent
 }
 
-func (d *Daemon) handleDirectACPXEnvelope(env protocol.Envelope) bool {
+func (d *Daemon) handleDirectAgentChatEnvelope(env protocol.Envelope) bool {
 	switch env.Type {
 	case protocol.TypeSessionCreate:
 		session, err := protocol.DecodePayload[protocol.SessionCreate](env)
@@ -436,7 +436,7 @@ func (d *Daemon) handleDirectACPXEnvelope(env protocol.Envelope) bool {
 	return true
 }
 
-func isDirectACPXCommandType(messageType string) bool {
+func isDirectAgentChatCommandType(messageType string) bool {
 	switch messageType {
 	case protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete:
 		return true
@@ -551,10 +551,10 @@ func (s *directTerminalSubscriber) writeJSON(value any) error {
 	return err
 }
 
-func (s *directACPXSubscriber) writeEnvelope(env protocol.Envelope) error {
+func (s *directAgentChatSubscriber) writeEnvelope(env protocol.Envelope) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.conn.SetWriteDeadline(time.Now().Add(directACPXWriteTimeout))
+	_ = s.conn.SetWriteDeadline(time.Now().Add(directAgentChatWriteTimeout))
 	err := writeEnvelope(s.conn, env)
 	_ = s.conn.SetWriteDeadline(time.Time{})
 	return err

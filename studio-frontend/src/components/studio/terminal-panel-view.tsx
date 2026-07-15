@@ -12,7 +12,6 @@ import { FileViewerTab } from "./file-viewer-tab";
 import { SplitBottomIcon, SplitLeftIcon, SplitRightIcon, SplitTopIcon } from "./split-icons";
 import type { TerminalPanel, StudioTab } from "./studio-layout";
 import { AgentChatTab } from "./agent-chat/agent-chat-tab";
-import { GoSDKChatTab } from "./agent-chat/gosdk-chat-tab";
 import type { Project } from "./studio-dashboard";
 import type { Device } from "@/lib/types";
 import { deviceDisplayName } from "./project-switcher";
@@ -454,6 +453,7 @@ function TerminalPanelViewComponent({
                         </span>
                         <button
                           type="button"
+                          data-testid={active ? "active-tab-close" : undefined}
                           onPointerDown={(event) => {
                             event.stopPropagation();
                           }}
@@ -505,6 +505,7 @@ function TerminalPanelViewComponent({
                   <button
                     ref={addButtonRef}
                     type="button"
+                    data-testid="panel-add-tab"
                     onClick={(event) => {
                       event.stopPropagation();
                       updateAddMenuPosition();
@@ -742,23 +743,13 @@ function TerminalPanelViewComponent({
                     theme={theme}
                   />
                 ) : tab.kind === "agent_chat" ? (
-                  tab.agentRuntime === "gosdk" ? (
-                    <GoSDKChatTab
+                  <AgentChatTab
                       project={tabProject}
                       tab={tab}
                       active={active}
                       workspacePath={tabWorkspacePath}
                       onUpdateTabProperties={onUpdateTabProperties}
                     />
-                  ) : (
-                    <AgentChatTab
-                      project={tabProject}
-                      tab={tab}
-                      active={active}
-                      workspacePath={tabWorkspacePath}
-                      onUpdateTabProperties={onUpdateTabProperties}
-                    />
-                  )
                 ) : (
                   <XtermInstance
                     projectId={tabProjectId}
@@ -820,7 +811,7 @@ export function TerminalTypeMenu({
   onNewFile?: (dirPath: string) => void;
   onNewFolder?: (dirPath: string) => void;
 }) {
-  const [submenu, setSubmenu] = useState<"terminal" | "acpx" | "acp" | "gosdk" | null>(null);
+  const [submenu, setSubmenu] = useState<"terminal" | "acp" | null>(null);
 
   const groupedProjects = useMemo(() => {
     const groups: Array<{ deviceName: string; list: Project[] }> = [];
@@ -853,11 +844,11 @@ export function TerminalTypeMenu({
       menuLabel: terminalMenuLabel(item.value),
     }))
     .sort((left, right) => terminalMenuOrder(left.value) - terminalMenuOrder(right.value));
-  const acpxItems = acpxMenuItems(selectedDevice);
   const directACPItems = directACPMenuItems(selectedDevice);
 
   return (
     <div
+      data-testid="panel-add-menu"
       className={`absolute top-6 z-50 w-48 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
       style={style}
       onClick={(event) => event.stopPropagation()}
@@ -911,14 +902,8 @@ export function TerminalTypeMenu({
             </>
           )}
           <MenuBranch label="终端类型" icon={<Terminal className="h-3.5 w-3.5" />} tone="slate" onClick={() => setSubmenu("terminal")} />
-          {acpxItems.length > 0 && (
-            <MenuBranch label="ACPX会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="amber" onClick={() => setSubmenu("acpx")} />
-          )}
           {directACPItems.length > 0 && (
-            <MenuBranch label="ACP会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="emerald" onClick={() => setSubmenu("acp")} />
-          )}
-          {directACPItems.length > 0 && (
-            <MenuBranch label="GoSDK会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="indigo" onClick={() => setSubmenu("gosdk")} />
+            <MenuBranch testId="menu-runtime-direct_acp" label="ACP会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="emerald" onClick={() => setSubmenu("acp")} />
           )}
           <div className="border-t border-slate-100 my-1" />
           <button
@@ -945,42 +930,17 @@ export function TerminalTypeMenu({
             />
           ))}
         </>
-      ) : submenu === "acpx" ? (
-        <>
-          <MenuHeader label="ACPX会话" onBack={() => setSubmenu(null)} />
-          {acpxItems.map((item) => (
-            <MenuItem
-              key={item.agent}
-              label={item.label}
-              icon={item.icon}
-              tone={item.tone}
-              onClick={() => onAddAgentChat(item.agent, "acpx", selectedProjId)}
-            />
-          ))}
-        </>
-      ) : submenu === "acp" ? (
+      ) : (
         <>
           <MenuHeader label="ACP会话" onBack={() => setSubmenu(null)} />
           {directACPItems.map((item) => (
             <MenuItem
               key={item.agent}
+              testId={`menu-agent-direct_acp-${item.agent}`}
               label={item.label}
               icon={item.icon}
               tone={item.tone}
               onClick={() => onAddAgentChat(item.agent, "direct_acp", selectedProjId)}
-            />
-          ))}
-        </>
-      ) : (
-        <>
-          <MenuHeader label="GoSDK会话" onBack={() => setSubmenu(null)} />
-          {directACPItems.map((item) => (
-            <MenuItem
-              key={item.agent}
-              label={item.label}
-              icon={item.icon}
-              tone={item.tone}
-              onClick={() => onAddAgentChat(item.agent, "gosdk", selectedProjId)}
             />
           ))}
         </>
@@ -1014,11 +974,6 @@ function terminalMenuLabel(kind: TerminalKind) {
   }
 }
 
-function acpxMenuItems(device: Device | undefined) {
-  if (!isACPXDevice(device)) return [];
-  return agentMenuItems(device);
-}
-
 function directACPMenuItems(device: Device | undefined) {
   const supported = new Set(["opencode", "claude", "codex", "kilo", "qwen", "pi"]);
   return agentMenuItems(device).filter((item) => supported.has(item.agent));
@@ -1040,11 +995,6 @@ function agentMenuItems(device: Device | undefined) {
   return items.filter((item) => agentCapabilityAvailable(device, item.capability));
 }
 
-function isACPXDevice(device: Device | undefined) {
-  const agent = (device?.agent || "").trim().toLowerCase();
-  return agent !== "" && agent !== "claude_code" && agent !== "claude-code";
-}
-
 function MenuHeader({ label, onBack }: { label: string; onBack: () => void }) {
   return (
     <div className="flex items-center gap-1 px-1.5 py-1 border-b border-slate-100 bg-slate-50/50">
@@ -1061,11 +1011,13 @@ function MenuHeader({ label, onBack }: { label: string; onBack: () => void }) {
 }
 
 function MenuBranch({
+  testId,
   label,
   icon,
   tone,
   onClick,
 }: {
+  testId?: string;
   label: string;
   icon: React.ReactNode;
   tone: string;
@@ -1074,6 +1026,7 @@ function MenuBranch({
   return (
     <button
       type="button"
+      data-testid={testId}
       onClick={onClick}
       className="flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
     >
@@ -1089,11 +1042,13 @@ function MenuBranch({
 }
 
 function MenuItem({
+  testId,
   label,
   icon,
   tone,
   onClick,
 }: {
+  testId?: string;
   label: string;
   icon: React.ReactNode;
   tone: string;
@@ -1102,6 +1057,7 @@ function MenuItem({
   return (
     <button
       type="button"
+      data-testid={testId}
       onClick={onClick}
       className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
     >

@@ -53,7 +53,6 @@ func configFromArgs(args []string) (daemon.Config, error) {
 		return cfg, err
 	}
 	var workspaceValues stringList
-	var acpxArgs string
 	var claudeArgs string
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 
@@ -63,13 +62,6 @@ func configFromArgs(args []string) (daemon.Config, error) {
 	fs.StringVar(&cfg.Server.URL, "daemon.server.url", cfg.Server.URL, "required server websocket URL, for example ws://host:18080/ws/daemon")
 	fs.StringVar(&cfg.Server.Token, "daemon.server.token", cfg.Server.Token, "required server access token")
 	fs.Var(&workspaceValues, "daemon.workspace", "workspace path or id:name:path; may be repeated")
-	fs.BoolVar(&cfg.ACPX.Enabled, "daemon.acpx.enabled", cfg.ACPX.Enabled, "enable acpx agent execution")
-	fs.StringVar(&cfg.ACPX.Command, "daemon.acpx.command", cfg.ACPX.Command, "acpx command")
-	fs.StringVar(&cfg.ACPX.Agent, "daemon.acpx.agent", cfg.ACPX.Agent, "default acpx agent")
-	fs.StringVar(&cfg.ACPX.SessionName, "daemon.acpx.session-name", cfg.ACPX.SessionName, "default acpx session name")
-	fs.IntVar(&cfg.ACPX.TTLSeconds, "daemon.acpx.ttl-seconds", cfg.ACPX.TTLSeconds, "acpx session ttl in seconds")
-	fs.IntVar(&cfg.ACPX.CommandTimeoutSeconds, "daemon.acpx.command-timeout-seconds", cfg.ACPX.CommandTimeoutSeconds, "maximum seconds to wait for an acpx session or prompt command; 0 disables the daemon-side timeout")
-	fs.StringVar(&acpxArgs, "daemon.acpx.args", strings.Join(cfg.ACPX.Args, ","), "comma-separated acpx global args")
 	fs.BoolVar(&cfg.DirectWeb.Enabled, "daemon.direct-web.enabled", cfg.DirectWeb.Enabled, "enable daemon direct websocket server for Studio terminal connections")
 	fs.StringVar(&cfg.DirectWeb.ListenAddr, "daemon.direct-web.listen", cfg.DirectWeb.ListenAddr, "daemon direct websocket listen address")
 	fs.StringVar(&cfg.DirectWeb.PublicHost, "daemon.direct-web.public-host", cfg.DirectWeb.PublicHost, "host/IP advertised for daemon direct websocket connections; defaults to reachable non-Docker IPv4")
@@ -86,9 +78,6 @@ func configFromArgs(args []string) (daemon.Config, error) {
 			return cfg, err
 		}
 		cfg.Workspaces = workspaces
-	}
-	if flagSet(fs, "daemon.acpx.args") {
-		cfg.ACPX.Args = splitArgs(acpxArgs)
 	}
 	if flagSet(fs, "daemon.claude.args") {
 		cfg.Claude.Args = splitArgs(claudeArgs)

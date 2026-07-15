@@ -18,7 +18,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { normalizeAgentToolName, type AgentToolCallItem } from "@/lib/agent-protocol";
+import { normalizeAgentToolName, resolveAgentToolKind, type AgentToolCallItem } from "@/lib/agent-protocol";
 import type { ChatMessage } from "./types";
 
 type MarkdownCodeProps = {
@@ -223,7 +223,7 @@ function extractToolTarget(item: AgentToolCallItem) {
 function describeToolCall(item: AgentToolCallItem) {
   const { changes, command, outputDiff, query, url, target } = extractToolTarget(item);
   const titleKind = normalizeAgentToolName(item.title || "");
-  const kind = normalizeAgentToolName(item.kind || item.title || "");
+  const kind = resolveAgentToolKind(item);
   const effectiveKind = kind !== "tool" ? kind : titleKind;
 
   if (effectiveKind === "websearch" || effectiveKind === "webfetch" || url) {
@@ -254,13 +254,43 @@ function describeToolCall(item: AgentToolCallItem) {
   return { icon: Wrench, accent: "slate", action, target: target || item.title || "查看详情" };
 }
 
-function readableToolOutput(output: AgentToolCallItem["output"]) {
+function acpTextContent(value: unknown, depth = 0): string | undefined {
+  if (depth > 4) return undefined;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return undefined;
+    const chunks = value.map((item) => acpTextContent(item, depth + 1));
+    if (chunks.some((chunk) => chunk === undefined)) return undefined;
+    const text = chunks.join("");
+    return text.trim() ? text : undefined;
+  }
+  const record = getRecord(value);
+  if (!record) return undefined;
+  const keys = Object.keys(record);
+  if (record.type === "text" && typeof record.text === "string"
+    && keys.every((key) => key === "type" || key === "text")) {
+    return record.text.trim() ? record.text : undefined;
+  }
+  if (record.type === "content" && keys.every((key) => key === "type" || key === "content")) {
+    return acpTextContent(record.content, depth + 1);
+  }
+  if (record.type === undefined && keys.length === 1 && keys[0] === "content") {
+    return acpTextContent(record.content, depth + 1);
+  }
+  return undefined;
+}
+
+export function readableToolOutput(output: AgentToolCallItem["output"]) {
   if (!output) return "";
+  const directText = acpTextContent(output);
+  if (directText !== undefined) return directText;
   if (typeof output === "string") {
     const trimmed = output.trim();
-    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}"))
+      || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
       try {
         const parsed = JSON.parse(trimmed);
+        const parsedText = acpTextContent(parsed);
+        if (parsedText !== undefined) return parsedText;
         if (parsed && typeof parsed === "object") {
           const text = parsed.text ?? parsed.output ?? parsed.result;
           if (typeof text === "string") return text;
@@ -415,9 +445,16 @@ export function ToolCallGroup({ items, nowMs }: { items: ChatMessage[]; nowMs: n
   ).length;
 
   return (
-    <div className="w-full max-w-none">
+    <div
+      className="w-full max-w-none"
+      data-testid="agent-tool-group"
+      data-tool-count={items.length}
+      data-tool-status={pendingCount > 0 ? "running" : "terminal"}
+    >
       <button
         type="button"
+        data-testid="agent-tool-group-toggle"
+        aria-expanded={open}
         onClick={() => setOpen(!open)}
         className="flex items-center gap-1.5 w-full px-1.5 py-0.5 text-left text-[10.5px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer select-none rounded"
       >
@@ -643,7 +680,7 @@ export function ToolCallCard({ item, nowMs }: { item: AgentToolCallItem; nowMs: 
   const accent = toolAccentClasses[description.accent as keyof typeof toolAccentClasses];
   const Icon = description.icon;
   const outputDiff = diffOutputRecord(item.output);
-  const kind = normalizeAgentToolName(item.kind || item.title || "");
+  const kind = resolveAgentToolKind(item);
   const readableInput = useMemo(() => readableToolInput(item.input, kind), [item.input, kind]);
   const readableOutput = readableToolOutput(item.output);
   const elapsed = useMemo(() => {
@@ -654,9 +691,18 @@ export function ToolCallCard({ item, nowMs }: { item: AgentToolCallItem; nowMs: 
   }, [item.createdAt, item.completedAt, nowMs]);
 
   return (
-    <div className="w-full max-w-none">
+    <div
+      className="w-full max-w-none"
+      data-testid="agent-tool-call"
+      data-tool-id={item.id}
+      data-tool-kind={kind}
+      data-tool-status={item.status || "unknown"}
+      data-tool-title={item.title || ""}
+    >
       <button
         type="button"
+        data-testid="agent-tool-call-toggle"
+        aria-expanded={open}
         onClick={() => setOpen(!open)}
         className="flex items-center gap-1.5 w-full px-1.5 py-0.5 text-left text-[10.5px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer select-none rounded"
       >

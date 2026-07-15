@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -49,6 +50,51 @@ func TestReconcileClearsTaskDaemonNoLongerRuns(t *testing.T) {
 	}
 	if got := lastEventType(h, "task-1"); got != "task.failed" {
 		t.Fatalf("last event = %q, want task.failed", got)
+	}
+}
+
+func TestReconcileDirectFailureUsesPromptTurnWithoutToolIndex(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	seedRunningTask(h, "task-1", "dev-1", "running", time.Now().Unix()-60)
+	key := scopedKey(auth.OwnerAdmin, "task-1")
+	record := h.taskRecords[key]
+	record.AgentRuntime = "direct_acp"
+	record.Events = []protocol.TaskEvent{
+		{
+			TaskID: "task-1", EventID: "prompt", EventType: "user.prompt", Source: "web", Sequence: 1,
+			Data: MarshalPayload(map[string]any{"prompt": "磁盘剩余空间多少", "turn_id": "direct-turn-0"}),
+		},
+		{
+			TaskID: "task-1", EventID: "start", EventType: "task.started", Sequence: 7,
+			Data: MarshalPayload(map[string]any{"_seq": 4, "turn_id": "direct-turn-0"}),
+		},
+		{
+			TaskID: "task-1", EventID: "legacy-tool", EventType: "tool.call", Sequence: 10,
+			Data: MarshalPayload(map[string]any{
+				"_seq": 7, "tool_use_id": "tool-1", "acpx_turn_index": 0,
+				"acpx_event_key": "turn:0:tool.call:tool-1",
+			}),
+		},
+	}
+	h.taskRecords[key] = record
+
+	envs := h.reconcileRunningTasks(auth.OwnerAdmin, "dev-1", nil, 0)
+	if len(envs) != 1 {
+		t.Fatalf("expected 1 synthesized event, got %d", len(envs))
+	}
+	failed := h.taskRecords[key].Events[len(record.Events)]
+	var data map[string]any
+	if err := json.Unmarshal(failed.Data, &data); err != nil {
+		t.Fatalf("decode synthetic failure data: %v", err)
+	}
+	if got := stringFromMap(data, "turn_id"); got != "direct-turn-0" {
+		t.Fatalf("Direct synthetic failure turn_id = %q", got)
+	}
+	if _, ok := intFromMap(data, "acpx_turn_index"); ok {
+		t.Fatalf("Direct synthetic failure inherited tool turn index: %#v", data)
+	}
+	if got := stringFromMap(data, "acpx_event_key"); got != "" {
+		t.Fatalf("Direct synthetic failure inherited ACPX key: %#v", data)
 	}
 }
 

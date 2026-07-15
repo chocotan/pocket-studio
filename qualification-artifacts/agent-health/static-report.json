@@ -1,0 +1,173 @@
+{
+  "dynamic_check": {
+    "failures": [],
+    "status": "SKIPPED"
+  },
+  "generated_at": "2026-07-15T12:51:16Z",
+  "inventory": {
+    "claude": {
+      "adapter_version": null,
+      "effective_command": [
+        "claude-agent-acp"
+      ],
+      "env_keys": [],
+      "executable": "/home/choco/.nvm/versions/node/v24.16.0/bin/claude-agent-acp",
+      "launcher_version": "0.57.0",
+      "package": "@agentclientprotocol/claude-agent-acp",
+      "source": "built_in_default"
+    },
+    "codex": {
+      "adapter_version": null,
+      "effective_command": [
+        "codex-acp"
+      ],
+      "env_keys": [],
+      "executable": "/home/choco/.nvm/versions/node/v24.16.0/bin/codex-acp",
+      "launcher_version": "1.1.0",
+      "package": "@agentclientprotocol/codex-acp",
+      "source": "normalized_persisted_config"
+    },
+    "copilot": {
+      "adapter_version": null,
+      "effective_command": [],
+      "executable": "",
+      "launcher_version": "",
+      "package": null
+    },
+    "cursor": {
+      "adapter_version": null,
+      "effective_command": [],
+      "executable": "",
+      "launcher_version": "",
+      "package": null
+    },
+    "kilo": {
+      "adapter_version": null,
+      "effective_command": [
+        "kilo",
+        "acp",
+        "--pure"
+      ],
+      "env_keys": [],
+      "executable": "/home/choco/.nvm/versions/node/v24.16.0/bin/kilo",
+      "launcher_version": "7.3.44",
+      "package": "@kilocode/cli",
+      "source": "normalized_persisted_config"
+    },
+    "kimi": {
+      "adapter_version": null,
+      "effective_command": [],
+      "executable": "",
+      "launcher_version": "",
+      "package": null
+    },
+    "openclaw": {
+      "adapter_version": null,
+      "effective_command": [],
+      "executable": "",
+      "launcher_version": "",
+      "package": null
+    },
+    "opencode": {
+      "adapter_version": null,
+      "effective_command": [
+        "opencode",
+        "acp"
+      ],
+      "env_keys": [],
+      "executable": "/usr/bin/opencode",
+      "launcher_version": "1.17.8",
+      "package": null,
+      "source": "normalized_persisted_config"
+    },
+    "pi": {
+      "adapter_version": null,
+      "effective_command": [
+        "pi-acp"
+      ],
+      "env_keys": [],
+      "executable": "/home/choco/.nvm/versions/node/v24.16.0/bin/pi-acp",
+      "launcher_version": "0.0.31",
+      "package": "pi-acp",
+      "source": "built_in_default"
+    },
+    "qwen": {
+      "adapter_version": null,
+      "effective_command": [
+        "qwen",
+        "--acp"
+      ],
+      "env_keys": [],
+      "executable": "/home/choco/.nvm/versions/node/v24.16.0/bin/qwen",
+      "launcher_version": "0.19.8",
+      "package": "@qwen-code/qwen-code",
+      "source": "built_in_default"
+    }
+  },
+  "mode": "static",
+  "probes": {
+    "direct_acp": {}
+  },
+  "safety": {
+    "hard_timeout_process_groups": true,
+    "model_calls": 0,
+    "prompt_calls": 0,
+    "secret_scan": {
+      "findings": 0,
+      "status": "PASS"
+    }
+  },
+  "schema_version": 1,
+  "static": {
+    "advertised_executables": {},
+    "advertised_not_selectable": [],
+    "daemon_candidates": [],
+    "direct_supported": [
+      "opencode",
+      "claude",
+      "codex",
+      "kilo",
+      "qwen",
+      "pi"
+    ],
+    "menu_agents": [
+      "opencode",
+      "claude",
+      "codex",
+      "kilo",
+      "qwen",
+      "kimi",
+      "copilot",
+      "cursor",
+      "openclaw",
+      "pi"
+    ],
+    "menu_defined_not_advertised": [
+      "kimi",
+      "copilot",
+      "cursor",
+      "openclaw"
+    ],
+    "path_advertised": [],
+    "source_files": [
+      "internal/daemon/daemon.go",
+      "studio-frontend/src/components/studio/terminal-panel-view.tsx",
+      "internal/daemon/config.go"
+    ],
+    "ui_selectable": {
+      "direct_acp": [
+        "opencode",
+        "claude",
+        "codex",
+        "kilo",
+        "qwen",
+        "pi"
+      ],
+      "total": 6
+    }
+  },
+  "static_check": {
+    "errors": [],
+    "status": "PASS"
+  }
+}
