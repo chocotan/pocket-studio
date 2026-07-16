@@ -1190,6 +1190,28 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 
 func (h *Hub) forwardAgentChatCommand(userID string, env protocol.Envelope) (protocol.Envelope, bool) {
 	switch env.Type {
+	case protocol.TypeSessionList:
+		request, err := protocol.DecodePayload[protocol.SessionListRequest](env)
+		if err != nil {
+			return serverErrorForEnvelope(env, "bad_payload", err.Error()), false
+		}
+		deviceID := env.To.DeviceID
+		if deviceID == "" {
+			return serverErrorForEnvelope(env, "missing_device", "session.list requires to.device_id"), false
+		}
+		h.mu.RLock()
+		dc := h.daemons[daemonKey(userID, deviceID)]
+		h.mu.RUnlock()
+		if dc == nil {
+			return serverErrorForEnvelope(env, "device_offline", "target device is offline"), false
+		}
+		forward := env
+		forward.From = "server"
+		forward.Payload = MarshalPayload(request)
+		if !dc.enqueue(forward) {
+			return serverErrorForEnvelope(env, "device_offline", "target device is offline"), false
+		}
+		return protocol.Envelope{}, true
 	case protocol.TypeSessionCreate:
 		session, err := protocol.DecodePayload[protocol.SessionCreate](env)
 		if err != nil {
@@ -1871,6 +1893,14 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 		if taskEvent.TaskID != "" {
 			h.broadcastToTask(dc.userID, taskEvent.TaskID, forward)
 		}
+	case protocol.TypeSessionListResult:
+		result, err := protocol.DecodePayload[protocol.SessionListResult](env)
+		if err != nil || result.TaskID == "" {
+			return
+		}
+		forward := env
+		forward.From = "server"
+		h.broadcastToTask(dc.userID, result.TaskID, forward)
 	case protocol.TypeTaskHistoryResult:
 		result, err := protocol.DecodePayload[protocol.TaskHistoryResult](env)
 		if err == nil && result.TaskID != "" {
@@ -2712,7 +2742,7 @@ func enableTCPNoDelay(conn *websocket.Conn) {
 
 func isAgentChatCommandType(messageType string) bool {
 	switch messageType {
-	case protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete:
+	case protocol.TypeSessionList, protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete:
 		return true
 	default:
 		return false

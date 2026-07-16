@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Palette, Check, Cable, Layers, FolderTree, FileText, Plus, Lock, Unlock, Monitor, Folder } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Palette, Check, Cable, Layers, PanelLeft, FolderTree, FileText, Plus, Lock, Unlock, Monitor, Folder } from "lucide-react";
 import type { Device } from "@/lib/types";
 import { type StudioTheme, terminalType, terminalTypeFromCommand, terminalKindFromAgentKind, cleanTerminalTitle, type TerminalTitleState } from "./terminal-types";
 import type { Project } from "./studio-dashboard";
@@ -119,6 +119,7 @@ export function StudioWorkspace({
     return localStorage.getItem(STUDIO_NAV_HIDDEN_KEY) === "true";
   });
   const [projectListOpen, setProjectListOpen] = useState(false);
+  const [compactSidebarOpen, setCompactSidebarOpen] = useState(false);
   const panelScale = pageZoom / 100;
 
   const {
@@ -173,6 +174,11 @@ export function StudioWorkspace({
     onNotificationTargetsChange,
   });
   const currentDevice = devices.find((device) => device.id === project.device_id);
+  const occupiedAgentSessionIds = new Set(
+    panels.flatMap((panel) => panel.tabs)
+      .filter((tab) => tab.kind === "agent_chat" && tab.agentResumeSessionId)
+      .map((tab) => tab.agentResumeSessionId as string)
+  );
 
   useEffect(() => {
     localStorage.setItem("pocket-studio-theme", theme);
@@ -292,6 +298,7 @@ export function StudioWorkspace({
           onTerminalFocus={handleTerminalFocus}
           terminalTitles={terminalTitles}
           alertTerminalIds={alertTerminalIds}
+          occupiedAgentSessionIds={occupiedAgentSessionIds}
           layoutVersion={layoutVersion}
           theme={theme}
           scale={panelScale}
@@ -470,6 +477,18 @@ export function StudioWorkspace({
 
   const uniqueMachines = Array.from(new Set(groupedList.map((g) => g.machineName)));
   const hasMultipleMachines = uniqueMachines.length > 1;
+  const sidebarActivePanel = panels.find((panel) => panel.id === focusedId) || panels[0];
+  const sidebarProjectGroups = Array.from(allTabs.reduce((groups, item) => {
+    const tabProjectId = item.tab.projectId || projectId;
+    const tabProject = projects.find((candidate) => candidate.id === tabProjectId) || project;
+    const tabDevice = devices.find((device) => device.id === tabProject.device_id);
+    const machineName = deviceDisplayName(tabDevice, tabProject.device_id || "未知机器");
+    const groupKey = `${tabProject.device_id}:${tabProject.id}`;
+    const entries = groups.get(groupKey) || { machineName, project: tabProject, windows: [] };
+    entries.windows.push(item);
+    groups.set(groupKey, entries);
+    return groups;
+  }, new Map<string, { machineName: string; project: Project; windows: Array<{ tab: StudioTab; panel: TerminalPanel }> }>()).values());
 
   return (
     <div
@@ -553,6 +572,18 @@ export function StudioWorkspace({
 
             {/* Display Mode Toggle */}
             <div className="flex h-6 items-center rounded-md bg-muted/30">
+              <button
+                type="button"
+                onClick={() => setLayoutMode("sidebar")}
+                className={`flex size-6 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground transition-all cursor-pointer ${
+                  layoutMode === "sidebar"
+                    ? "bg-accent text-accent-foreground shadow-sm font-bold"
+                    : "text-muted-foreground"
+                }`}
+                title="机器与窗口"
+              >
+                <PanelLeft className="h-3.5 w-3.5" />
+              </button>
               <button
                 type="button"
                 onClick={() => setLayoutMode("grid")}
@@ -688,7 +719,88 @@ export function StudioWorkspace({
               transformOrigin: "top left",
             }}
           >
-            {layoutMode === "grid" ? (
+            {layoutMode === "sidebar" ? (
+              <div className="relative flex h-full min-h-0 w-full overflow-hidden bg-background">
+                {compactSidebarOpen && (
+                  <button
+                    type="button"
+                    aria-label="关闭机器与窗口"
+                    className="absolute inset-0 z-30 bg-black/20 md:hidden"
+                    onClick={() => setCompactSidebarOpen(false)}
+                  />
+                )}
+                <aside className={`${compactSidebarOpen ? "flex" : "hidden"} absolute inset-y-0 left-0 z-40 w-[min(82vw,280px)] shrink-0 flex-col border-r border-border bg-card shadow-xl md:relative md:z-auto md:flex md:w-[240px] md:shadow-none`}>
+                  <div className="min-h-0 flex-1 overflow-y-auto py-1">
+                    {sidebarProjectGroups.map(({ machineName, project: tabProject, windows }) => (
+                      <section key={`${tabProject.device_id}:${tabProject.id}`} className="pb-2">
+                        <div className="flex h-8 min-w-0 items-center gap-1.5 px-3 text-[10px] font-bold text-foreground" title={`${machineName} / ${tabProject.name}\n${tabProject.workspace_path}`}>
+                          <Monitor className="h-3.5 w-3.5 text-emerald-500" />
+                          <span className="truncate">{machineName} / {tabProject.name}</span>
+                        </div>
+                        {windows.map(({ tab, panel }) => {
+                              const selected = sidebarActivePanel?.id === panel.id && panel.activeTabId === tab.id;
+                              const liveTitle = tab.kind === "terminal" ? terminalTitles[tab.id] : undefined;
+                              const activeCommand = liveTitle?.command || tab.activeCommand || "";
+                              const displayType = terminalType(
+                                tab.kind === "agent_chat"
+                                  ? terminalKindFromAgentKind(tab.agentKind)
+                                  : terminalTypeFromCommand(activeCommand, tab.termType)
+                              );
+                              const label = tab.kind === "file_explorer"
+                                ? "文件"
+                                : tab.kind === "terminal"
+                                  ? cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType)
+                                  : tab.title;
+                              return (
+                                <button
+                                  key={`${panel.id}:${tab.id}`}
+                                  type="button"
+                                  onClick={() => {
+                                    handleActiveTab(panel.id, tab.id);
+                                    setCompactSidebarOpen(false);
+                                  }}
+                                  className={`flex h-8 w-full min-w-0 items-center gap-2 border-l-2 px-3 text-left transition-colors ${
+                                    selected
+                                      ? "border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-950/35 dark:text-indigo-200"
+                                      : "border-transparent text-muted-foreground hover:bg-accent hover:text-foreground"
+                                  }`}
+                                  title={`${tabProject.name} / ${label}`}
+                                >
+                                  <span className="flex size-4 shrink-0 items-center justify-center">
+                                    {tab.kind === "file_explorer"
+                                      ? <FolderTree className="size-3.5 text-sky-500" />
+                                      : tab.kind === "file_viewer"
+                                        ? <FileText className="size-3.5 text-emerald-500" />
+                                        : displayType.logo}
+                                  </span>
+                                  <span className="min-w-0 flex-1 truncate text-[11px] font-semibold">{label}</span>
+                                </button>
+                              );
+                        })}
+                      </section>
+                    ))}
+                  </div>
+                </aside>
+                <div className="relative min-w-0 flex-1 overflow-hidden">
+                  <button
+                    type="button"
+                    className="absolute left-1 top-1 z-30 flex size-6 items-center justify-center rounded border border-border bg-card text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground md:hidden"
+                    onClick={() => setCompactSidebarOpen(true)}
+                    aria-label="打开机器与窗口"
+                    title="机器与窗口"
+                  >
+                    <PanelLeft className="size-3.5" />
+                  </button>
+                  {sidebarActivePanel ? renderNode(sidebarActivePanel) : (
+                    <EmptyWorkspace
+                      device={currentDevice}
+                      onCreate={handleCreateInitialPanel}
+                      onCreateFileExplorer={handleCreateInitialFileExplorer}
+                    />
+                  )}
+                </div>
+              </div>
+            ) : layoutMode === "grid" ? (
               layoutTree ? (
                 renderNode(layoutTree)
               ) : (
@@ -810,6 +922,7 @@ export function StudioWorkspace({
                             onTerminalFocus={handleTerminalFocus}
                             terminalTitles={terminalTitles}
                             alertTerminalIds={alertTerminalIds}
+                            occupiedAgentSessionIds={occupiedAgentSessionIds}
                             layoutVersion={layoutVersion}
                             theme={theme}
                             scale={panelScale}
@@ -948,10 +1061,11 @@ export function StudioWorkspace({
                         handleCreateNewFileExplorer(tabProjectId);
                         setDockMenuOpen(false);
                       }}
-                      onAddAgentChat={(agentKind, agentRuntime, tabProjectId) => {
-                        handleCreateNewAgentChat(agentKind, agentRuntime, tabProjectId);
+                      onAddAgentChat={(agentKind, agentRuntime, tabProjectId, resumeSessionId, title) => {
+                        handleCreateNewAgentChat(agentKind, agentRuntime, tabProjectId, undefined, resumeSessionId, title);
                         setDockMenuOpen(false);
                       }}
+                      occupiedAgentSessionIds={occupiedAgentSessionIds}
                     />
                   </>
                 )}

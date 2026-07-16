@@ -77,8 +77,8 @@ func TestAgentCompletionAlertMapsTaskToSavedAgentTab(t *testing.T) {
 	if alert.HostProjectID != projectID || alert.PanelID != "panel-1" {
 		t.Fatalf("alert host = %q panel = %q, want project %q panel-1", alert.HostProjectID, alert.PanelID, projectID)
 	}
-	if alert.Title != "Direct ACP对话 (opencode)" {
-		t.Fatalf("alert title = %q, want Direct ACP title", alert.Title)
+	if alert.Title != "对话 (opencode)" {
+		t.Fatalf("alert title = %q, want conversation title", alert.Title)
 	}
 }
 
@@ -156,8 +156,8 @@ func TestDirectACPCompletionAlertUsesTaskIDWhenNoSavedTab(t *testing.T) {
 	if alert.ProjectID != projectID || alert.TerminalID != "direct-task-1" || alert.Message != "任务执行失败" {
 		t.Fatalf("direct ACP alert = %#v, want fallback task id failure alert", alert)
 	}
-	if alert.Title != "Direct ACP对话 (codex)" {
-		t.Fatalf("alert title = %q, want Direct ACP title", alert.Title)
+	if alert.Title != "对话 (codex)" {
+		t.Fatalf("alert title = %q, want conversation title", alert.Title)
 	}
 }
 

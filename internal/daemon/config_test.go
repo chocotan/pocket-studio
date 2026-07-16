@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -390,4 +392,20 @@ func capabilityNames(caps []protocol.AgentCapability) []string {
 		names = append(names, cap.Name)
 	}
 	return names
+}
+
+func TestAgentCapabilitiesIncludeInstalledAntigravityTerminal(t *testing.T) {
+	bin := t.TempDir()
+	executable := filepath.Join(bin, "agy")
+	if runtime.GOOS == "windows" {
+		executable += ".exe"
+	}
+	if err := os.WriteFile(executable, []byte(""), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	d := New(Config{DirectACP: DirectACPConfig{Agents: map[string]DirectACPAgentConfig{}}})
+	if !slices.Contains(capabilityNames(d.agentCapabilities()), "antigravity") {
+		t.Fatalf("agent capabilities = %#v, want antigravity", d.agentCapabilities())
+	}
 }

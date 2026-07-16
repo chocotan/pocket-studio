@@ -204,6 +204,12 @@ func TestDirectAgentChatWebSocketRejectsBadToken(t *testing.T) {
 	}
 }
 
+func TestDirectAgentChatCommandTypesIncludeSessionList(t *testing.T) {
+	if !isDirectAgentChatCommandType(protocol.TypeSessionList) {
+		t.Fatal("direct agent chat websocket rejects session.list")
+	}
+}
+
 func TestDirectAgentChatWebSocketAllowsProjectWithoutDirectModeFlag(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Device.ID = "dev"

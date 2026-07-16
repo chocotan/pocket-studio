@@ -353,6 +353,22 @@ func (d *Daemon) broadcastDirectAgentChatEvent(event protocol.TaskEvent) {
 	}
 }
 
+func (d *Daemon) broadcastDirectAgentChatEnvelope(taskID string, env protocol.Envelope) {
+	if taskID == "" {
+		return
+	}
+	projectID := d.projectIDForDirectAgentChatTask(taskID)
+	if projectID == "" {
+		return
+	}
+	for _, subscriber := range d.directAgentChatSubscribers(projectID, taskID) {
+		if err := subscriber.writeEnvelope(env); err != nil {
+			d.removeDirectAgentChatSubscriber(directAgentChatKey(projectID, taskID), subscriber)
+			_ = subscriber.conn.Close()
+		}
+	}
+}
+
 func (d *Daemon) projectIDForDirectAgentChatTask(taskID string) string {
 	d.termMu.Lock()
 	projectID := d.directAgentChatProjects[taskID]
@@ -394,6 +410,12 @@ func (d *Daemon) sendDirectTaskHistory(subscriber *directAgentChatSubscriber, ta
 
 func (d *Daemon) handleDirectAgentChatEnvelope(env protocol.Envelope) bool {
 	switch env.Type {
+	case protocol.TypeSessionList:
+		request, err := protocol.DecodePayload[protocol.SessionListRequest](env)
+		if err != nil {
+			return false
+		}
+		go d.listDirectACPSessions(context.Background(), request)
 	case protocol.TypeSessionCreate:
 		session, err := protocol.DecodePayload[protocol.SessionCreate](env)
 		if err != nil {
@@ -438,7 +460,7 @@ func (d *Daemon) handleDirectAgentChatEnvelope(env protocol.Envelope) bool {
 
 func isDirectAgentChatCommandType(messageType string) bool {
 	switch messageType {
-	case protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete:
+	case protocol.TypeSessionList, protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete:
 		return true
 	default:
 		return false

@@ -545,6 +545,39 @@ try {
   assert.equal(restartTiming.latestStartedTurnId, 'restart-turn-1');
   assert.equal(restartTiming.latestTerminalTurnId, 'restart-turn-0');
 
+  const importedHistory = [
+    taskEvent('imported-user-0', 'user.prompt', 1, 2_000, {
+      prompt: 'first', imported_history: true,
+    }),
+    taskEvent('imported-assistant-0', 'assistant.message', 2, 2_000, {
+      text: 'first reply', imported_history: true,
+    }),
+    taskEvent('imported-user-1', 'user.prompt', 3, 2_000, {
+      prompt: 'second', imported_history: true,
+    }),
+    taskEvent('imported-assistant-1', 'assistant.message', 4, 2_000, {
+      text: 'second reply', imported_history: true,
+    }),
+  ];
+  const importedMessages = reducer.buildMessageStateFromEvents(importedHistory, 'task-imported').messages;
+  assert.deepEqual(
+    importedMessages.map((message) => message.kind),
+    ['user_prompt', 'assistant_message', 'run_duration', 'user_prompt', 'assistant_message', 'run_duration'],
+    'provider history without lifecycle timing must still delimit every completed turn',
+  );
+  assert.equal(importedMessages.at(-1).durationMs, undefined, 'missing provider timing must not be fabricated');
+
+  const timedImportedHistory = importedHistory.slice(0, 2).map((event, index) => ({
+    ...event,
+    provider_timestamp_ms: 2_000_000 + index * 7_000,
+  }));
+  const timedImportedMessages = reducer.buildMessageStateFromEvents(timedImportedHistory, 'task-imported-timed').messages;
+  assert.equal(
+    timedImportedMessages.at(-1).durationMs,
+    7_000,
+    'provider replay timestamps must derive the completed historical turn duration',
+  );
+
   console.log('agent event model tests: PASS');
 } finally {
   await vite.close();

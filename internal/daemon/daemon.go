@@ -93,6 +93,7 @@ type directACPSession struct {
 	modelConfigID string
 	configIDs     map[string]string
 	client        *directACPClient
+	persisted     bool
 	promptMu      sync.Mutex
 	resetting     bool
 }
@@ -719,31 +720,32 @@ func (d *Daemon) agentLabel() string {
 }
 
 func (d *Daemon) agentCapabilities() []protocol.AgentCapability {
-	names := make([]string, 0,
-		len(d.cfg.DirectACP.
-			Agents))
-	for name, cfg := range d.cfg.DirectACP.
-		Agents {
-		if strings.
-			TrimSpace(cfg.
-				Command) !=
-			"" {
-			names = append(names,
-				name)
+	names := make([]string, 0, len(d.cfg.DirectACP.Agents)+1)
+	seen := make(map[string]bool)
+	for name, cfg := range d.cfg.DirectACP.Agents {
+		if strings.TrimSpace(cfg.Command) != "" {
+			names = append(names, name)
+			seen[normalizeAgentCapabilityName(name)] = true
 		}
 	}
-	sort.
-		Strings(names)
-	caps := make([]protocol.
-		AgentCapability,
-
-		0, len(names))
+	if !seen["antigravity"] && executableAvailable("agy", "antigravity") {
+		names = append(names, "antigravity")
+	}
+	sort.Strings(names)
+	caps := make([]protocol.AgentCapability, 0, len(names))
 	for _, name := range names {
-		caps =
-			append(caps, protocol.AgentCapability{
-				Name: name, Label: agentDisplayName(name)})
+		caps = append(caps, protocol.AgentCapability{Name: name, Label: agentDisplayName(name)})
 	}
 	return caps
+}
+
+func executableAvailable(names ...string) bool {
+	for _, name := range names {
+		if path, err := exec.LookPath(name); err == nil && strings.TrimSpace(path) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func agentDisplayName(agent string) string {
@@ -849,6 +851,13 @@ func (d *Daemon) handleEnvelope(ctx context.Context, env protocol.Envelope) {
 			return
 		}
 		go d.deleteSession(ctx, remove)
+	case protocol.TypeSessionList:
+		request, err := protocol.DecodePayload[protocol.SessionListRequest](env)
+		if err != nil {
+			d.sendSessionListResult(protocol.SessionListResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.listDirectACPSessions(ctx, request)
 	case protocol.TypeWorkspaceList:
 		request, err := protocol.DecodePayload[protocol.WorkspaceListRequest](env)
 		if err != nil {
@@ -949,14 +958,19 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 		return
 	}
 	task := protocol.TaskDispatch{
-		RequestID:     session.RequestID,
-		TaskID:        session.TaskID,
-		WorkspaceID:   workspace.ID,
-		WorkspacePath: workspace.Path,
-		Agent:         session.Agent,
-		AgentRuntime:  session.AgentRuntime,
-		SessionName:   session.SessionName,
-		Options:       session.Options,
+		RequestID:       session.RequestID,
+		TaskID:          session.TaskID,
+		WorkspaceID:     workspace.ID,
+		WorkspacePath:   workspace.Path,
+		Agent:           session.Agent,
+		AgentRuntime:    session.AgentRuntime,
+		SessionName:     session.SessionName,
+		ResumeSessionID: session.ResumeSessionID,
+		ImportHistory:   session.ImportHistory,
+		Options:         session.Options,
+	}
+	if task.ResumeSessionID != "" && !d.hasPersistedConversationEvents(task.TaskID) {
+		task.ImportHistory = true
 	}
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -981,9 +995,6 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 	record.DeviceID = d.cfg.Device.ID
 	record.Agent = d.recordAgentNameForTask(task)
 	record.AgentRuntime = task.AgentRuntime
-	if task.ResumeSessionID != "" {
-		record.SessionID = task.ResumeSessionID
-	}
 	record.SessionName = strings.TrimSpace(task.SessionName)
 	if record.Status == "" {
 		record.Status = "created"
@@ -996,6 +1007,19 @@ func (d *Daemon) createSession(parent context.Context, session protocol.SessionC
 		"agent":        record.Agent,
 		"session_name": record.SessionName,
 	}, nil)
+}
+
+func (d *Daemon) hasPersistedConversationEvents(taskID string) bool {
+	d.mu.Lock()
+	events := append([]protocol.TaskEvent(nil), d.history[taskID].Events...)
+	d.mu.Unlock()
+	for _, event := range events {
+		switch event.EventType {
+		case "user.prompt", "assistant.message", "assistant.thinking", "tool.call", "tool.output":
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) sendTaskHistory(request protocol.TaskHistoryGet) {
@@ -3558,9 +3582,9 @@ func agentNotificationTitle(agent string, runtime string) string {
 	agent = strings.TrimSpace(agent)
 	_ = runtime
 	if agent != "" {
-		return "Direct ACP对话 (" + agent + ")"
+		return "对话 (" + agent + ")"
 	}
-	return "Direct ACP对话"
+	return "对话"
 }
 
 func extractSessionID(event protocol.TaskEvent) string {

@@ -14,6 +14,136 @@ import (
 	"remote-agent/internal/protocol"
 )
 
+func TestDirectACPSessionListParsesFieldVariants(t *testing.T) {
+	raw := json.RawMessage(`{"result":{"sessions":[
+		{"sessionId":"camel","cwd":"/work","title":"Camel","updatedAt":"2026-07-16T10:00:00Z"},
+		{"session_id":"snake","updated_at":"2026-07-15T10:00:00Z"},
+		{"id":"fallback"},
+		{"title":"missing id"}
+	],"next_cursor":"next"}}`)
+
+	items, cursor := directACPSessionList(raw)
+	if cursor != "next" {
+		t.Fatalf("cursor = %q, want next", cursor)
+	}
+	if len(items) != 3 {
+		t.Fatalf("items = %#v, want 3 valid sessions", items)
+	}
+	if items[0].SessionID != "camel" || items[0].CWD != "/work" || items[0].Title != "Camel" || items[0].UpdatedAt != "2026-07-16T10:00:00Z" {
+		t.Fatalf("camel session = %#v", items[0])
+	}
+	if items[1].SessionID != "snake" || items[1].UpdatedAt != "2026-07-15T10:00:00Z" {
+		t.Fatalf("snake session = %#v", items[1])
+	}
+	if items[2].SessionID != "fallback" {
+		t.Fatalf("fallback session = %#v", items[2])
+	}
+}
+
+func TestDirectACPSessionListParamsOmitsEmptyCursor(t *testing.T) {
+	params := directACPSessionListParams("/work", "  ")
+	if params["cwd"] != "/work" {
+		t.Fatalf("cwd = %#v", params["cwd"])
+	}
+	if _, exists := params["cursor"]; exists {
+		t.Fatalf("empty cursor must be omitted: %#v", params)
+	}
+	params = directACPSessionListParams("/work", " next ")
+	if params["cursor"] != "next" {
+		t.Fatalf("cursor = %#v, want next", params["cursor"])
+	}
+}
+
+func TestHasPersistedConversationEvents(t *testing.T) {
+	d := New(Config{})
+	d.history["metadata-only"] = protocol.TaskRecord{Events: []protocol.TaskEvent{{EventType: "model.list"}}}
+	if d.hasPersistedConversationEvents("metadata-only") {
+		t.Fatal("metadata-only task reported persisted conversation")
+	}
+	d.history["with-message"] = protocol.TaskRecord{Events: []protocol.TaskEvent{{EventType: "assistant.message"}}}
+	if !d.hasPersistedConversationEvents("with-message") {
+		t.Fatal("assistant message was not recognized as persisted conversation")
+	}
+}
+
+func TestDirectACPSessionListCapabilityVariants(t *testing.T) {
+	for name, raw := range map[string]json.RawMessage{
+		"camel": json.RawMessage(`{"result":{"agentCapabilities":{"sessionCapabilities":{"list":true}}}}`),
+		"snake": json.RawMessage(`{"agent_capabilities":{"session_capabilities":{"list":"true"}}}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !directACPCapabilitiesFromInitialize(raw).List {
+				t.Fatalf("list capability not detected from %s", raw)
+			}
+		})
+	}
+	if directACPCapabilitiesFromInitialize(json.RawMessage(`{"result":{"agentCapabilities":{}}}`)).List {
+		t.Fatal("missing list capability reported as supported")
+	}
+}
+
+func TestImportedHistoryUserChunkBuildsPocketPrompt(t *testing.T) {
+	var text strings.Builder
+	var msg map[string]any
+	if err := json.Unmarshal([]byte(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello "}}}}`), &msg); err != nil {
+		t.Fatal(err)
+	}
+	if !importedHistoryUserChunk(msg, &text) {
+		t.Fatal("user history chunk was not recognized")
+	}
+	if err := json.Unmarshal([]byte(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"world"}}}}`), &msg); err != nil {
+		t.Fatal(err)
+	}
+	if !importedHistoryUserChunk(msg, &text) || text.String() != "hello world" {
+		t.Fatalf("imported prompt = %q, want hello world", text.String())
+	}
+	if importedHistoryUserChunk(map[string]any{"method": "session/update", "params": map[string]any{"update": map[string]any{"sessionUpdate": "agent_message_chunk"}}}, &text) {
+		t.Fatal("assistant chunk recognized as imported user history")
+	}
+}
+
+func TestDirectACPSessionIDIgnoresJSONRPCRequestID(t *testing.T) {
+	if got := directACPSessionID(json.RawMessage(`{"jsonrpc":"2.0","id":"2","result":{"models":{}}}`)); got != "" {
+		t.Fatalf("session ID = %q, want empty when only JSON-RPC request id exists", got)
+	}
+	if got := directACPSessionID(json.RawMessage(`{"jsonrpc":"2.0","id":"2","result":{"sessionId":"provider-session"}}`)); got != "provider-session" {
+		t.Fatalf("session ID = %q, want provider-session", got)
+	}
+}
+
+func TestEmitOpenCodeExportHistoryImportsUserAndAssistantText(t *testing.T) {
+	d := New(Config{})
+	emitter := &taskEmitter{daemon: d, taskID: "task-history"}
+	raw := []byte(`{"messages":[
+		{"info":{"role":"user"},"parts":[{"type":"text","text":"question"}]},
+		{"info":{"role":"assistant"},"parts":[{"type":"reasoning","text":"think"},{"type":"step-start"},{"type":"text","text":"first"}]},
+		{"info":{"role":"assistant"},"parts":[{"type":"tool","tool":"bash","callID":"call-1","state":{"status":"completed","title":"Run command","input":{"command":"pwd"},"output":"/work"}}]},
+		{"info":{"role":"assistant"},"parts":[{"type":"text","text":"second"},{"type":"tool","tool":"bash"}]}
+	]}`)
+	if err := emitOpenCodeExportHistory(emitter, raw); err != nil {
+		t.Fatal(err)
+	}
+	events := d.history["task-history"].Events
+	if len(events) != 7 {
+		t.Fatalf("events = %#v, want 7", events)
+	}
+	if events[0].EventType != "user.prompt" || textFieldFromEventJSON(events[0].Data, "prompt") != "question" {
+		t.Fatalf("user event = %#v", events[0])
+	}
+	if events[1].EventType != "assistant.thinking" || textFieldFromEventJSON(events[1].Data, "text") != "think" {
+		t.Fatalf("thinking event = %#v", events[1])
+	}
+	if events[2].EventType != "assistant.message" || textFieldFromEventJSON(events[2].Data, "text") != "first" {
+		t.Fatalf("first assistant event = %#v", events[2])
+	}
+	if events[3].EventType != "tool.call" || events[4].EventType != "tool.output" {
+		t.Fatalf("tool events = %#v %#v", events[3], events[4])
+	}
+	if events[5].EventType != "assistant.message" || textFieldFromEventJSON(events[5].Data, "text") != "second" {
+		t.Fatalf("second assistant event = %#v", events[5])
+	}
+}
+
 func TestDirectACPReaderSuppressesSplitPiStartupInfoAndKeepsSuffix(t *testing.T) {
 	d := New(Config{})
 	const taskID = "direct-startup-info"
@@ -930,12 +1060,14 @@ rl.on("line", (line) => {
 	logText := string(raw)
 	for _, want := range []string{
 		"prompt:provider-session:first\n",
-		"resume:provider-session\n",
 		"prompt:provider-session:second\n",
 	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("direct ACP log = %q, missing %q", logText, want)
 		}
+	}
+	if strings.Contains(logText, "resume:provider-session\n") {
+		t.Fatalf("interrupted unpersisted session must not be resumed: %q", logText)
 	}
 
 	events := drainTaskEvents(d.send)
@@ -961,6 +1093,35 @@ rl.on("line", (line) => {
 	}
 	if got := d.history["task-1"].SessionID; got != "provider-session" {
 		t.Fatalf("record SessionID = %q, want provider session id", got)
+	}
+}
+
+func TestDirectACPResumeSessionIDFallsBackToLatestCodexRollout(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	validID := "019f6897-d804-78c3-8807-bcdea4913246"
+	invalidID := "019f6a5d-ad4b-78d2-9c12-755a37b2a428"
+	rollout := filepath.Join(home, ".codex", "sessions", "2026", "07", "16", "rollout-"+validID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(rollout), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rollout, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]any{"agentSessionId": validID})
+	d := New(DefaultConfig())
+	d.history["task"] = protocol.TaskRecord{
+		TaskID:    "task",
+		SessionID: invalidID,
+		Events:    []protocol.TaskEvent{{EventType: "acp.session", Data: data}},
+	}
+	got := d.directACPResumeSessionID(protocol.TaskDispatch{
+		TaskID:          "task",
+		Agent:           "codex",
+		ResumeSessionID: invalidID,
+	})
+	if got != validID {
+		t.Fatalf("directACPResumeSessionID() = %q, want %q", got, validID)
 	}
 }
 

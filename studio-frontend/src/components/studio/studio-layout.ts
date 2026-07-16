@@ -24,6 +24,8 @@ export interface StudioTab {
   agentKind?: string;
   agentRuntime?: "direct_acp";
   agentModelId?: string;
+  agentResumeSessionId?: string;
+  agentImportHistory?: boolean;
   projectId?: string;
 }
 
@@ -100,13 +102,13 @@ export function createAgentChatTab(
   title?: string,
   agentRuntime: StudioTab["agentRuntime"] = "direct_acp",
   projectId?: string,
-  filePath?: string
+  filePath?: string,
+  resumeSessionId?: string,
 ): StudioTab {
-  const runtimeLabel = "Direct ACP";
   return {
     id: makeId("chat"),
     kind: "agent_chat",
-    title: title || `${runtimeLabel}对话 (${agentKind})`,
+    title: title || `对话 (${agentKind})`,
     termType: "bash",
     activeCommand: "",
     titleSource: "initial",
@@ -114,6 +116,8 @@ export function createAgentChatTab(
     agentSessionId,
     agentRuntime,
     agentModelId: undefined,
+    agentResumeSessionId: resumeSessionId,
+    agentImportHistory: Boolean(resumeSessionId),
     projectId,
     filePath,
   };
@@ -310,7 +314,7 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): StudioTab | nul
       : tabKind === "file_viewer"
         ? (typeof tab.title === "string" && tab.title ? tab.title : basename(filePath) || "文件")
       : tabKind === "agent_chat"
-        ? (typeof tab.title === "string" && tab.title ? tab.title : `Agent对话 (${tab.agentKind || ""})`)
+        ? normalizeAgentChatTitle(tab.title, tab.agentKind)
       : cleanTerminalTitle(typeof tab.title === "string" ? tab.title : "", type.title, kind),
     termType: kind,
     activeCommand: typeof tab.activeCommand === "string" ? tab.activeCommand : "",
@@ -322,8 +326,22 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): StudioTab | nul
     agentKind: typeof tab.agentKind === "string" ? tab.agentKind : undefined,
     agentRuntime: "direct_acp",
     agentModelId: typeof tab.agentModelId === "string" ? tab.agentModelId : undefined,
+    agentResumeSessionId: typeof tab.agentResumeSessionId === "string" ? tab.agentResumeSessionId : undefined,
+    agentImportHistory: tab.agentImportHistory === true,
     projectId: typeof tab.projectId === "string" ? tab.projectId : undefined,
   };
+}
+
+function normalizeAgentChatTitle(title: unknown, agentKind: unknown) {
+  const agent = typeof agentKind === "string" ? agentKind : "";
+  const fallback = `对话 (${agent})`;
+  if (typeof title !== "string" || !title.trim()) return fallback;
+  const trimmed = title.trim();
+  if (/^(?:Direct ACP|Agent)对话(?:\s*\([^)]*\))?$/.test(trimmed)) {
+    const suffix = trimmed.match(/\([^)]*\)$/)?.[0];
+    return suffix ? `对话 ${suffix}` : fallback;
+  }
+  return title;
 }
 
 function sanitizeTabKind(value: unknown): StudioTabKind | null {

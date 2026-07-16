@@ -69,9 +69,10 @@ interface FileExplorerTabProps {
   theme?: StudioTheme;
   projects?: Project[];
   devices?: Device[];
+  occupiedAgentSessionIds?: Set<string>;
   onCreateTab?: (kind: TerminalKind, tabProjectId?: string, filePath?: string) => void;
   onCreateFileExplorer?: (tabProjectId?: string, filePath?: string) => void;
-  onCreateAgentChat?: (agentKind: string, agentRuntime?: "direct_acp", tabProjectId?: string, filePath?: string) => void;
+  onCreateAgentChat?: (agentKind: string, agentRuntime?: "direct_acp", tabProjectId?: string, filePath?: string, resumeSessionId?: string, title?: string) => void;
 }
 
 function FileExplorerTabView({
@@ -83,6 +84,7 @@ function FileExplorerTabView({
   theme = "light",
   projects = [],
   devices = [],
+  occupiedAgentSessionIds = new Set<string>(),
   onCreateTab,
   onCreateFileExplorer,
   onCreateAgentChat,
@@ -657,6 +659,7 @@ function FileExplorerTabView({
             }}
             projects={projects}
             devices={devices}
+            occupiedAgentSessionIds={occupiedAgentSessionIds}
             projectId={projectId}
             dirPath={contextMenu.node.isDir ? contextMenu.node.path : parentPath(contextMenu.node.path)}
             onNewFile={(dirPath) => {
@@ -679,10 +682,10 @@ function FileExplorerTabView({
                 onCreateFileExplorer(tabProjectId, contextMenu.node.path);
               }
             }}
-            onAddAgentChat={(agentKind, agentRuntime, tabProjectId) => {
+            onAddAgentChat={(agentKind, agentRuntime, tabProjectId, resumeSessionId, title) => {
               setContextMenu(null);
               if (onCreateAgentChat) {
-                onCreateAgentChat(agentKind, agentRuntime, tabProjectId, contextMenu.node.path);
+                onCreateAgentChat(agentKind, agentRuntime, tabProjectId, contextMenu.node.path, resumeSessionId, title);
               }
             }}
           />

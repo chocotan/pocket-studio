@@ -31,6 +31,7 @@ type directACPClient struct {
 	pending                sync.Map
 	nextID                 atomic.Int64
 	suppressSessionUpdates atomic.Bool
+	importSessionUpdates   atomic.Bool
 	done                   chan struct{}
 	closeOnce              sync.Once
 	session                string
@@ -62,6 +63,104 @@ type directACPCapabilities struct {
 	List   bool
 	Load   bool
 	Resume bool
+}
+
+func (d *Daemon) listDirectACPSessions(parent context.Context, request protocol.SessionListRequest) {
+	result := protocol.SessionListResult{
+		RequestID: request.RequestID,
+		TaskID:    request.TaskID,
+		Agent:     taskAgentName(protocol.TaskDispatch{Agent: request.Agent}, ""),
+		Sessions:  []protocol.SessionListItem{},
+	}
+	workspace, err := d.resolveWorkspacePath("", request.WorkspacePath)
+	if err != nil {
+		result.Error = err.Error()
+		d.sendSessionListResult(result)
+		return
+	}
+	cfg, ok := d.directACPAgentConfig(result.Agent)
+	if !ok {
+		result.Error = fmt.Sprintf("direct ACP agent %q is not configured", result.Agent)
+		d.sendSessionListResult(result)
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
+	defer cancel()
+	emitter := &taskEmitter{daemon: d, taskID: request.TaskID}
+	client, err := startDirectACPClient(context.Background(), cfg, workspace.Path, emitter)
+	if err != nil {
+		result.Error = err.Error()
+		d.sendSessionListResult(result)
+		return
+	}
+	defer client.close()
+	initRaw, err := client.request(ctx, "initialize", map[string]any{
+		"protocolVersion":    1,
+		"clientCapabilities": map[string]any{},
+		"clientInfo":         map[string]any{"name": "Pocket Studio", "version": "0"},
+	})
+	if err != nil {
+		result.Error = fmt.Sprintf("initialize direct ACP: %v", err)
+		d.sendSessionListResult(result)
+		return
+	}
+	if !directACPCapabilitiesFromInitialize(initRaw).List {
+		d.sendSessionListResult(result)
+		return
+	}
+	result.Supported = true
+	raw, err := client.request(ctx, "session/list", directACPSessionListParams(workspace.Path, request.Cursor))
+	if err != nil {
+		result.Error = err.Error()
+		d.sendSessionListResult(result)
+		return
+	}
+	result.Sessions, result.NextCursor = directACPSessionList(raw)
+	d.sendSessionListResult(result)
+}
+
+func directACPSessionListParams(cwd string, cursor string) map[string]any {
+	params := map[string]any{"cwd": cwd}
+	if cursor = strings.TrimSpace(cursor); cursor != "" {
+		params["cursor"] = cursor
+	}
+	return params
+}
+
+func (d *Daemon) sendSessionListResult(result protocol.SessionListResult) {
+	env := protocol.NewEnvelope(protocol.TypeSessionListResult, "daemon", result)
+	d.send <- env
+	d.broadcastDirectAgentChatEnvelope(result.TaskID, env)
+}
+
+func directACPSessionList(raw json.RawMessage) ([]protocol.SessionListItem, string) {
+	var message map[string]any
+	if json.Unmarshal(raw, &message) != nil {
+		return []protocol.SessionListItem{}, ""
+	}
+	result, _ := message["result"].(map[string]any)
+	if result == nil {
+		result = message
+	}
+	rows, _ := result["sessions"].([]any)
+	items := make([]protocol.SessionListItem, 0, len(rows))
+	for _, row := range rows {
+		item, _ := row.(map[string]any)
+		if item == nil {
+			continue
+		}
+		sessionID := stringField(item, "sessionId", "session_id", "id")
+		if strings.TrimSpace(sessionID) == "" {
+			continue
+		}
+		items = append(items, protocol.SessionListItem{
+			SessionID: sessionID,
+			CWD:       stringField(item, "cwd"),
+			Title:     stringField(item, "title"),
+			UpdatedAt: stringField(item, "updatedAt", "updated_at"),
+		})
+	}
+	return items, stringField(result, "nextCursor", "next_cursor")
 }
 
 func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) error {
@@ -105,7 +204,10 @@ func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskD
 		client.close()
 		return err
 	}
-	client.session = firstStringInJSON(raw, "sessionId", "session_id", "id")
+	if task.ResumeSessionID != "" {
+		d.enrichImportedHistoryTimestamps(taskID, agent, task.ResumeSessionID, workspacePath)
+	}
+	client.session = directACPSessionID(raw)
 	if client.session == "" && recovered {
 		client.session = d.directACPResumeSessionID(task)
 	}
@@ -140,6 +242,7 @@ func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskD
 		modelConfigID: modelConfigID,
 		configIDs:     directACPConfigIDs(configOptions.ConfigOptions),
 		client:        client,
+		persisted:     recovered,
 	}
 	record := d.history[taskID]
 	if record.TaskID == "" {
@@ -152,7 +255,9 @@ func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskD
 	record.Agent = agent
 	record.AgentRuntime = "direct_acp"
 	record.SessionName = sessionName
-	record.SessionID = client.session
+	if recovered {
+		record.SessionID = client.session
+	}
 	if record.Status == "" {
 		record.Status = "created"
 	}
@@ -169,13 +274,16 @@ func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskD
 		existing.client.close()
 	}
 
-	d.emitTaskEvent(taskID, "acp.session", 0, map[string]any{
-		"agent":          agent,
-		"agent_runtime":  "direct_acp",
-		"session_name":   sessionName,
-		"agentSessionId": client.session,
-		"recovered":      recovered,
-	}, raw)
+	if recovered {
+		d.emitTaskEvent(taskID, "acp.session", 0, map[string]any{
+			"agent":          agent,
+			"agent_runtime":  "direct_acp",
+			"session_name":   sessionName,
+			"agentSessionId": client.session,
+			"recovered":      true,
+			"persisted":      true,
+		}, raw)
+	}
 	if len(modelList.AvailableModels) > 0 {
 		d.emitTaskEvent(taskID, "model.list", 0, modelList, raw)
 	}
@@ -187,15 +295,26 @@ func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskD
 
 func (d *Daemon) openDirectACPSession(ctx context.Context, client *directACPClient, task protocol.TaskDispatch, workspacePath string, capabilities directACPCapabilities) (json.RawMessage, bool, error) {
 	sessionID := d.directACPResumeSessionID(task)
-	if sessionID != "" && capabilities.Load {
-		raw, err := client.restoreRequest(ctx, "session/load", map[string]any{
+	var restoreErrors []string
+	if sessionID != "" && task.ImportHistory && capabilities.Load {
+		loadRequest := client.importHistoryRequest
+		if normalizeAgentName(task.Agent) == "opencode" {
+			loadRequest = client.restoreRequest
+		}
+		raw, err := loadRequest(ctx, "session/load", map[string]any{
 			"sessionId":  sessionID,
 			"cwd":        workspacePath,
 			"mcpServers": []any{},
 		})
 		if err == nil {
+			if normalizeAgentName(task.Agent) == "opencode" {
+				if err := importOpenCodeSessionHistory(ctx, client.emitter, sessionID, workspacePath); err != nil {
+					return nil, false, err
+				}
+			}
 			return raw, true, nil
 		}
+		restoreErrors = append(restoreErrors, fmt.Sprintf("load history: %v", err))
 	}
 	if sessionID != "" && capabilities.Resume {
 		raw, err := client.restoreRequest(ctx, "session/resume", map[string]any{
@@ -206,6 +325,24 @@ func (d *Daemon) openDirectACPSession(ctx context.Context, client *directACPClie
 		if err == nil {
 			return raw, true, nil
 		}
+		restoreErrors = append(restoreErrors, fmt.Sprintf("resume: %v", err))
+	}
+	if sessionID != "" && capabilities.Load && !task.ImportHistory {
+		raw, err := client.restoreRequest(ctx, "session/load", map[string]any{
+			"sessionId":  sessionID,
+			"cwd":        workspacePath,
+			"mcpServers": []any{},
+		})
+		if err == nil {
+			return raw, true, nil
+		}
+		restoreErrors = append(restoreErrors, fmt.Sprintf("load: %v", err))
+	}
+	if sessionID != "" {
+		if len(restoreErrors) == 0 {
+			return nil, false, fmt.Errorf("restore direct ACP session %q: agent does not support resume or load", sessionID)
+		}
+		return nil, false, fmt.Errorf("restore direct ACP session %q: %s", sessionID, strings.Join(restoreErrors, "; "))
 	}
 	raw, err := client.request(ctx, "session/new", map[string]any{
 		"cwd":        workspacePath,
@@ -217,17 +354,155 @@ func (d *Daemon) openDirectACPSession(ctx context.Context, client *directACPClie
 	return raw, false, nil
 }
 
+func importOpenCodeSessionHistory(ctx context.Context, emitter *taskEmitter, sessionID string, workspacePath string) error {
+	command, err := exec.LookPath("opencode")
+	if err != nil {
+		return fmt.Errorf("import OpenCode history: opencode command not found")
+	}
+	cmd := exec.CommandContext(ctx, command, "export", sessionID)
+	cmd.Dir = workspacePath
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "FORCE_COLOR=0")
+	raw, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("import OpenCode history: %w", err)
+	}
+	return emitOpenCodeExportHistory(emitter, raw)
+}
+
+func emitOpenCodeExportHistory(emitter *taskEmitter, raw []byte) error {
+	var export struct {
+		Messages []struct {
+			Info  map[string]any   `json:"info"`
+			Parts []map[string]any `json:"parts"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &export); err != nil {
+		return fmt.Errorf("decode OpenCode history: %w", err)
+	}
+	for _, message := range export.Messages {
+		role := stringField(message.Info, "role")
+		if role == "user" {
+			parts := make([]string, 0, len(message.Parts))
+			for _, part := range message.Parts {
+				if stringField(part, "type") == "text" {
+					if text := strings.TrimSpace(stringField(part, "text")); text != "" {
+						parts = append(parts, text)
+					}
+				}
+			}
+			if text := strings.TrimSpace(strings.Join(parts, "\n")); text != "" {
+				emitter.emit("user.prompt", map[string]any{"prompt": text, "imported_history": true}, nil)
+			}
+			continue
+		}
+		if role != "assistant" {
+			continue
+		}
+		for _, part := range message.Parts {
+			switch stringField(part, "type") {
+			case "text":
+				if text := strings.TrimSpace(stringField(part, "text")); text != "" {
+					emitter.emit("assistant.message", map[string]any{"text": text, "replace": false, "imported_history": true}, nil)
+				}
+			case "reasoning":
+				if text := strings.TrimSpace(stringField(part, "text")); text != "" {
+					emitter.emit("assistant.thinking", map[string]any{"text": text, "replace": false, "imported_history": true}, nil)
+				}
+			case "tool":
+				emitOpenCodeExportTool(emitter, part)
+			}
+		}
+	}
+	return nil
+}
+
+func emitOpenCodeExportTool(emitter *taskEmitter, part map[string]any) {
+	state, _ := part["state"].(map[string]any)
+	toolID := stringField(part, "callID", "callId", "id")
+	name := stringField(part, "tool")
+	status := stringField(state, "status")
+	input, _ := state["input"].(map[string]any)
+	emitter.emit("tool.call", map[string]any{
+		"id": toolID, "tool_call_id": toolID, "name": name, "title": stringField(state, "title"),
+		"input": input, "status": status, "imported_history": true,
+	}, nil)
+	if status != "completed" && status != "failed" && status != "error" {
+		return
+	}
+	emitter.emit("tool.output", map[string]any{
+		"id": toolID, "tool_call_id": toolID, "name": name, "output": state["output"],
+		"status": status, "is_error": status == "failed" || status == "error", "imported_history": true,
+	}, nil)
+}
+
 func (c *directACPClient) restoreRequest(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	c.suppressSessionUpdates.Store(true)
 	defer c.suppressSessionUpdates.Store(false)
 	return c.request(ctx, method, params)
 }
 
+func (c *directACPClient) importHistoryRequest(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	c.importSessionUpdates.Store(true)
+	defer c.importSessionUpdates.Store(false)
+	return c.request(ctx, method, params)
+}
+
 func (d *Daemon) directACPResumeSessionID(task protocol.TaskDispatch) string {
 	d.mu.Lock()
-	restoredSessionID := restoredDirectACPSessionID(d.history[task.TaskID])
+	record := d.history[task.TaskID]
+	restoredSessionID := restoredDirectACPSessionID(record)
 	d.mu.Unlock()
-	return providerResumeSessionID(task, restoredSessionID)
+	candidate := providerResumeSessionID(task, restoredSessionID)
+	if normalizeAgentName(task.Agent) != "codex" || codexRolloutExists(candidate) {
+		return candidate
+	}
+	return latestRecoverableCodexSessionID(record)
+}
+
+func codexRolloutExists(sessionID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return false
+	}
+	if !looksLikeUUID(sessionID) {
+		return true
+	}
+	_, err := findSessionHistoryFile([]string{
+		filepath.Join(userHomeDir(), ".codex", "sessions"),
+		filepath.Join(userHomeDir(), ".codex", "archived_sessions"),
+	}, sessionID)
+	return err == nil
+}
+
+func looksLikeUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index, char := range value {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if char != '-' {
+				return false
+			}
+			continue
+		}
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func latestRecoverableCodexSessionID(record protocol.TaskRecord) string {
+	for index := len(record.Events) - 1; index >= 0; index-- {
+		if record.Events[index].EventType != "acp.session" {
+			continue
+		}
+		candidate := stringField(taskEventDataMap(record.Events[index]), "agentSessionId")
+		if codexRolloutExists(candidate) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func providerResumeSessionID(task protocol.TaskDispatch, restoredSessionID string) string {
@@ -305,7 +580,7 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 	record.DeviceID = d.cfg.Device.ID
 	record.Prompt = task.Prompt
 	record.ParentTaskID = task.ParentTaskID
-	if client.session != "" {
+	if session.persisted && client.session != "" {
 		record.SessionID = client.session
 	}
 	record.Agent = agent
@@ -399,11 +674,38 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 	if !currentTask {
 		return
 	}
+	if !session.persisted {
+		d.persistDirectACPSession(task.TaskID, session)
+	}
 	if emitter.completedNormally() {
 		emitter.emit("task.completed", map[string]any{"exit_code": 0, "stop_reason": "end_turn"}, nil)
 		return
 	}
 	emitter.emit("task.completed", map[string]any{"exit_code": 0}, nil)
+}
+
+func (d *Daemon) persistDirectACPSession(taskID string, session *directACPSession) {
+	d.mu.Lock()
+	if current := d.directACP[taskID]; current != session || session.client.session == "" {
+		d.mu.Unlock()
+		return
+	}
+	session.persisted = true
+	record := d.history[taskID]
+	record.SessionID = session.client.session
+	d.history[taskID] = record
+	if err := d.saveDirectACPStoreLocked(); err != nil {
+		log.Printf("save direct acp sessions: %v", err)
+	}
+	d.mu.Unlock()
+	d.emitTaskEvent(taskID, "acp.session", 0, map[string]any{
+		"agent":          session.agent,
+		"agent_runtime":  "direct_acp",
+		"session_name":   session.session,
+		"agentSessionId": session.client.session,
+		"recovered":      false,
+		"persisted":      true,
+	}, nil)
 }
 
 func (d *Daemon) ensureDirectACPSession(ctx context.Context, task protocol.TaskDispatch, workspacePath string, taskID string) error {
@@ -731,7 +1033,18 @@ func (c *directACPClient) readStdout(stdout io.Reader) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	adapter := newAgentOutputAdapter(c.emitter, 0, "")
-	defer adapter.flush()
+	var importedUserText strings.Builder
+	flushImportedUser := func() {
+		text := strings.TrimSpace(importedUserText.String())
+		importedUserText.Reset()
+		if text != "" {
+			c.emitter.emit("user.prompt", map[string]any{"prompt": text, "imported_history": true}, nil)
+		}
+	}
+	defer func() {
+		flushImportedUser()
+		adapter.flush()
+	}()
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if !json.Valid(line) {
@@ -744,6 +1057,11 @@ func (c *directACPClient) readStdout(stdout io.Reader) {
 		raw := append(json.RawMessage(nil), line...)
 		var msg map[string]any
 		if err := json.Unmarshal(raw, &msg); err == nil {
+			if c.importSessionUpdates.Load() && importedHistoryUserChunk(msg, &importedUserText) {
+				adapter.flush()
+				continue
+			}
+			flushImportedUser()
 			if method, _ := msg["method"].(string); method == "session/update" && c.suppressSessionUpdates.Load() {
 				continue
 			}
@@ -764,6 +1082,23 @@ func (c *directACPClient) readStdout(stdout io.Reader) {
 		}
 		adapter.handle(raw)
 	}
+}
+
+func importedHistoryUserChunk(msg map[string]any, target *strings.Builder) bool {
+	if stringField(msg, "method") != "session/update" {
+		return false
+	}
+	params, _ := msg["params"].(map[string]any)
+	update, _ := params["update"].(map[string]any)
+	if stringField(update, "sessionUpdate") != "user_message_chunk" {
+		return false
+	}
+	if content, _ := update["content"].(map[string]any); content != nil {
+		target.WriteString(stringField(content, "text"))
+	} else if text, _ := update["content"].(string); text != "" {
+		target.WriteString(text)
+	}
+	return true
 }
 
 func (c *directACPClient) handleRequest(id string, method string, params any) {
@@ -1444,6 +1779,18 @@ func firstStringInJSON(raw json.RawMessage, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func directACPSessionID(raw json.RawMessage) string {
+	var message map[string]any
+	if json.Unmarshal(raw, &message) != nil {
+		return ""
+	}
+	result, _ := message["result"].(map[string]any)
+	if result == nil {
+		result = message
+	}
+	return stringField(result, "sessionId", "session_id", "id")
 }
 
 func mergeEnv(base []string, extra map[string]string) []string {

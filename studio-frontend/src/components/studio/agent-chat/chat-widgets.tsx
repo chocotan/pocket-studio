@@ -71,11 +71,11 @@ export function WorkingStatus({ elapsedMs }: { elapsedMs: number }) {
   );
 }
 
-export function RunDurationStatus({ elapsedMs }: { elapsedMs: number }) {
+export function RunDurationStatus({ elapsedMs }: { elapsedMs?: number }) {
   return (
     <div className="flex items-center gap-2 px-1 py-2 text-[11px] font-medium text-muted-foreground/70 select-none">
       <span className="h-px w-3 shrink-0 bg-muted-foreground/35" />
-      <span className="shrink-0">Worked for {formatWorkedDurationMs(elapsedMs)}</span>
+      <span className="shrink-0">Worked for {elapsedMs === undefined ? "--" : formatWorkedDurationMs(elapsedMs)}</span>
       <span className="h-px min-w-8 flex-1 bg-muted-foreground/35" />
     </div>
   );

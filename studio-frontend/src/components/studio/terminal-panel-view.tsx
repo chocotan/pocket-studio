@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo } from "react";
-import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal, Minus, Minimize2, Maximize2, FilePlus2, FolderPlus } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal, Minus, Minimize2, Maximize2, FilePlus2, FolderPlus, LoaderCircle } from "lucide-react";
 import { ClaudeCode, Codex, Cursor, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
 import {
   Tooltip,
@@ -15,11 +15,14 @@ import { AgentChatTab } from "./agent-chat/agent-chat-tab";
 import type { Project } from "./studio-dashboard";
 import type { Device } from "@/lib/types";
 import { deviceDisplayName } from "./project-switcher";
+import { agentChatWebSocketURL } from "./agent-chat/direct-websocket";
 import {
   cleanTerminalTitle,
   terminalType,
   terminalTypeFromCommand,
   terminalKindFromAgentKind,
+  agentNameForRuntime,
+  makeId,
   agentAvailable,
   agentCapabilityAvailable,
   availableTerminalTypes,
@@ -46,7 +49,7 @@ interface TerminalPanelViewProps {
   onSplitSelect: (id: string, dir: SplitDirection, kind: TerminalKind) => void;
   onAddTab: (id: string, kind: TerminalKind, tabProjectId?: string, filePath?: string) => void;
   onAddFileExplorer: (id: string, tabProjectId?: string, filePath?: string) => void;
-  onAddAgentChat: (panelId: string, agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string, filePath?: string) => void;
+  onAddAgentChat: (panelId: string, agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string, filePath?: string, resumeSessionId?: string, title?: string) => void;
   onUpdateTabProperties: (tabId: string, props: Partial<StudioTab>) => void;
   onOpenFile: (panelId: string, path: string, tabProjectId?: string) => void;
   onActiveTab: (panelId: string, tabId: string) => void;
@@ -60,6 +63,7 @@ interface TerminalPanelViewProps {
   onTerminalFocus: (panelId: string, tabId: string) => void;
   terminalTitles: Record<string, TerminalTitleState>;
   alertTerminalIds?: Set<string>;
+  occupiedAgentSessionIds?: Set<string>;
   layoutVersion: number;
   theme?: StudioTheme;
   scale?: number;
@@ -69,10 +73,10 @@ interface TerminalPanelViewProps {
   onMaximize?: () => void;
   onHeaderPointerDown?: (e: React.PointerEvent) => void;
   onHeaderDoubleClick?: (e: React.MouseEvent) => void;
-  layoutMode?: "grid" | "floating";
+  layoutMode?: "grid" | "floating" | "sidebar";
   onCreateNewPanel?: (kind: TerminalKind, tabProjectId?: string, filePath?: string) => void;
   onCreateNewFileExplorer?: (tabProjectId?: string, filePath?: string) => void;
-  onCreateNewAgentChat?: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string, filePath?: string) => void;
+  onCreateNewAgentChat?: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string, filePath?: string, resumeSessionId?: string, title?: string) => void;
 }
 
 function TerminalPanelViewComponent({
@@ -105,6 +109,7 @@ function TerminalPanelViewComponent({
   onTerminalFocus,
   terminalTitles,
   alertTerminalIds = new Set<string>(),
+  occupiedAgentSessionIds = new Set<string>(),
   layoutVersion,
   theme = "light",
   scale = 1,
@@ -547,7 +552,8 @@ function TerminalPanelViewComponent({
             projectId={projectId}
             onSelect={(kind, tabProjectId) => onAddTab(panel.id, kind, tabProjectId)}
             onFileExplorer={(tabProjectId) => onAddFileExplorer(panel.id, tabProjectId)}
-            onAddAgentChat={(agentKind, agentRuntime, tabProjectId) => onAddAgentChat(panel.id, agentKind, agentRuntime, tabProjectId)}
+            onAddAgentChat={(agentKind, agentRuntime, tabProjectId, resumeSessionId, title) => onAddAgentChat(panel.id, agentKind, agentRuntime, tabProjectId, undefined, resumeSessionId, title)}
+            occupiedAgentSessionIds={occupiedAgentSessionIds}
           />
         )}
 
@@ -712,6 +718,7 @@ function TerminalPanelViewComponent({
                     theme={theme}
                     projects={projects}
                     devices={devices}
+                    occupiedAgentSessionIds={occupiedAgentSessionIds}
                     onCreateTab={(kind, tabProjectId, filePath) => {
                       if (layoutMode === "floating" && onCreateNewPanel) {
                         onCreateNewPanel(kind, tabProjectId, filePath);
@@ -726,11 +733,11 @@ function TerminalPanelViewComponent({
                         onAddFileExplorer(panel.id, tabProjectId, filePath);
                       }
                     }}
-                    onCreateAgentChat={(agentKind, agentRuntime, tabProjectId, filePath) => {
+                    onCreateAgentChat={(agentKind, agentRuntime, tabProjectId, filePath, resumeSessionId, title) => {
                       if (layoutMode === "floating" && onCreateNewAgentChat) {
-                        onCreateNewAgentChat(agentKind, agentRuntime, tabProjectId, filePath);
+                        onCreateNewAgentChat(agentKind, agentRuntime, tabProjectId, filePath, resumeSessionId, title);
                       } else {
-                        onAddAgentChat(panel.id, agentKind, agentRuntime, tabProjectId, filePath);
+                        onAddAgentChat(panel.id, agentKind, agentRuntime, tabProjectId, filePath, resumeSessionId, title);
                       }
                     }}
                   />
@@ -795,6 +802,7 @@ export function TerminalTypeMenu({
   onSelect,
   onFileExplorer,
   onAddAgentChat,
+  occupiedAgentSessionIds = new Set<string>(),
   dirPath,
   onNewFile,
   onNewFolder,
@@ -806,12 +814,18 @@ export function TerminalTypeMenu({
   projectId: string;
   onSelect: (kind: TerminalKind, tabProjectId?: string) => void;
   onFileExplorer: (tabProjectId?: string) => void;
-  onAddAgentChat: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string) => void;
+  onAddAgentChat: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string, resumeSessionId?: string, title?: string) => void;
+  occupiedAgentSessionIds?: Set<string>;
   dirPath?: string;
   onNewFile?: (dirPath: string) => void;
   onNewFolder?: (dirPath: string) => void;
 }) {
-  const [submenu, setSubmenu] = useState<"terminal" | "acp" | null>(null);
+  const [submenu, setSubmenu] = useState<"terminal" | "acp" | "acp-sessions" | null>(null);
+  const [providerSessions, setProviderSessions] = useState<Array<{ session_id: string; agent: string; cwd?: string; title?: string; updated_at?: string }>>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsSupported, setSessionsSupported] = useState<boolean | null>(null);
+  const [sessionsError, setSessionsError] = useState("");
+  const sessionListSocketsRef = useRef<Set<WebSocket>>(new Set());
 
   const groupedProjects = useMemo(() => {
     const groups: Array<{ deviceName: string; list: Project[] }> = [];
@@ -845,11 +859,95 @@ export function TerminalTypeMenu({
     }))
     .sort((left, right) => terminalMenuOrder(left.value) - terminalMenuOrder(right.value));
   const directACPItems = directACPMenuItems(selectedDevice);
+  const availableProviderSessions = providerSessions.filter((session) => !occupiedAgentSessionIds.has(session.session_id));
+
+  useEffect(() => () => {
+    sessionListSocketsRef.current.forEach((socket) => socket.close());
+    sessionListSocketsRef.current.clear();
+  }, []);
+
+  const fetchProviderSessions = (agent: string, targetProject: Project) => new Promise<{
+    agent: string;
+    supported: boolean;
+    sessions: Array<{ session_id: string; agent: string; cwd?: string; title?: string; updated_at?: string }>;
+    error: string;
+  }>((resolve) => {
+    const taskId = makeId("session-list");
+    const requestId = makeId("request");
+    const socket = new WebSocket(agentChatWebSocketURL(targetProject, taskId).url);
+    sessionListSocketsRef.current.add(socket);
+    let settled = false;
+    const finish = (result: { supported: boolean; sessions?: Array<{ session_id: string; cwd?: string; title?: string; updated_at?: string }>; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      sessionListSocketsRef.current.delete(socket);
+      socket.close();
+      resolve({
+        agent,
+        supported: result.supported,
+        sessions: (result.sessions || []).map((session) => ({ ...session, agent })),
+        error: result.error || "",
+      });
+    };
+    const timeout = window.setTimeout(() => finish({ supported: false, error: "获取会话超时" }), 65_000);
+    socket.onopen = () => socket.send(JSON.stringify({
+      id: makeId("msg"),
+      type: "session.list",
+      version: 1,
+      timestamp: Math.floor(Date.now() / 1000),
+      from: "web",
+      to: { device_id: targetProject.device_id },
+      payload: {
+        request_id: requestId,
+        task_id: taskId,
+        workspace_path: targetProject.workspace_path,
+        agent: agentNameForRuntime(agent, "direct_acp"),
+      },
+    }));
+    socket.onmessage = (event) => {
+      try {
+        const envelope = JSON.parse(String(event.data));
+        if (envelope?.type !== "session.list.result" || envelope?.payload?.request_id !== requestId) return;
+        finish({
+          supported: Boolean(envelope.payload.supported),
+          sessions: Array.isArray(envelope.payload.sessions) ? envelope.payload.sessions : [],
+          error: typeof envelope.payload.error === "string" ? envelope.payload.error : "",
+        });
+      } catch {
+        // Ignore unrelated socket events.
+      }
+    };
+    socket.onerror = () => finish({ supported: false, error: "无法连接到目标设备" });
+    socket.onclose = () => {
+      if (!settled) finish({ supported: false, error: "连接已关闭" });
+    };
+  });
+
+  const listAllProviderSessions = async () => {
+    const targetProject = projects.find((project) => project.id === selectedProjId) || selectedProject;
+    if (!targetProject) return;
+    setSubmenu("acp-sessions");
+    setProviderSessions([]);
+    setSessionsSupported(null);
+    setSessionsError("");
+    setSessionsLoading(true);
+    const results = await Promise.all(directACPItems.map((item) => fetchProviderSessions(item.agent, targetProject)));
+    const sessions = results.flatMap((result) => result.sessions).sort((left, right) => {
+      const leftTime = Date.parse(left.updated_at || "") || 0;
+      const rightTime = Date.parse(right.updated_at || "") || 0;
+      return rightTime - leftTime;
+    });
+    setProviderSessions(sessions);
+    setSessionsSupported(results.some((result) => result.supported));
+    setSessionsError(sessions.length === 0 ? results.map((result) => result.error && `${result.agent}: ${result.error}`).filter(Boolean).join("；") : "");
+    setSessionsLoading(false);
+  };
 
   return (
     <div
       data-testid="panel-add-menu"
-      className={`absolute top-6 z-50 w-48 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
+      className={`absolute top-6 z-50 ${submenu === "acp-sessions" ? "w-72" : "w-48"} overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
       style={style}
       onClick={(event) => event.stopPropagation()}
     >
@@ -930,9 +1028,17 @@ export function TerminalTypeMenu({
             />
           ))}
         </>
-      ) : (
+      ) : submenu === "acp" ? (
         <>
           <MenuHeader label="ACP会话" onBack={() => setSubmenu(null)} />
+          <MenuItem
+            testId="menu-agent-direct_acp-all"
+            label="所有历史会话"
+            icon={<Cpu className="h-3.5 w-3.5" />}
+            tone="emerald"
+            onClick={listAllProviderSessions}
+          />
+          <div className="my-1 border-t border-slate-100" />
           {directACPItems.map((item) => (
             <MenuItem
               key={item.agent}
@@ -944,6 +1050,43 @@ export function TerminalTypeMenu({
             />
           ))}
         </>
+      ) : (
+        <>
+          <MenuHeader label="选择会话" onBack={() => {
+            sessionListSocketsRef.current.forEach((socket) => socket.close());
+            sessionListSocketsRef.current.clear();
+            setSubmenu("acp");
+          }} />
+          {sessionsLoading && <div className="flex items-center gap-2 px-3 py-3 text-xs text-slate-500"><LoaderCircle className="h-3.5 w-3.5 animate-spin" />正在读取当前目录的会话...</div>}
+          {!sessionsLoading && sessionsError && <div className="px-3 py-2 text-xs leading-5 text-red-600">{sessionsError}</div>}
+          {!sessionsLoading && sessionsSupported === false && !sessionsError && <div className="px-3 py-2 text-xs leading-5 text-slate-500">该 Agent 不支持列出已有会话</div>}
+          <div className="max-h-[min(60vh,24rem)] overflow-y-auto overscroll-contain">
+          {!sessionsLoading && sessionsSupported === true && availableProviderSessions.length === 0 && !sessionsError && <div className="px-3 py-2 text-xs text-slate-500">当前目录暂无可恢复的会话</div>}
+          {!sessionsLoading && availableProviderSessions.map((session) => (
+            <button
+              key={session.session_id}
+              type="button"
+              title={session.session_id}
+              onClick={() => onAddAgentChat(session.agent, "direct_acp", selectedProjId, session.session_id, session.title || undefined)}
+              className="flex w-full flex-col gap-0.5 px-3 py-2 text-left hover:bg-slate-50"
+            >
+              <span className="w-full truncate text-xs font-medium text-slate-700">{session.title || session.session_id}</span>
+              <span className="flex w-full items-center justify-between gap-2 text-[10px] text-slate-400">
+                <span className="truncate">{session.updated_at ? formatRelativeSessionTime(session.updated_at) : session.session_id}</span>
+                {session.agent && (
+                  <span
+                    className="flex size-4 shrink-0 items-center justify-center text-slate-500"
+                    title={session.agent}
+                    aria-label={session.agent}
+                  >
+                    {terminalType(terminalKindFromAgentKind(session.agent)).logo}
+                  </span>
+                )}
+              </span>
+            </button>
+          ))}
+          </div>
+        </>
       )}
     </div>
   );
@@ -953,6 +1096,22 @@ function terminalMenuOrder(kind: TerminalKind) {
   const order: TerminalKind[] = ["bash", "opencode", "codex", "claude", "kilo", "qwen", "kimi", "copilot", "cursor", "openclaw", "pi", "agy"];
   const index = order.indexOf(kind);
   return index === -1 ? order.length : index;
+}
+
+function formatRelativeSessionTime(value: string, nowMs = Date.now()) {
+  const timestampMs = Date.parse(value);
+  if (!Number.isFinite(timestampMs)) return value;
+  const elapsedSeconds = Math.max(0, Math.floor((nowMs - timestampMs) / 1000));
+  if (elapsedSeconds < 60) return `${elapsedSeconds}秒前`;
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  if (elapsedMinutes < 60) return `${elapsedMinutes}分钟前`;
+  const elapsedHours = Math.floor(elapsedMinutes / 60);
+  if (elapsedHours < 24) return `${elapsedHours}小时前`;
+  const elapsedDays = Math.floor(elapsedHours / 24);
+  if (elapsedDays < 30) return `${elapsedDays}天前`;
+  const elapsedMonths = Math.floor(elapsedDays / 30);
+  if (elapsedDays < 365) return `${elapsedMonths}月前`;
+  return `${Math.floor(elapsedDays / 365)}年前`;
 }
 
 function terminalMenuLabel(kind: TerminalKind) {

@@ -115,7 +115,7 @@ export function useWorkspaceLayout({
   const [stateLoaded, setStateLoaded] = useState(false);
   const [loadedProjectId, setLoadedProjectId] = useState("");
 
-  const [layoutMode, setLayoutMode] = useState<"grid" | "floating">("grid");
+  const [layoutMode, setLayoutMode] = useState<"grid" | "floating" | "sidebar">("grid");
   interface FloatingPanelState {
     x: number;
     y: number;
@@ -258,11 +258,11 @@ export function useWorkspaceLayout({
 
       const raw = stateProject.studio_state as SavedStudioState | null | undefined;
       if (raw) {
-        if (raw.layoutMode === "grid" || raw.layoutMode === "floating") {
+        if (raw.layoutMode === "grid" || raw.layoutMode === "floating" || raw.layoutMode === "sidebar") {
           setLayoutMode(raw.layoutMode);
         } else {
           const saved = typeof window !== "undefined" ? localStorage.getItem("pocket-studio-layout-mode") : null;
-          setLayoutMode(saved === "floating" ? "floating" : "grid");
+          setLayoutMode(saved === "floating" || saved === "sidebar" ? saved : "grid");
         }
         if (raw.floatingPanels && typeof raw.floatingPanels === "object") {
           setFloatingPanels(raw.floatingPanels as Record<string, FloatingPanelState>);
@@ -271,7 +271,7 @@ export function useWorkspaceLayout({
         }
       } else {
         const saved = typeof window !== "undefined" ? localStorage.getItem("pocket-studio-layout-mode") : null;
-        setLayoutMode(saved === "floating" ? "floating" : "grid");
+        setLayoutMode(saved === "floating" || saved === "sidebar" ? saved : "grid");
         setFloatingPanels({});
       }
 
@@ -298,23 +298,6 @@ export function useWorkspaceLayout({
       cancelled = true;
     };
   }, [project.id, projectId]);
-
-  useEffect(() => {
-    const frames: number[] = [];
-    const timers: number[] = [];
-    const bump = () => setLayoutVersion((value) => value + 1);
-    frames.push(window.requestAnimationFrame(() => {
-      bump();
-      frames.push(window.requestAnimationFrame(bump));
-    }));
-    [100, 350, 900].forEach((delay) => {
-      timers.push(window.setTimeout(bump, delay));
-    });
-    return () => {
-      frames.forEach((frame) => window.cancelAnimationFrame(frame));
-      timers.forEach((timer) => window.clearTimeout(timer));
-    };
-  }, [project.id]);
 
   useEffect(() => {
     if (!stateLoaded) return;
@@ -704,8 +687,8 @@ export function useWorkspaceLayout({
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleAddAgentChat(panelId: string, agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "direct_acp", tabProjectId?: string, filePath?: string) {
-    const tab = createAgentChatTab(agentKind, undefined, undefined, agentRuntime, tabProjectId, filePath);
+  function handleAddAgentChat(panelId: string, agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "direct_acp", tabProjectId?: string, filePath?: string, resumeSessionId?: string, title?: string) {
+    const tab = createAgentChatTab(agentKind, undefined, title, agentRuntime, tabProjectId, filePath, resumeSessionId);
     setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : null));
     setFocusedId(panelId);
     setAddMenuPanelId(null);
@@ -965,8 +948,8 @@ export function useWorkspaceLayout({
     });
   }
 
-  function handleCreateNewAgentChat(agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "direct_acp", tabProjectId?: string, filePath?: string) {
-    const newTab = createAgentChatTab(agentKind, undefined, undefined, agentRuntime, tabProjectId, filePath);
+  function handleCreateNewAgentChat(agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "direct_acp", tabProjectId?: string, filePath?: string, resumeSessionId?: string, title?: string) {
+    const newTab = createAgentChatTab(agentKind, undefined, title, agentRuntime, tabProjectId, filePath, resumeSessionId);
     const panelId = makeId("panel");
     insertNewPanel({
       type: "panel",

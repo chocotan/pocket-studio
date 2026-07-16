@@ -7,6 +7,7 @@ export interface TaskEvent {
   source: string;
   sequence: number;
   timestamp: number;
+  provider_timestamp_ms?: number;
   data?: string;
   raw?: string;
 }

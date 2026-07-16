@@ -25,6 +25,8 @@ const (
 	TypeTaskSetConfigOption  = "task.set_config_option"
 	TypeSessionDelete        = "session.delete"
 	TypeSessionCreate        = "session.create"
+	TypeSessionList          = "session.list"
+	TypeSessionListResult    = "session.list.result"
 	TypeWorkspaceList        = "workspace.list"
 	TypeWorkspaceRead        = "workspace.read"
 	TypeWorkspaceWrite       = "workspace.write"
@@ -124,18 +126,46 @@ type TaskDispatch struct {
 	Prompt          string      `json:"prompt"`
 	ParentTaskID    string      `json:"parent_task_id,omitempty"`
 	ResumeSessionID string      `json:"resume_session_id,omitempty"`
+	ImportHistory   bool        `json:"import_history,omitempty"`
 	Options         TaskOptions `json:"options"`
 }
 
 type SessionCreate struct {
-	RequestID     string      `json:"request_id,omitempty"`
-	TaskID        string      `json:"task_id"`
-	WorkspaceID   string      `json:"workspace_id,omitempty"`
-	WorkspacePath string      `json:"workspace_path"`
-	Agent         string      `json:"agent"`
-	AgentRuntime  string      `json:"agent_runtime,omitempty"`
-	SessionName   string      `json:"session_name,omitempty"`
-	Options       TaskOptions `json:"options"`
+	RequestID       string      `json:"request_id,omitempty"`
+	TaskID          string      `json:"task_id"`
+	WorkspaceID     string      `json:"workspace_id,omitempty"`
+	WorkspacePath   string      `json:"workspace_path"`
+	Agent           string      `json:"agent"`
+	AgentRuntime    string      `json:"agent_runtime,omitempty"`
+	SessionName     string      `json:"session_name,omitempty"`
+	ResumeSessionID string      `json:"resume_session_id,omitempty"`
+	ImportHistory   bool        `json:"import_history,omitempty"`
+	Options         TaskOptions `json:"options"`
+}
+
+type SessionListRequest struct {
+	RequestID     string `json:"request_id,omitempty"`
+	TaskID        string `json:"task_id"`
+	WorkspacePath string `json:"workspace_path"`
+	Agent         string `json:"agent"`
+	Cursor        string `json:"cursor,omitempty"`
+}
+
+type SessionListItem struct {
+	SessionID string `json:"session_id"`
+	CWD       string `json:"cwd,omitempty"`
+	Title     string `json:"title,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+type SessionListResult struct {
+	RequestID  string            `json:"request_id,omitempty"`
+	TaskID     string            `json:"task_id"`
+	Agent      string            `json:"agent"`
+	Supported  bool              `json:"supported"`
+	Sessions   []SessionListItem `json:"sessions"`
+	NextCursor string            `json:"next_cursor,omitempty"`
+	Error      string            `json:"error,omitempty"`
 }
 
 type TaskOptions struct {
@@ -145,14 +175,15 @@ type TaskOptions struct {
 }
 
 type TaskEvent struct {
-	TaskID    string          `json:"task_id"`
-	EventID   string          `json:"event_id"`
-	EventType string          `json:"event_type"`
-	Source    string          `json:"source"`
-	Sequence  int64           `json:"sequence"`
-	Timestamp int64           `json:"timestamp,omitempty"`
-	Data      json.RawMessage `json:"data,omitempty"`
-	Raw       json.RawMessage `json:"raw,omitempty"`
+	TaskID              string          `json:"task_id"`
+	EventID             string          `json:"event_id"`
+	EventType           string          `json:"event_type"`
+	Source              string          `json:"source"`
+	Sequence            int64           `json:"sequence"`
+	Timestamp           int64           `json:"timestamp,omitempty"`
+	ProviderTimestampMS int64           `json:"provider_timestamp_ms,omitempty"`
+	Data                json.RawMessage `json:"data,omitempty"`
+	Raw                 json.RawMessage `json:"raw,omitempty"`
 }
 
 type TaskRecord struct {
