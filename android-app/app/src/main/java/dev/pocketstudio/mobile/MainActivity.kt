@@ -359,7 +359,7 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxSize(),
                 factory = { context ->
                     RemoteTerminalController(context, vm.terminalUrl(), vm::terminalOpened, vm::terminalClosed, vm::terminalError)
-                        .also { controller = it }.view
+                        .also { controller = it }.viewport
                 },
             )
             if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter).height(2.dp))

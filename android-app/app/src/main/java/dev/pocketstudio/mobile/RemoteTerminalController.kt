@@ -3,9 +3,12 @@ package dev.pocketstudio.mobile
 import android.content.Context
 import android.util.Log
 import android.view.GestureDetector
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
+import android.widget.FrameLayout
 import com.termux.terminal.KeyHandler
 import com.termux.terminal.RemoteTerminalEmulator
 import com.termux.terminal.TerminalOutput
@@ -22,7 +25,6 @@ import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.nio.charset.StandardCharsets
 import kotlin.math.max
-import kotlin.math.roundToInt
 
 class RemoteTerminalController(
     context: Context,
@@ -32,6 +34,18 @@ class RemoteTerminalController(
     private val onError: (String) -> Unit,
 ) {
     val view = TerminalView(context, null)
+    val viewport = FrameLayout(context).apply {
+        clipChildren = true
+        clipToPadding = true
+        addView(
+            view,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.BOTTOM,
+            ),
+        )
+    }
     private var socket: WebSocket? = null
     private val resizePolicy = TerminalResizePolicy()
     private var scrollRemainder = 0f
@@ -155,7 +169,10 @@ class RemoteTerminalController(
             scrollDetector.onTouchEvent(event)
             false
         }
-        view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> sendResizeIfChanged() }
+        view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            pinInitialViewportHeight()
+            sendResizeIfChanged()
+        }
     }
 
     private fun connect() {
@@ -187,6 +204,16 @@ class RemoteTerminalController(
     fun clear() { session.reset(); view.onScreenUpdated() }
     fun close() { socket?.close(1000, "leave terminal"); socket = null; session.finishIfRunning() }
 
+    private fun pinInitialViewportHeight() {
+        if (view.height <= 0) return
+        val fixedHeight = resizePolicy.fixedViewportHeight(view.height)
+        val params = view.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (params.height == fixedHeight) return
+        params.height = fixedHeight
+        params.gravity = Gravity.BOTTOM
+        view.layoutParams = params
+    }
+
     private fun isMouseReport(data: ByteArray, offset: Int, count: Int): Boolean {
         if (count < 3 || data[offset] != 0x1b.toByte() || data[offset + 1] != '['.code.toByte()) return false
         if (data[offset + 2] == 'M'.code.toByte()) return count == 6
@@ -201,15 +228,6 @@ class RemoteTerminalController(
     private fun sendResizeIfChanged() {
         if (socket == null) return
         val emulator = session.emulator ?: return
-        val rows = resizePolicy.fixedRows(emulator.mRows)
-        if (emulator.mRows != rows) {
-            emulator.resize(
-                emulator.mColumns,
-                rows,
-                max(1, view.mRenderer.fontWidth.roundToInt()),
-                max(1, view.mRenderer.fontLineSpacing),
-            )
-        }
         val size = resizePolicy.next(emulator.mColumns, emulator.mRows) ?: return
         socket?.send("{\"type\":\"resize\",\"cols\":${size.columns},\"rows\":${size.rows}}")
     }
