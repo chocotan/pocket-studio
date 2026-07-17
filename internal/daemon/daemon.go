@@ -3692,6 +3692,7 @@ func randomHookToken() string {
 type runningPTY struct {
 	projectID   string
 	terminalID  string
+	clientID    string
 	sessionName string
 	usesTmux    bool
 	ptyFile     *os.File
@@ -3726,16 +3727,12 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 		return
 	}
 
-	key := req.ProjectID + "::" + req.TerminalID
+	key := terminalPTYKey(req.ProjectID, req.TerminalID, req.ClientID)
 	sessionName := terminalSessionName(workspace.Path, req.TerminalID)
 	d.termMu.Lock()
 	if rPty, exists := d.terminalPTYs[key]; exists {
 		d.termMu.Unlock()
 		applyTerminalSize(rPty.ptyFile, req.Cols, req.Rows)
-		if rPty.usesTmux {
-			resizeTmuxSession(rPty.sessionName, req.Cols, req.Rows)
-			d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, rPty.sessionName)
-		}
 		return
 	}
 
@@ -3777,14 +3774,12 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 		}
 	}
 	applyTerminalSize(ptyFile, req.Cols, req.Rows)
-	if usesTmux {
-		resizeTmuxSession(sessionName, req.Cols, req.Rows)
-	}
 
 	done := make(chan struct{})
 	rPty := &runningPTY{
 		projectID:   req.ProjectID,
 		terminalID:  req.TerminalID,
+		clientID:    req.ClientID,
 		sessionName: sessionName,
 		usesTmux:    usesTmux,
 		ptyFile:     ptyFile,
@@ -3795,17 +3790,6 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	d.termMu.Unlock()
 	if usesTmux {
 		go d.watchTerminalTitle(parent, req.ProjectID, req.TerminalID, sessionName, done)
-		d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
-		go func() {
-			select {
-			case <-done:
-				return
-			case <-parent.Done():
-				return
-			case <-time.After(250 * time.Millisecond):
-				d.sendTerminalSnapshot(req.ProjectID, req.TerminalID, sessionName)
-			}
-		}()
 	}
 	go func() {
 		defer func() {
@@ -3823,6 +3807,7 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 			exitPayload := protocol.TerminalStreamExit{
 				ProjectID:  req.ProjectID,
 				TerminalID: req.TerminalID,
+				ClientID:   req.ClientID,
 			}
 			d.broadcastDirectTerminalExit(exitPayload)
 			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "daemon", exitPayload)
@@ -3837,6 +3822,7 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 			dataPayload := protocol.TerminalStreamData{
 				ProjectID:  req.ProjectID,
 				TerminalID: req.TerminalID,
+				ClientID:   req.ClientID,
 				Data:       buf[:n],
 			}
 			d.sendTerminalStreamData(dataPayload)
@@ -3848,7 +3834,7 @@ func (d *Daemon) sendTerminalStreamData(data protocol.TerminalStreamData) {
 	d.mu.Lock()
 	terminalBinary := d.terminalBinary
 	d.mu.Unlock()
-	if terminalBinary {
+	if terminalBinary && data.ClientID == "" {
 		frame, err := protocol.MarshalTerminalStreamDataBinary(data)
 		if err != nil {
 			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", data)
@@ -4249,6 +4235,7 @@ set-option -g terminal-overrides ",xterm-256color:RGB,tmux-256color:RGB,*-256col
 set-option -ga terminal-features ",xterm-256color:RGB:clipboard,tmux-256color:RGB:clipboard,*-256color:RGB:clipboard"
 set-option -g xterm-keys on
 set-option -g history-limit 50000
+set-option -g window-size latest
 set-option -g mouse on
 set-option -g set-clipboard external
 set-option -sg escape-time 10
@@ -5178,7 +5165,7 @@ func agentTerminalCommand(command string) string {
 }
 
 func (d *Daemon) writeTerminalStream(req protocol.TerminalStreamData) {
-	key := req.ProjectID + "::" + req.TerminalID
+	key := terminalPTYKey(req.ProjectID, req.TerminalID, req.ClientID)
 	d.termMu.Lock()
 	rPty := d.terminalPTYs[key]
 	d.termMu.Unlock()
@@ -5189,46 +5176,67 @@ func (d *Daemon) writeTerminalStream(req protocol.TerminalStreamData) {
 }
 
 func (d *Daemon) resizeTerminalStream(req protocol.TerminalStreamResize) {
-	key := req.ProjectID + "::" + req.TerminalID
+	key := terminalPTYKey(req.ProjectID, req.TerminalID, req.ClientID)
 	d.termMu.Lock()
 	rPty := d.terminalPTYs[key]
 	d.termMu.Unlock()
 
 	if rPty != nil {
 		applyTerminalSize(rPty.ptyFile, req.Cols, req.Rows)
-		if rPty.usesTmux {
-			resizeTmuxSession(rPty.sessionName, req.Cols, req.Rows)
-		}
 	}
 }
 
 func (d *Daemon) exitTerminalStream(req protocol.TerminalStreamExit) {
-	key := req.ProjectID + "::" + req.TerminalID
+	key := terminalPTYKey(req.ProjectID, req.TerminalID, req.ClientID)
 	d.termMu.Lock()
-	rPty := d.terminalPTYs[key]
+	ptys := make([]*runningPTY, 0, 1)
+	if req.CloseSession {
+		for candidateKey, candidate := range d.terminalPTYs {
+			if candidate.projectID == req.ProjectID && candidate.terminalID == req.TerminalID {
+				ptys = append(ptys, candidate)
+				delete(d.terminalPTYs, candidateKey)
+			}
+		}
+	} else if rPty := d.terminalPTYs[key]; rPty != nil {
+		ptys = append(ptys, rPty)
+		delete(d.terminalPTYs, key)
+	} else if req.ClientID == "" {
+		// Backward compatibility for PTYs created before client IDs were introduced.
+		for candidateKey, candidate := range d.terminalPTYs {
+			if candidate.projectID == req.ProjectID && candidate.terminalID == req.TerminalID {
+				ptys = append(ptys, candidate)
+				delete(d.terminalPTYs, candidateKey)
+				break
+			}
+		}
+	}
 	d.termMu.Unlock()
 
-	if rPty != nil {
+	var tmuxSession string
+	for _, rPty := range ptys {
 		_ = rPty.ptyFile.Close()
 		if rPty.cmd.Process != nil {
 			_ = rPty.cmd.Process.Kill()
 		}
-		if req.CloseSession && rPty.usesTmux {
-			// Find all pane PIDs inside this tmux session
-			listCmd := tmuxCommand("list-panes", "-t", rPty.sessionName, "-F", "#{pane_pid}")
-			if output, err := listCmd.Output(); err == nil {
-				lines := strings.Split(string(output), "\n")
-				for _, line := range lines {
-					line = strings.TrimSpace(line)
-					if line == "" {
-						continue
-					}
-					if pid, err := strconv.Atoi(line); err == nil && pid > 0 {
-						killProcessesRecursively(pid)
-					}
-				}
-			}
-			_ = killTmuxSession(rPty.sessionName)
+		if req.CloseSession && rPty.usesTmux && tmuxSession == "" {
+			tmuxSession = rPty.sessionName
 		}
 	}
+	if tmuxSession != "" {
+		// The terminal panel is gone, so stop pane processes before removing tmux.
+		listCmd := tmuxCommand("list-panes", "-t", tmuxSession, "-F", "#{pane_pid}")
+		if output, err := listCmd.Output(); err == nil {
+			for _, line := range strings.Split(string(output), "\n") {
+				line = strings.TrimSpace(line)
+				if pid, err := strconv.Atoi(line); err == nil && pid > 0 {
+					killProcessesRecursively(pid)
+				}
+			}
+		}
+		_ = killTmuxSession(tmuxSession)
+	}
+}
+
+func terminalPTYKey(projectID, terminalID, clientID string) string {
+	return projectID + "::" + terminalID + "::" + clientID
 }

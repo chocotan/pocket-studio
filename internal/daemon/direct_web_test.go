@@ -239,7 +239,7 @@ func TestDirectAgentChatWebSocketAllowsProjectWithoutDirectModeFlag(t *testing.T
 	defer ws.Close()
 }
 
-func TestDirectTerminalSubscriberReplacementClosesStaleSocket(t *testing.T) {
+func TestDirectTerminalSubscribersReceiveSameTerminalOutput(t *testing.T) {
 	cfg := DefaultConfig()
 	d := New(cfg)
 	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -271,24 +271,16 @@ func TestDirectTerminalSubscriberReplacementClosesStaleSocket(t *testing.T) {
 	defer second.Close()
 	second.SetReadDeadline(time.Now().Add(2 * time.Second))
 
-	var msg map[string]string
-	if err := first.ReadJSON(&msg); err != nil {
-		t.Fatalf("failed to read kick message: %v", err)
+	d.broadcastDirectTerminalData(protocol.TerminalStreamData{ProjectID: "project", TerminalID: "term", Data: []byte("shared")})
+	_, firstData, err := first.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if msg["type"] != "exit" || msg["reason"] != "kick" {
-		t.Fatalf("first stale socket received invalid kick message: %#v", msg)
-	}
-
-	if _, _, err := first.ReadMessage(); err == nil {
-		t.Fatal("first stale socket stayed open after kick message")
-	}
-
-	d.broadcastDirectTerminalData(protocol.TerminalStreamData{ProjectID: "project", TerminalID: "term", Data: []byte("only-latest")})
 	msgType, data, err := second.ReadMessage()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msgType != websocket.BinaryMessage || string(data) != "only-latest" {
+	if string(firstData) != "shared" || msgType != websocket.BinaryMessage || string(data) != "shared" {
 		t.Fatalf("second socket data frame = type %d %q", msgType, data)
 	}
 }

@@ -114,20 +114,28 @@ type DaemonHeartbeat struct {
 }
 
 type TaskDispatch struct {
-	RequestID       string      `json:"request_id,omitempty"`
-	TaskID          string      `json:"task_id"`
-	TurnID          string      `json:"turn_id,omitempty"`
-	WorkspaceID     string      `json:"workspace_id,omitempty"`
-	WorkspacePath   string      `json:"workspace_path"`
-	Agent           string      `json:"agent"`
-	AgentRuntime    string      `json:"agent_runtime,omitempty"`
-	SessionName     string      `json:"session_name,omitempty"`
-	ModelID         string      `json:"model_id,omitempty"`
-	Prompt          string      `json:"prompt"`
-	ParentTaskID    string      `json:"parent_task_id,omitempty"`
-	ResumeSessionID string      `json:"resume_session_id,omitempty"`
-	ImportHistory   bool        `json:"import_history,omitempty"`
-	Options         TaskOptions `json:"options"`
+	RequestID       string           `json:"request_id,omitempty"`
+	TaskID          string           `json:"task_id"`
+	TurnID          string           `json:"turn_id,omitempty"`
+	WorkspaceID     string           `json:"workspace_id,omitempty"`
+	WorkspacePath   string           `json:"workspace_path"`
+	Agent           string           `json:"agent"`
+	AgentRuntime    string           `json:"agent_runtime,omitempty"`
+	SessionName     string           `json:"session_name,omitempty"`
+	ModelID         string           `json:"model_id,omitempty"`
+	Prompt          string           `json:"prompt"`
+	Attachments     []TaskAttachment `json:"attachments,omitempty"`
+	ParentTaskID    string           `json:"parent_task_id,omitempty"`
+	ResumeSessionID string           `json:"resume_session_id,omitempty"`
+	ImportHistory   bool             `json:"import_history,omitempty"`
+	Options         TaskOptions      `json:"options"`
+}
+
+type TaskAttachment struct {
+	Type     string `json:"type"`
+	Name     string `json:"name,omitempty"`
+	Path     string `json:"path"`
+	MimeType string `json:"mime_type,omitempty"`
 }
 
 type SessionCreate struct {
@@ -386,6 +394,7 @@ type ServerError struct {
 type TerminalStreamStart struct {
 	ProjectID     string `json:"project_id"`
 	TerminalID    string `json:"terminal_id"`
+	ClientID      string `json:"client_id,omitempty"`
 	WorkspacePath string `json:"workspace_path"`
 	Command       string `json:"command"`
 	InitialTitle  string `json:"initial_title,omitempty"`
@@ -396,6 +405,7 @@ type TerminalStreamStart struct {
 type TerminalStreamData struct {
 	ProjectID  string `json:"project_id"`
 	TerminalID string `json:"terminal_id"`
+	ClientID   string `json:"client_id,omitempty"`
 	Data       []byte `json:"data"`
 }
 
@@ -482,6 +492,7 @@ type TerminalStreamAlert struct {
 type TerminalStreamResize struct {
 	ProjectID  string `json:"project_id"`
 	TerminalID string `json:"terminal_id"`
+	ClientID   string `json:"client_id,omitempty"`
 	Cols       uint16 `json:"cols"`
 	Rows       uint16 `json:"rows"`
 }
@@ -489,6 +500,7 @@ type TerminalStreamResize struct {
 type TerminalStreamExit struct {
 	ProjectID    string `json:"project_id"`
 	TerminalID   string `json:"terminal_id"`
+	ClientID     string `json:"client_id,omitempty"`
 	CloseSession bool   `json:"close_session,omitempty"`
 }
 

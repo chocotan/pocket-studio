@@ -179,8 +179,9 @@ type webConn struct {
 }
 
 type terminalConn struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
+	conn     *websocket.Conn
+	clientID string
+	mu       sync.Mutex
 }
 
 type agentChatConn struct {
@@ -1994,10 +1995,11 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 		if err == nil {
 			key := terminalKey(dc.userID, streamExit.ProjectID, streamExit.TerminalID)
 			conns := h.terminalSubscribers(key)
-			h.termMu.Lock()
-			delete(h.terminalConns, key)
-			h.termMu.Unlock()
 			for _, wc := range conns {
+				if streamExit.ClientID != "" && wc.clientID != streamExit.ClientID {
+					continue
+				}
+				h.removeTerminalSubscriber(key, wc)
 				_ = wc.conn.Close()
 			}
 		}
@@ -2487,6 +2489,9 @@ func taskLifecycleStatus(eventType string) (string, bool) {
 func (h *Hub) forwardTerminalStreamData(userID string, streamData protocol.TerminalStreamData) {
 	key := terminalKey(userID, streamData.ProjectID, streamData.TerminalID)
 	for _, wc := range h.terminalSubscribers(key) {
+		if streamData.ClientID != "" && wc.clientID != streamData.ClientID {
+			continue
+		}
 		if err := wc.writeMessage(websocket.BinaryMessage, streamData.Data); err != nil {
 			h.removeTerminalSubscriber(key, wc)
 			_ = wc.conn.Close()
@@ -3721,20 +3726,14 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := terminalKey(userID, projID, terminalID)
-	terminal := &terminalConn{conn: conn}
+	clientID := protocol.NewID("term-client")
+	terminal := &terminalConn{conn: conn, clientID: clientID}
 	h.termMu.Lock()
-	replaced := h.terminalConns[key]
-	h.terminalConns[key] = map[*terminalConn]struct{}{
-		terminal: {},
+	if h.terminalConns[key] == nil {
+		h.terminalConns[key] = make(map[*terminalConn]struct{})
 	}
+	h.terminalConns[key][terminal] = struct{}{}
 	h.termMu.Unlock()
-	for old := range replaced {
-		_ = old.writeJSON(map[string]string{
-			"type":   "exit",
-			"reason": "kick",
-		})
-		_ = old.conn.Close()
-	}
 	defer func() {
 		h.termMu.Lock()
 		if subscribers := h.terminalConns[key]; subscribers != nil {
@@ -3744,11 +3743,15 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		h.termMu.Unlock()
+		dc.enqueue(protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", protocol.TerminalStreamExit{
+			ProjectID: projID, TerminalID: terminalID, ClientID: clientID,
+		}))
 	}()
 
 	startPayload := protocol.TerminalStreamStart{
 		ProjectID:     projID,
 		TerminalID:    terminalID,
+		ClientID:      clientID,
 		WorkspacePath: workspacePath,
 		Command:       command,
 		InitialTitle:  initialTerminalTitle(command),
@@ -3781,6 +3784,7 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 					resizePayload := protocol.TerminalStreamResize{
 						ProjectID:  projID,
 						TerminalID: terminalID,
+						ClientID:   clientID,
 						Cols:       controlMsg.Cols,
 						Rows:       controlMsg.Rows,
 					}
@@ -3793,6 +3797,7 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 					exitPayload := protocol.TerminalStreamExit{
 						ProjectID:    projID,
 						TerminalID:   terminalID,
+						ClientID:     clientID,
 						CloseSession: controlMsg.CloseSession,
 					}
 					if !dc.enqueue(protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "server", exitPayload)) {
@@ -3806,9 +3811,10 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 				dataPayload := protocol.TerminalStreamData{
 					ProjectID:  projID,
 					TerminalID: terminalID,
+					ClientID:   clientID,
 					Data:       payload,
 				}
-				if dc.terminalBinary {
+				if dc.terminalBinary && clientID == "" {
 					frame, err := protocol.MarshalTerminalStreamDataBinary(dataPayload)
 					if err != nil {
 						if !dc.enqueue(protocol.NewEnvelope(protocol.TypeTerminalStreamData, "server", dataPayload)) {

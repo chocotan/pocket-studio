@@ -6,6 +6,7 @@ import {
   StopCircle,
   ArrowRight,
   Loader2,
+  Paperclip,
   X
 } from "lucide-react";
 import { Antigravity, ClaudeCode, Codex, Cursor, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
@@ -41,6 +42,19 @@ import {
   extractTodos,
 } from "./chat-widgets";
 import type { AgentRunStatus, ChatMessage, TaskEvent } from "./types";
+import { postJSON } from "@/lib/api";
+
+type ChatAttachment = {
+  type: "image";
+  name: string;
+  path: string;
+  mime_type: string;
+};
+
+type QueuedPrompt = {
+  prompt: string;
+  attachments: ChatAttachment[];
+};
 
 type AgentEnvelope = {
   id: string;
@@ -116,6 +130,8 @@ export function AgentChatTab({
   }, [events, sessionId]);
   const messages = messageState.messages;
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [runStatus, setRunStatus] = useState<AgentRunStatus>("idle");
   const [error, setError] = useState("");
   const [historyLoading, setHistoryLoading] = useState(() => Boolean(sessionId));
@@ -134,9 +150,9 @@ export function AgentChatTab({
   const pendingHistoryEventsRef = useRef<TaskEvent[]>([]);
   const sessionCreateSentRef = useRef<Set<string>>(new Set());
   const ensureSessionRef = useRef<Promise<string> | null>(null);
-  const queuedPromptsRef = useRef<string[]>([]);
+  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const dispatchingQueuedRef = useRef(false);
-  const dispatchPromptRef = useRef<(promptText: string) => Promise<void>>(async () => {});
+  const dispatchPromptRef = useRef<(promptText: string, attachments?: ChatAttachment[]) => Promise<void>>(async () => {});
   const lastEventSeqRef = useRef(0);
   const awaitingNewTurnRef = useRef(false);
   const awaitingTurnIdRef = useRef("");
@@ -146,7 +162,8 @@ export function AgentChatTab({
   const pendingSessionCreatesRef = useRef<Set<string>>(new Set());
   const pendingSessionResolveRef = useRef<((sessionId: string) => void) | null>(null);
   const pendingSessionRejectRef = useRef<((error: Error) => void) | null>(null);
-  const [queuedPrompts, setQueuedPrompts] = useState<string[]>([]);
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
 
 
 
@@ -755,19 +772,53 @@ export function AgentChatTab({
     setCustomModelInput((prev) => prev || selectedModelId);
   }, [selectedModelId, showAgentModelControl]);
 
-  const enqueuePrompt = useCallback((promptText: string) => {
-    const prompt = promptText.trim();
+  const uploadImages = useCallback(async (files: File[]) => {
+    const images = files.filter((file) => file.type.startsWith("image/"));
+    if (images.length === 0) return;
+    setAttachmentUploading(true);
+    try {
+      const uploaded: ChatAttachment[] = [];
+      for (const file of images) {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(reader.error || new Error("读取图片失败"));
+          reader.readAsDataURL(file);
+        });
+        const extension = file.type === "image/jpeg" ? "jpg"
+          : file.type === "image/webp" ? "webp"
+          : file.type === "image/gif" ? "gif" : "png";
+        const filename = `chat_image_${Date.now()}_${makeId("image")}_${uploaded.length}.${extension}`;
+        const result = await postJSON<{ error?: string }>("/api/project/file/write", {
+          project_id: projectId,
+          path: filename,
+          content: dataUrl,
+        });
+        if (result.error) throw new Error(result.error);
+        uploaded.push({ type: "image", name: file.name || filename, path: filename, mime_type: file.type || "image/png" });
+      }
+      setAttachments((previous) => [...previous, ...uploaded]);
+    } catch (err) {
+      showError("图片上传失败: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setAttachmentUploading(false);
+    }
+  }, [projectId, showError]);
+
+  const enqueuePrompt = useCallback((promptText: string, promptAttachments: ChatAttachment[]) => {
+    const prompt = promptText.trim() || (promptAttachments.length > 0 ? "请查看附件" : "");
     if (!prompt) return;
     setQueuedPrompts((prev) => {
-      const next = [...prev, prompt];
+      const next = [...prev, { prompt, attachments: promptAttachments }];
       queuedPromptsRef.current = next;
       return next;
     });
     setInput("");
+    setAttachments([]);
   }, []);
 
   const popQueuedPrompt = useCallback(() => {
-    const [prompt = "", ...next] = queuedPromptsRef.current;
+    const [prompt, ...next] = queuedPromptsRef.current;
     queuedPromptsRef.current = next;
     setQueuedPrompts(next);
     return prompt;
@@ -787,7 +838,9 @@ export function AgentChatTab({
     setQueuedPrompts([]);
   }, []);
 
-  async function dispatchPrompt(promptText: string) {
+  async function dispatchPrompt(promptText: string, promptAttachments: ChatAttachment[] = []) {
+    promptText = promptText.trim() || (promptAttachments.length > 0 ? "请查看附件" : "");
+    if (!promptText) return;
     clearErrorForNewAction();
     const turnId = makeId("turn");
     const maxSeq = events.reduce((max, ev) => Math.max(max, Number(ev.sequence || 0)), 0);
@@ -830,6 +883,7 @@ export function AgentChatTab({
         agent: agentNameForRuntime(agentKind, agentRuntime),
         agent_runtime: agentRuntime,
         prompt: promptText,
+        attachments: promptAttachments,
         model_id: selectedModelIdRef.current
       };
       dispatchPayload.session_name = activeSessionName;
@@ -845,7 +899,6 @@ export function AgentChatTab({
 
       sendAgentEnvelope(activeSessionId, dispatchEnv);
 
-      setInput("");
       setRunStatus("running");
     } catch (err) {
       setEvents((prev) => prev.filter((event) => event.event_id !== localUserEvent.event_id));
@@ -863,7 +916,8 @@ export function AgentChatTab({
   });
 
   async function startConversation(promptText: string) {
-    const prompt = promptText.trim();
+    const promptAttachments = attachments;
+    const prompt = promptText.trim() || (promptAttachments.length > 0 ? "请查看附件" : "");
     if (!prompt) return;
     pushAgentChatDebug({
       phase: "submit",
@@ -874,18 +928,20 @@ export function AgentChatTab({
       sessionId,
     });
     if (isRunning && hasActiveBackendTurn) {
-      enqueuePrompt(prompt);
+      enqueuePrompt(prompt, promptAttachments);
       return;
     }
-    await dispatchPrompt(prompt);
+    setInput("");
+    setAttachments([]);
+    await dispatchPrompt(prompt, promptAttachments);
   }
 
   useEffect(() => {
     if (isRunning || queuedPrompts.length === 0 || dispatchingQueuedRef.current) return;
-    const prompt = popQueuedPrompt();
-    if (!prompt) return;
+    const queued = popQueuedPrompt();
+    if (!queued) return;
     dispatchingQueuedRef.current = true;
-    dispatchPromptRef.current(prompt).finally(() => {
+    dispatchPromptRef.current(queued.prompt, queued.attachments).finally(() => {
       dispatchingQueuedRef.current = false;
     });
   }, [isRunning, popQueuedPrompt, queuedPrompts.length]);
@@ -1179,16 +1235,19 @@ export function AgentChatTab({
               </button>
             </div>
             <div className="max-h-32 space-y-1 overflow-y-auto pr-0.5">
-              {queuedPrompts.map((prompt, index) => (
+              {queuedPrompts.map((queued, index) => (
                 <div
-                  key={`${index}-${prompt}`}
+                  key={`${index}-${queued.prompt}`}
                   className="flex items-start gap-2 rounded-lg border border-primary/10 bg-card/65 px-2 py-1.5 text-primary/85"
                 >
                   <span className="mt-0.5 h-4 min-w-4 rounded bg-primary/10 px-1 text-center text-[9.5px] font-semibold leading-4 text-primary/75">
                     {index + 1}
                   </span>
                   <div className="min-w-0 flex-1 whitespace-pre-wrap break-words text-[10.5px] leading-relaxed text-foreground/80">
-                    {prompt}
+                    {queued.prompt}
+                    {queued.attachments.length > 0 && (
+                      <span className="ml-2 text-primary/70">{queued.attachments.length} 张图片</span>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -1211,10 +1270,29 @@ export function AgentChatTab({
           }}
           className="relative border border-border bg-card rounded-xl shadow-sm focus-within:ring-1 focus-within:ring-primary focus-within:border-primary transition-all p-2 flex flex-col gap-1.5"
         >
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-1 px-1 pt-0.5">
+              {attachments.map((attachment, index) => (
+                <span key={`${attachment.path}-${index}`} className="inline-flex max-w-48 items-center gap-1 rounded border border-primary/20 bg-primary/5 px-1.5 py-1 text-[10px] text-primary/85">
+                  <span className="truncate">{attachment.name}</span>
+                  <button type="button" onClick={() => setAttachments((items) => items.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${attachment.name}`}>
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           <textarea
             data-testid="agent-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={(event) => {
+              const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
+              if (files.length > 0) {
+                event.preventDefault();
+                void uploadImages(files);
+              }
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
@@ -1230,6 +1308,27 @@ export function AgentChatTab({
               <span>对话 / {agentKind}</span>
             </span>
             <div className="flex items-center gap-1.5">
+              <input
+                ref={attachmentInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(event) => {
+                  void uploadImages(Array.from(event.target.files || []));
+                  event.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => attachmentInputRef.current?.click()}
+                disabled={attachmentUploading}
+                title="选择图片"
+                aria-label="选择图片"
+                className="flex h-7 w-7 items-center justify-center rounded-lg border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50 disabled:opacity-45"
+              >
+                {attachmentUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />}
+              </button>
               {showDirectACPConfigOptions && configOptions.map((option) => (
                 <select
                   key={option.id}
@@ -1303,7 +1402,7 @@ export function AgentChatTab({
                 <button
                   type="submit"
                   data-testid="agent-send"
-                  disabled={!input.trim()}
+                  disabled={(!input.trim() && attachments.length === 0) || attachmentUploading}
                   title={isRunning ? "加入队列" : "发送"}
                   className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition-all cursor-pointer select-none"
                 >

@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -641,15 +643,16 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 		}
 	}
 
-	_, err := client.request(ctx, "session/prompt", map[string]any{
-		"sessionId": client.session,
-		"prompt": []map[string]any{
-			{
-				"type": "text",
-				"text": task.Prompt,
-			},
-		},
-	})
+	prompt, promptErr := directACPPromptContent(client, task)
+	var err error
+	if promptErr != nil {
+		err = promptErr
+	} else {
+		_, err = client.request(ctx, "session/prompt", map[string]any{
+			"sessionId": client.session,
+			"prompt":    prompt,
+		})
+	}
 
 	d.mu.Lock()
 	currentTask := d.tasks[task.TaskID] == rt
@@ -682,6 +685,58 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 		return
 	}
 	emitter.emit("task.completed", map[string]any{"exit_code": 0}, nil)
+}
+
+func directACPPromptContent(client *directACPClient, task protocol.TaskDispatch) ([]map[string]any, error) {
+	const maxImageAttachmentSize = 20 << 20
+	prompt := make([]map[string]any, 0, 1+len(task.Attachments))
+	if text := strings.TrimSpace(task.Prompt); text != "" {
+		prompt = append(prompt, map[string]any{"type": "text", "text": task.Prompt})
+	}
+	for _, attachment := range task.Attachments {
+		if attachment.Type != "" && attachment.Type != "image" {
+			return nil, fmt.Errorf("unsupported ACP attachment type %q", attachment.Type)
+		}
+		path, err := client.resolveWorkspacePath(attachment.Path)
+		if err != nil {
+			return nil, err
+		}
+		realPath, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve attachment %q: %w", attachment.Path, err)
+		}
+		path, err = client.resolveWorkspacePath(realPath)
+		if err != nil {
+			return nil, err
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("stat attachment %q: %w", attachment.Path, err)
+		}
+		if info.Size() > maxImageAttachmentSize {
+			return nil, fmt.Errorf("attachment %q exceeds 20 MiB", attachment.Path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read attachment %q: %w", attachment.Path, err)
+		}
+		mimeType := strings.TrimSpace(attachment.MimeType)
+		if mimeType == "" {
+			mimeType = http.DetectContentType(data)
+		}
+		if !strings.HasPrefix(mimeType, "image/") {
+			return nil, fmt.Errorf("attachment %q is not an image", attachment.Path)
+		}
+		prompt = append(prompt, map[string]any{
+			"type":     "image",
+			"data":     base64.StdEncoding.EncodeToString(data),
+			"mimeType": mimeType,
+		})
+	}
+	if len(prompt) == 0 {
+		return nil, errors.New("ACP prompt is empty")
+	}
+	return prompt, nil
 }
 
 func (d *Daemon) persistDirectACPSession(taskID string, session *directACPSession) {

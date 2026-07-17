@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -221,6 +222,52 @@ rl.on("line", (line) => {
 	record := d.history["task-1"]
 	if !historyHasUserPrompt(record.Events, "say hello") {
 		t.Fatalf("history missing persisted user prompt: %#v", record.Events)
+	}
+}
+
+func TestDirectACPPromptContentIncludesWorkspaceImage(t *testing.T) {
+	dir := t.TempDir()
+	imageData := []byte("\x89PNG\r\n\x1a\nimage")
+	if err := os.WriteFile(filepath.Join(dir, "pasted.png"), imageData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := &directACPClient{workspace: dir}
+	prompt, err := directACPPromptContent(client, protocol.TaskDispatch{
+		Prompt: "describe this",
+		Attachments: []protocol.TaskAttachment{{
+			Type: "image", Name: "pasted.png", Path: "pasted.png", MimeType: "image/png",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("directACPPromptContent() error = %v", err)
+	}
+	if len(prompt) != 2 || prompt[0]["type"] != "text" || prompt[0]["text"] != "describe this" {
+		t.Fatalf("prompt text block = %#v", prompt)
+	}
+	if prompt[1]["type"] != "image" || prompt[1]["mimeType"] != "image/png" {
+		t.Fatalf("prompt image block = %#v", prompt[1])
+	}
+	wantData := base64.StdEncoding.EncodeToString(imageData)
+	if prompt[1]["data"] != wantData {
+		t.Fatalf("prompt image data = %q, want %q", prompt[1]["data"], wantData)
+	}
+}
+
+func TestDirectACPPromptContentRejectsImageSymlinkOutsideWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.png")
+	if err := os.WriteFile(outside, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "linked.png")); err != nil {
+		t.Fatal(err)
+	}
+	client := &directACPClient{workspace: dir}
+	_, err := directACPPromptContent(client, protocol.TaskDispatch{
+		Attachments: []protocol.TaskAttachment{{Type: "image", Path: "linked.png", MimeType: "image/png"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
+		t.Fatalf("directACPPromptContent() error = %v, want outside workspace", err)
 	}
 }
 

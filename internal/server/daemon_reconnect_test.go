@@ -438,6 +438,85 @@ func TestTerminalWebSocketExitsWhenItsDaemonDisconnects(t *testing.T) {
 	}
 }
 
+func TestTerminalWebSocketsForSameTerminalRemainConnected(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	h.projects[scopedKey(auth.OwnerAdmin, "project-1")] = Project{
+		ID: "project-1", DeviceID: "dev-1", WorkspacePath: "/workspace",
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/daemon", h.ServeDaemonSocket)
+	mux.HandleFunc("/ws/terminal", h.ServeTerminalWebSocket)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+
+	daemon, _, err := websocket.DefaultDialer.Dial(wsURL+"/ws/daemon", nil)
+	if err != nil {
+		t.Fatalf("dial daemon websocket: %v", err)
+	}
+	t.Cleanup(func() { _ = daemon.Close() })
+	if err := daemon.WriteJSON(protocol.NewEnvelope(protocol.TypeDaemonHello, "daemon", protocol.DaemonHello{DeviceID: "dev-1"})); err != nil {
+		t.Fatalf("write daemon hello: %v", err)
+	}
+	waitForServerTest(t, func() bool {
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		return h.daemons[daemonKey(auth.OwnerAdmin, "dev-1")] != nil
+	})
+
+	dialTerminal := func() *websocket.Conn {
+		conn, _, dialErr := websocket.DefaultDialer.Dial(wsURL+"/ws/terminal?project_id=project-1&terminal_id=terminal-1", nil)
+		if dialErr != nil {
+			t.Fatalf("dial terminal websocket: %v", dialErr)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
+	readStart := func() protocol.TerminalStreamStart {
+		_ = daemon.SetReadDeadline(time.Now().Add(time.Second))
+		var env protocol.Envelope
+		if readErr := daemon.ReadJSON(&env); readErr != nil {
+			t.Fatalf("read terminal start: %v", readErr)
+		}
+		start, decodeErr := protocol.DecodePayload[protocol.TerminalStreamStart](env)
+		if decodeErr != nil {
+			t.Fatalf("decode terminal start: %v", decodeErr)
+		}
+		return start
+	}
+
+	first := dialTerminal()
+	firstStart := readStart()
+	second := dialTerminal()
+	secondStart := readStart()
+	if firstStart.ClientID == "" || secondStart.ClientID == "" || firstStart.ClientID == secondStart.ClientID {
+		t.Fatalf("terminal client IDs = %q and %q, want distinct non-empty IDs", firstStart.ClientID, secondStart.ClientID)
+	}
+
+	writeOutput := func(clientID, value string) {
+		if err := daemon.WriteJSON(protocol.NewEnvelope(protocol.TypeTerminalStreamData, "daemon", protocol.TerminalStreamData{
+			ProjectID: "project-1", TerminalID: "terminal-1", ClientID: clientID, Data: []byte(value),
+		})); err != nil {
+			t.Fatalf("write daemon terminal output: %v", err)
+		}
+	}
+	readOutput := func(conn *websocket.Conn, want string) {
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		messageType, data, readErr := conn.ReadMessage()
+		if readErr != nil {
+			t.Fatalf("read terminal output %q: %v", want, readErr)
+		}
+		if messageType != websocket.BinaryMessage || string(data) != want {
+			t.Fatalf("terminal output = type %d %q, want binary %q", messageType, data, want)
+		}
+	}
+
+	writeOutput(secondStart.ClientID, "second-still-open")
+	readOutput(second, "second-still-open")
+	writeOutput(firstStart.ClientID, "first-still-open")
+	readOutput(first, "first-still-open")
+}
+
 func TestDaemonWriteFailureShutsDownAndRemovesConnection(t *testing.T) {
 	h := NewHub(auth.NewOpen(""))
 	server := httptest.NewServer(http.HandlerFunc(h.ServeDaemonSocket))

@@ -21,8 +21,9 @@ import (
 )
 
 type directTerminalSubscriber struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
+	conn     *websocket.Conn
+	clientID string
+	mu       sync.Mutex
 }
 
 type directAgentChatSubscriber struct {
@@ -95,9 +96,13 @@ func (d *Daemon) handleDirectTerminalWebSocket(w http.ResponseWriter, r *http.Re
 	enableTCPNoDelay(conn)
 
 	key := terminalKey(projectID, terminalID)
-	subscriber := &directTerminalSubscriber{conn: conn}
+	clientID := protocol.NewID("term-client")
+	subscriber := &directTerminalSubscriber{conn: conn, clientID: clientID}
 	d.addDirectTerminalSubscriber(key, subscriber)
-	defer d.removeDirectTerminalSubscriber(key, subscriber)
+	defer func() {
+		d.removeDirectTerminalSubscriber(key, subscriber)
+		d.exitTerminalStream(protocol.TerminalStreamExit{ProjectID: projectID, TerminalID: terminalID, ClientID: clientID})
+	}()
 
 	workspacePath := project.WorkspacePath
 	if customPath := strings.TrimSpace(r.URL.Query().Get("path")); customPath != "" {
@@ -107,6 +112,7 @@ func (d *Daemon) handleDirectTerminalWebSocket(w http.ResponseWriter, r *http.Re
 	start := protocol.TerminalStreamStart{
 		ProjectID:     projectID,
 		TerminalID:    terminalID,
+		ClientID:      clientID,
 		WorkspacePath: workspacePath,
 		Command:       r.URL.Query().Get("command"),
 		InitialTitle:  initialTerminalTitle(r.URL.Query().Get("command"), ""),
@@ -138,14 +144,14 @@ func (d *Daemon) handleDirectTerminalWebSocket(w http.ResponseWriter, r *http.Re
 				// Heartbeat to keep connection alive
 				continue
 			case "resize":
-				d.resizeTerminalStream(protocol.TerminalStreamResize{ProjectID: projectID, TerminalID: terminalID, Cols: control.Cols, Rows: control.Rows})
+				d.resizeTerminalStream(protocol.TerminalStreamResize{ProjectID: projectID, TerminalID: terminalID, ClientID: clientID, Cols: control.Cols, Rows: control.Rows})
 				continue
 			case "exit":
-				d.exitTerminalStream(protocol.TerminalStreamExit{ProjectID: projectID, TerminalID: terminalID, CloseSession: control.CloseSession})
+				d.exitTerminalStream(protocol.TerminalStreamExit{ProjectID: projectID, TerminalID: terminalID, ClientID: clientID, CloseSession: control.CloseSession})
 				continue
 			}
 		}
-		d.writeTerminalStream(protocol.TerminalStreamData{ProjectID: projectID, TerminalID: terminalID, Data: payload})
+		d.writeTerminalStream(protocol.TerminalStreamData{ProjectID: projectID, TerminalID: terminalID, ClientID: clientID, Data: payload})
 	}
 }
 
@@ -489,18 +495,11 @@ func directServerError(code, message string, requestID string) protocol.Envelope
 
 func (d *Daemon) addDirectTerminalSubscriber(key string, subscriber *directTerminalSubscriber) {
 	d.termMu.Lock()
-	replaced := d.directTerminalConns[key]
-	d.directTerminalConns[key] = map[*directTerminalSubscriber]struct{}{
-		subscriber: {},
+	if d.directTerminalConns[key] == nil {
+		d.directTerminalConns[key] = make(map[*directTerminalSubscriber]struct{})
 	}
+	d.directTerminalConns[key][subscriber] = struct{}{}
 	d.termMu.Unlock()
-	for old := range replaced {
-		_ = old.writeJSON(map[string]string{
-			"type":   "exit",
-			"reason": "kick",
-		})
-		_ = old.conn.Close()
-	}
 }
 
 func (d *Daemon) removeDirectTerminalSubscriber(key string, subscriber *directTerminalSubscriber) {
@@ -528,6 +527,9 @@ func (d *Daemon) directTerminalSubscribers(key string) []*directTerminalSubscrib
 func (d *Daemon) broadcastDirectTerminalData(data protocol.TerminalStreamData) {
 	key := terminalKey(data.ProjectID, data.TerminalID)
 	for _, subscriber := range d.directTerminalSubscribers(key) {
+		if data.ClientID != "" && subscriber.clientID != data.ClientID {
+			continue
+		}
 		if err := subscriber.writeMessage(websocket.BinaryMessage, data.Data); err != nil {
 			d.removeDirectTerminalSubscriber(key, subscriber)
 			_ = subscriber.conn.Close()
@@ -549,6 +551,9 @@ func (d *Daemon) broadcastDirectTerminalTitle(title protocol.TerminalStreamTitle
 func (d *Daemon) broadcastDirectTerminalExit(exit protocol.TerminalStreamExit) {
 	key := terminalKey(exit.ProjectID, exit.TerminalID)
 	for _, subscriber := range d.directTerminalSubscribers(key) {
+		if exit.ClientID != "" && subscriber.clientID != exit.ClientID {
+			continue
+		}
 		_ = subscriber.writeJSON(map[string]string{"type": "exit"})
 		_ = subscriber.conn.Close()
 		d.removeDirectTerminalSubscriber(key, subscriber)

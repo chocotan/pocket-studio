@@ -9,6 +9,9 @@ user-frontend/node_modules/
 user-frontend/dist/
 user-frontend/tsconfig.tsbuildinfo
 *.log
+android-app/.gradle/
+android-app/local.properties
+android-app/**/build/
 .omo
 .tmp
 pasted*
