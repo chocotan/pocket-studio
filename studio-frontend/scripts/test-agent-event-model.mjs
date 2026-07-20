@@ -29,6 +29,22 @@ try {
   const reducer = await vite.ssrLoadModule('/src/components/studio/agent-chat/message-reducer.ts');
   const agentProtocol = await vite.ssrLoadModule('/src/lib/agent-protocol.ts');
   const chatWidgets = await vite.ssrLoadModule('/src/components/studio/agent-chat/chat-widgets.tsx');
+  const dispatchPayload = await vite.ssrLoadModule('/src/components/studio/agent-chat/dispatch-payload.ts');
+  const directACPDispatch = dispatchPayload.buildDirectACPDispatchPayload({
+    taskId: 'task-model',
+    turnId: 'turn-model',
+    workspacePath: '/workspace',
+    agent: 'codex',
+    prompt: 'keep the session model',
+    attachments: [],
+    sessionName: 'session-model',
+    modelId: 'stale-model-from-tab',
+  });
+  assert.equal(
+    'model_id' in directACPDispatch,
+    false,
+    'Direct ACP prompts must not override the WS session model with persisted tab state',
+  );
   const user = taskEvent('user', 'user.prompt', 1, 200, {
     prompt: '磁盘剩余空间多少', turn_id: 'turn-0', acpx_turn_index: 0, acpx_event_key: 'turn:0:user.prompt:0',
   });
@@ -67,6 +83,39 @@ try {
   );
 
   const state = reducer.buildMessageStateFromEvents(merged, 'task-1');
+  const imageAttachment = {
+    type: 'image', name: 'photo.png', path: 'photo.png', mime_type: 'image/png',
+  };
+  const localImagePrompt = eventModel.makeLocalUserPromptEvent(
+    'task-image', 'turn-image', 'describe this', 1, undefined, [imageAttachment],
+  );
+  const localImageMessage = reducer.buildMessageStateFromEvents([localImagePrompt], 'task-image').messages[0];
+  assert.deepEqual(
+    localImageMessage.attachments,
+    [imageAttachment],
+    'optimistic user messages must retain image attachments',
+  );
+  const imagePromptEcho = taskEvent('image-echo', 'user.prompt', 2, 201, {
+    prompt: 'describe this', turn_id: 'turn-image', attachments: [imageAttachment],
+  });
+  const echoedImageMessage = reducer.buildMessageStateFromEvents(
+    [localImagePrompt, imagePromptEcho],
+    'task-image',
+  ).messages[0];
+  assert.equal(echoedImageMessage.id, 'image-echo');
+  assert.deepEqual(
+    echoedImageMessage.attachments,
+    [imageAttachment],
+    'server prompt history must retain image attachments',
+  );
+  const legacyEcho = taskEvent('legacy-image-echo', 'user.prompt', 2, 201, {
+    prompt: 'describe this', turn_id: 'turn-image',
+  });
+  assert.deepEqual(
+    reducer.buildMessageStateFromEvents([localImagePrompt, legacyEcho], 'task-image').messages[0].attachments,
+    [imageAttachment],
+    'an older server echo must not erase optimistic image attachments',
+  );
   assert.deepEqual(
     state.messages.filter((message) => message.kind === 'assistant_message').map((message) => message.content),
     ['磁盘检查进行中。', '当前磁盘剩余 60G。'],

@@ -12,6 +12,14 @@ export interface TaskEvent {
   raw?: string;
 }
 
+export interface ChatAttachment {
+  type: "image";
+  name: string;
+  path: string;
+  mime_type: string;
+  previewUrl?: string;
+}
+
 export interface ChatMessage {
   id: string;
   seq: number;
@@ -22,6 +30,7 @@ export interface ChatMessage {
   streamId?: string;
   turnId?: string;
   toolCall?: AgentToolCallItem;
+  attachments?: ChatAttachment[];
 }
 
 export type AgentRunStatus = "idle" | "sending" | "running";

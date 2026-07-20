@@ -29,6 +29,9 @@ import {
 import {
   buildMessageStateFromEvents,
 } from "./message-reducer";
+import { imageFilesFromClipboard } from "./clipboard-images";
+import { ChatAttachmentImage } from "./chat-attachment-image";
+import { buildDirectACPDispatchPayload } from "./dispatch-payload";
 import {
   CollapsibleSection,
   Markdown,
@@ -41,15 +44,8 @@ import {
   extractSubagent,
   extractTodos,
 } from "./chat-widgets";
-import type { AgentRunStatus, ChatMessage, TaskEvent } from "./types";
+import type { AgentRunStatus, ChatAttachment, ChatMessage, TaskEvent } from "./types";
 import { postJSON } from "@/lib/api";
-
-type ChatAttachment = {
-  type: "image";
-  name: string;
-  path: string;
-  mime_type: string;
-};
 
 type QueuedPrompt = {
   prompt: string;
@@ -636,9 +632,8 @@ export function AgentChatTab({
     return "";
   }, [agentRuntime, agentKind]);
 
-  const selectedModelId = tab.agentModelId || getStoredModelId() || modelConfigOption?.currentValue || modelList.currentModelId || "";
+  const selectedModelId = modelConfigOption?.currentValue || modelList.currentModelId || tab.agentModelId || getStoredModelId() || "";
   const selectedModel = modelList.models.find((model) => model.id === selectedModelId) || modelList.models[0];
-  const selectedModelIdRef = useRef(selectedModelId);
   const showAgentModelControl = supportsModelSelection;
   const showDirectACPConfigOptions = agentRuntime === "direct_acp" && configOptions.length > 0;
   const isRunning = runStatus !== "idle";
@@ -646,10 +641,6 @@ export function AgentChatTab({
   const hasActiveBackendTurn = backendRunStartedAtMs > 0;
   const workingStartedAtMs = hasActiveBackendTurn ? backendRunStartedAtMs : localRunStartedAtMs || nowMs;
   const showHistoryLoading = historyLoading && !historyLoadedOnce;
-
-  useEffect(() => {
-    selectedModelIdRef.current = selectedModelId;
-  }, [selectedModelId]);
 
   useEffect(() => {
     if (!tab.agentModelId) {
@@ -746,7 +737,6 @@ export function AgentChatTab({
       }
     }
   }, [
-    agentKind,
     sessionId,
     tab.agentImportHistory,
     tab.id
@@ -795,7 +785,13 @@ export function AgentChatTab({
           content: dataUrl,
         });
         if (result.error) throw new Error(result.error);
-        uploaded.push({ type: "image", name: file.name || filename, path: filename, mime_type: file.type || "image/png" });
+        uploaded.push({
+          type: "image",
+          name: file.name || filename,
+          path: filename,
+          mime_type: file.type || "image/png",
+          previewUrl: dataUrl,
+        });
       }
       setAttachments((previous) => [...previous, ...uploaded]);
     } catch (err) {
@@ -850,6 +846,7 @@ export function AgentChatTab({
       promptText,
       maxSeq + 1,
       undefined,
+      promptAttachments,
     );
     setEvents((prev) => mergeTaskEvents(prev, [localUserEvent]));
     setRunStatus("sending");
@@ -871,22 +868,15 @@ export function AgentChatTab({
         runStatus,
         hasActiveBackendTurn,
       });
-      if (selectedModelIdRef.current && typeof window !== "undefined" && window.localStorage) {
-        window.localStorage.setItem(`pocket-studio-last-model::${agentRuntime}::${agentKind}`, selectedModelIdRef.current);
-      }
-
-      // Dispatch prompt task.dispatch
-      const dispatchPayload: Record<string, unknown> = {
-        task_id: activeSessionId,
-        turn_id: turnId,
-        workspace_path: workspacePath,
+      const dispatchPayload = buildDirectACPDispatchPayload({
+        taskId: activeSessionId,
+        turnId,
+        workspacePath,
         agent: agentNameForRuntime(agentKind, agentRuntime),
-        agent_runtime: agentRuntime,
         prompt: promptText,
         attachments: promptAttachments,
-        model_id: selectedModelIdRef.current
-      };
-      dispatchPayload.session_name = activeSessionName;
+        sessionName: activeSessionName,
+      });
       const dispatchEnv = {
         id: makeId("msg"),
         type: "task.dispatch",
@@ -1145,8 +1135,22 @@ export function AgentChatTab({
                 if (msg.kind === "user_prompt") {
                   rendered.push(
                     <div key={msg.id} data-message-kind="user_prompt" data-message-id={msg.id} className="flex justify-start select-text">
-                      <div className="max-w-full rounded-xl bg-primary text-primary-foreground px-3 py-1.5 text-[12px] font-medium leading-relaxed shadow-sm whitespace-pre-wrap">
-                        {msg.content}
+                      <div className="max-w-full overflow-hidden rounded-lg bg-primary text-primary-foreground shadow-sm">
+                        {msg.attachments && msg.attachments.length > 0 && (
+                          <div className="flex max-w-full flex-wrap gap-1.5 p-1.5 pb-0">
+                            {msg.attachments.map((attachment, index) => (
+                              <ChatAttachmentImage
+                                key={`${attachment.path}-${index}`}
+                                projectId={projectId}
+                                attachment={attachment}
+                                variant="message"
+                              />
+                            ))}
+                          </div>
+                        )}
+                        <div className="whitespace-pre-wrap px-3 py-1.5 text-[12px] font-medium leading-relaxed">
+                          {msg.content}
+                        </div>
                       </div>
                     </div>
                   );
@@ -1271,14 +1275,14 @@ export function AgentChatTab({
           className="relative border border-border bg-card rounded-xl shadow-sm focus-within:ring-1 focus-within:ring-primary focus-within:border-primary transition-all p-2 flex flex-col gap-1.5"
         >
           {attachments.length > 0 && (
-            <div className="flex flex-wrap gap-1 px-1 pt-0.5">
+            <div className="flex max-w-full gap-2 overflow-x-auto px-1 pt-0.5">
               {attachments.map((attachment, index) => (
-                <span key={`${attachment.path}-${index}`} className="inline-flex max-w-48 items-center gap-1 rounded border border-primary/20 bg-primary/5 px-1.5 py-1 text-[10px] text-primary/85">
-                  <span className="truncate">{attachment.name}</span>
-                  <button type="button" onClick={() => setAttachments((items) => items.filter((_, itemIndex) => itemIndex !== index))} aria-label={`移除 ${attachment.name}`}>
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
+                <ChatAttachmentImage
+                  key={`${attachment.path}-${index}`}
+                  projectId={projectId}
+                  attachment={attachment}
+                  onRemove={() => setAttachments((items) => items.filter((_, itemIndex) => itemIndex !== index))}
+                />
               ))}
             </div>
           )}
@@ -1287,7 +1291,7 @@ export function AgentChatTab({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onPaste={(event) => {
-              const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
+              const files = imageFilesFromClipboard(event.clipboardData);
               if (files.length > 0) {
                 event.preventDefault();
                 void uploadImages(files);

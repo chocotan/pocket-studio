@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:clipboard-images": "node scripts/test-clipboard-images.mjs",
     "test:event-model": "node scripts/test-agent-event-model.mjs",
     "test:online-terminal": "node scripts/check-online-terminal.mjs",
     "build:electron:linux": "npm run build && npm run package:electron:linux",

@@ -24,7 +24,7 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.nio.charset.StandardCharsets
-import kotlin.math.max
+import kotlin.math.abs
 
 class RemoteTerminalController(
     context: Context,
@@ -33,8 +33,11 @@ class RemoteTerminalController(
     private val onClosed: () -> Unit,
     private val onError: (String) -> Unit,
 ) {
-    val view = TerminalView(context, null)
+    val view = TerminalView(context, null).apply {
+        setBackgroundColor(TerminalLightPalette.backgroundArgb)
+    }
     val viewport = FrameLayout(context).apply {
+        setBackgroundColor(TerminalLightPalette.backgroundArgb)
         clipChildren = true
         clipToPadding = true
         addView(
@@ -48,14 +51,15 @@ class RemoteTerminalController(
     }
     private var socket: WebSocket? = null
     private val resizePolicy = TerminalResizePolicy()
-    private var scrollRemainder = 0f
+    private val scrollPolicy = TerminalScrollPolicy()
+    private var scrollGestureConsumed = false
+    private var cancelTermuxGesture = false
     private var controlModifier = false
     private var altModifier = false
     private var metaModifier = false
 
     private val remoteOutput = object : TerminalOutput() {
         override fun write(data: ByteArray, offset: Int, count: Int) {
-            if (isMouseReport(data, offset, count)) return
             socket?.send(data.toByteString(offset, count))
         }
 
@@ -115,7 +119,7 @@ class RemoteTerminalController(
         }
         override fun onEmulatorSet() {
             val current = session.emulator ?: return
-            RemoteTerminalEmulator.install(
+            val emulator = RemoteTerminalEmulator.install(
                 session,
                 view,
                 remoteOutput,
@@ -124,6 +128,7 @@ class RemoteTerminalController(
                 5000,
                 sessionClient,
             )
+            TerminalLightPalette.applyTo(emulator)
             connect()
         }
         override fun logError(tag: String, message: String) { Log.e(tag, message) }
@@ -144,17 +149,31 @@ class RemoteTerminalController(
 
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
             val emulator = session.emulator ?: return false
-            val rowHeight = max(1f, view.height.toFloat() / max(1, emulator.mRows))
-            scrollRemainder += distanceY / rowHeight
-            val rows = scrollRemainder.toInt()
+            if (e2.pointerCount != 1 || abs(distanceY) <= abs(distanceX)) return false
+            if (!scrollGestureConsumed) {
+                scrollGestureConsumed = true
+                cancelTermuxGesture = true
+            }
+            val rows = scrollPolicy.dragRows(
+                distanceY = distanceY,
+                rowHeight = view.height.toFloat() / emulator.mRows.coerceAtLeast(1),
+            )
             if (rows == 0) return true
-            scrollRemainder -= rows
-            val historyRows = emulator.screen.activeTranscriptRows
-            if (historyRows > 0 && !emulator.isAlternateBufferActive) {
-                view.topRow = (view.topRow + rows).coerceIn(-historyRows, 0)
-                view.onScreenUpdated()
-            } else {
-                send(if (rows < 0) "\u001b[5~" else "\u001b[6~")
+            when (scrollPolicy.mode(emulator.isAlternateBufferActive, emulator.isMouseTrackingActive)) {
+                TerminalScrollMode.Transcript -> {
+                    val historyRows = emulator.screen.activeTranscriptRows
+                    view.topRow = (view.topRow + rows).coerceIn(-historyRows, 0)
+                    view.invalidate()
+                }
+                TerminalScrollMode.MouseWheel -> {
+                    val cell = view.getColumnAndRow(e2, false)
+                    val button = if (rows < 0) 64 else 65
+                    repeat(abs(rows)) { emulator.sendMouseEvent(button, cell[0] + 1, cell[1] + 1, true) }
+                }
+                TerminalScrollMode.RemotePageKeys -> {
+                    val key = if (rows < 0) "\u001b[5~" else "\u001b[6~"
+                    repeat(abs(rows)) { send(key) }
+                }
             }
             return true
         }
@@ -166,13 +185,29 @@ class RemoteTerminalController(
         view.isFocusableInTouchMode = true
         view.attachSession(session)
         view.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                scrollPolicy.beginGesture()
+                scrollGestureConsumed = false
+                cancelTermuxGesture = false
+            }
             scrollDetector.onTouchEvent(event)
-            false
+            if (cancelTermuxGesture) {
+                MotionEvent.obtain(event).also { cancelEvent ->
+                    cancelEvent.action = MotionEvent.ACTION_CANCEL
+                    view.onTouchEvent(cancelEvent)
+                    cancelEvent.recycle()
+                }
+                cancelTermuxGesture = false
+            }
+            val consumed = scrollGestureConsumed
+            if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                scrollGestureConsumed = false
+                cancelTermuxGesture = false
+            }
+            consumed
         }
-        view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            pinInitialViewportHeight()
-            sendResizeIfChanged()
-        }
+        viewport.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> fitStableViewportHeight() }
+        view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> sendResizeIfChanged() }
     }
 
     private fun connect() {
@@ -201,27 +236,23 @@ class RemoteTerminalController(
         view.requestFocus()
         (view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
     }
-    fun clear() { session.reset(); view.onScreenUpdated() }
+    fun clear() {
+        session.reset()
+        session.emulator?.let(TerminalLightPalette::applyTo)
+        view.onScreenUpdated()
+    }
     fun close() { socket?.close(1000, "leave terminal"); socket = null; session.finishIfRunning() }
 
-    private fun pinInitialViewportHeight() {
-        if (view.height <= 0) return
-        val fixedHeight = resizePolicy.fixedViewportHeight(view.height)
-        val params = view.layoutParams as? FrameLayout.LayoutParams ?: return
-        if (params.height == fixedHeight) return
-        params.height = fixedHeight
-        params.gravity = Gravity.BOTTOM
-        view.layoutParams = params
-    }
-
-    private fun isMouseReport(data: ByteArray, offset: Int, count: Int): Boolean {
-        if (count < 3 || data[offset] != 0x1b.toByte() || data[offset + 1] != '['.code.toByte()) return false
-        if (data[offset + 2] == 'M'.code.toByte()) return count == 6
-        if (data[offset + 2] != '<'.code.toByte()) return false
-        val finalByte = data[offset + count - 1]
-        if (finalByte != 'M'.code.toByte() && finalByte != 'm'.code.toByte()) return false
-        return (offset + 3 until offset + count - 1).all { index ->
-            data[index] in '0'.code.toByte()..'9'.code.toByte() || data[index] == ';'.code.toByte()
+    private fun fitStableViewportHeight() {
+        if (viewport.height <= 0) return
+        resizePolicy.stableViewportHeight(viewport.height)
+        view.post {
+            val stableHeight = resizePolicy.stableViewportHeight(viewport.height)
+            val params = view.layoutParams as? FrameLayout.LayoutParams ?: return@post
+            if (params.height == stableHeight) return@post
+            params.height = stableHeight
+            params.gravity = Gravity.BOTTOM
+            view.layoutParams = params
         }
     }
 

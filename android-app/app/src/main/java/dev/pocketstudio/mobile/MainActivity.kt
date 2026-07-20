@@ -1,10 +1,13 @@
 package dev.pocketstudio.mobile
 
+import android.app.Activity
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.graphics.Color as AndroidColor
 import android.text.method.LinkMovementMethod
+import android.util.Base64
 import android.util.TypedValue
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -15,6 +18,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -36,10 +40,16 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -54,14 +64,27 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.core.view.WindowCompat
 import io.noties.markwon.Markwon
 import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.core.CorePlugin
 import io.noties.markwon.core.MarkwonTheme
 import io.noties.markwon.linkify.LinkifyPlugin
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.DateFormat
 import java.util.Date
 import kotlin.math.roundToInt
+
+private val TerminalBackgroundColor = Color(TerminalLightPalette.backgroundArgb)
+private val TerminalSurfaceColor = Color(TerminalLightPalette.surfaceArgb)
+private val TerminalKeycapColor = Color(TerminalLightPalette.keycapArgb)
+private val TerminalBorderColor = Color(TerminalLightPalette.borderArgb)
+private val TerminalDividerColor = Color(TerminalLightPalette.dividerArgb)
+private val TerminalForegroundColor = Color(TerminalLightPalette.foregroundArgb)
+private val TerminalMutedForegroundColor = Color(TerminalLightPalette.mutedForegroundArgb)
+private val TerminalAccentColor = Color(TerminalLightPalette.accentArgb)
+private val TerminalOnAccentColor = Color(TerminalLightPalette.onAccentArgb)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -235,6 +258,12 @@ class MainActivity : ComponentActivity() {
     }
     val listState = rememberLazyListState()
     val task = state.selectedTask
+    val headerDetail = listOf(
+        state.selectedProject?.name.orEmpty(),
+        "ACP",
+        task?.agent.orEmpty(),
+        task?.terminalType.orEmpty(),
+    ).filter(String::isNotBlank).joinToString(" · ")
     LaunchedEffect(state.chatItems.size, state.running) {
         val totalItems = state.chatItems.size + if (state.running) 1 else 0
         if (totalItems > 0) listState.animateScrollToItem(totalItems - 1)
@@ -243,16 +272,15 @@ class MainActivity : ComponentActivity() {
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             Column(Modifier.background(MaterialTheme.colorScheme.surface).statusBarsPadding()) {
-                Row(Modifier.fillMaxWidth().height(60.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = vm::back) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") }
-                    Column(Modifier.weight(1f)) {
-                        Text(task?.sessionName?.ifBlank { "ACP 对话" } ?: "ACP 对话", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(state.selectedProject?.name.orEmpty(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                            Box(Modifier.padding(horizontal = 6.dp).size(3.dp).background(MaterialTheme.colorScheme.outlineVariant, CircleShape))
-                            Text("ACP · ${task?.agent.orEmpty()} · ${task?.terminalType.orEmpty()}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, fontFamily = MonoFamily)
-                        }
-                    }
+                    CompactHeaderText(
+                        title = task?.sessionName?.ifBlank { "ACP 对话" } ?: "ACP 对话",
+                        detail = headerDetail,
+                        detailColor = MaterialTheme.colorScheme.primary,
+                        detailFontFamily = MonoFamily,
+                        modifier = Modifier.weight(1f),
+                    )
                     IconButton(onClick = { showTypography = true }) { Icon(Icons.Rounded.TextFields, "调整字体") }
                     Box(
                         Modifier.padding(end = 16.dp).size(9.dp)
@@ -272,12 +300,21 @@ class MainActivity : ComponentActivity() {
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     attachments.forEachIndexed { index, attachment ->
-                        InputChip(
-                            selected = true,
-                            onClick = { attachments = attachments.filterIndexed { itemIndex, _ -> itemIndex != index } },
-                            label = { Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            trailingIcon = { Icon(Icons.Rounded.Close, "移除", Modifier.size(16.dp)) },
-                        )
+                        Box(Modifier.size(76.dp)) {
+                            ChatAttachmentImage(
+                                dataUrl = attachment.dataUrl,
+                                name = attachment.name,
+                                modifier = Modifier.matchParentSize().clip(RoundedCornerShape(8.dp)),
+                            )
+                            IconButton(
+                                onClick = { attachments = attachments.filterIndexed { itemIndex, _ -> itemIndex != index } },
+                                modifier = Modifier.align(Alignment.TopEnd).padding(3.dp).size(24.dp),
+                                colors = IconButtonDefaults.iconButtonColors(
+                                    containerColor = Color.Black.copy(alpha = 0.62f),
+                                    contentColor = Color.White,
+                                ),
+                            ) { Icon(Icons.Rounded.Close, "移除", Modifier.size(15.dp)) }
+                        }
                     }
                 }
                 Row(Modifier.fillMaxWidth().widthIn(max = 760.dp).align(Alignment.CenterHorizontally).padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.Bottom) {
@@ -310,7 +347,7 @@ class MainActivity : ComponentActivity() {
         else if (state.chatItems.isEmpty() && !state.running) EmptyState(Icons.Rounded.AutoAwesome, "开始一段对话", "消息和工具调用会实时显示在这里", Modifier.padding(padding))
         else Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
             LazyColumn(Modifier.fillMaxSize().widthIn(max = 760.dp), state = listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(state.chatItems, key = { it.id }) { ChatBubble(it, state.chatFontSize) }
+                items(state.chatItems, key = { it.id }) { ChatBubble(it, state.chatFontSize, state.chatImageData) }
                 if (state.running) item { RunningIndicator() }
             }
         }
@@ -321,36 +358,77 @@ class MainActivity : ComponentActivity() {
 @Composable private fun TerminalScreen(state: AppState, vm: MainViewModel) {
     var controller by remember(state.selectedTerminal?.id) { mutableStateOf<RemoteTerminalController?>(null) }
     val terminal = state.selectedTerminal
+    var showVirtualKeyboard by rememberSaveable(terminal?.id) { mutableStateOf(true) }
+    val headerDetail = listOf(terminal?.type.orEmpty(), state.selectedProject?.name.orEmpty())
+        .filter(String::isNotBlank)
+        .joinToString(" · ")
+    val activity = LocalContext.current as? Activity
+    val hostView = LocalView.current
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) vm.uploadTerminalImage(uri) { pasteText -> controller?.send(pasteText) }
+    }
+    DisposableEffect(activity, hostView) {
+        val insetsController = activity?.window?.let { WindowCompat.getInsetsController(it, hostView) }
+        if (insetsController == null) {
+            onDispose { }
+        } else {
+            val previousLightStatusBars = insetsController.isAppearanceLightStatusBars
+            val previousLightNavigationBars = insetsController.isAppearanceLightNavigationBars
+            insetsController.isAppearanceLightStatusBars = true
+            insetsController.isAppearanceLightNavigationBars = true
+            onDispose {
+                insetsController.isAppearanceLightStatusBars = previousLightStatusBars
+                insetsController.isAppearanceLightNavigationBars = previousLightNavigationBars
+            }
+        }
     }
     DisposableEffect(terminal?.id) {
         onDispose { controller?.close() }
     }
     Scaffold(
-        containerColor = Color(0xFF0B100F),
+        containerColor = TerminalBackgroundColor,
         topBar = {
-            Column(Modifier.background(MaterialTheme.colorScheme.surface).statusBarsPadding()) {
-                Row(Modifier.fillMaxWidth().height(60.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = vm::back) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") }
-                    Column(Modifier.weight(1f)) {
-                        Text(terminal?.title ?: "终端", style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${terminal?.type.orEmpty()} · ${state.selectedProject?.name.orEmpty()}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, fontFamily = MonoFamily)
+            Surface(color = TerminalSurfaceColor, contentColor = TerminalForegroundColor) {
+                Column(Modifier.statusBarsPadding()) {
+                    Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = vm::back) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") }
+                        CompactHeaderText(
+                            title = terminal?.title ?: "终端",
+                            detail = headerDetail,
+                            detailColor = TerminalAccentColor,
+                            detailFontFamily = MonoFamily,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(onClick = { imagePicker.launch("image/*") }, enabled = !state.loading) {
+                            Icon(Icons.Rounded.AddPhotoAlternate, "上传图片")
+                        }
+                        IconButton(onClick = { controller?.clear() }) { Icon(Icons.Rounded.DeleteSweep, "清屏") }
+                        IconButton(
+                            onClick = { showVirtualKeyboard = !showVirtualKeyboard },
+                            modifier = Modifier.semantics {
+                                stateDescription = if (showVirtualKeyboard) "虚拟键盘已显示" else "虚拟键盘已隐藏"
+                            },
+                        ) {
+                            Icon(
+                                if (showVirtualKeyboard) Icons.Rounded.KeyboardHide else Icons.Rounded.Keyboard,
+                                if (showVirtualKeyboard) "隐藏虚拟键盘" else "显示虚拟键盘",
+                            )
+                        }
+                        Box(Modifier.padding(end = 16.dp).size(9.dp).background(if (state.connected) TerminalAccentColor else TerminalMutedForegroundColor, CircleShape))
                     }
-                    IconButton(onClick = { imagePicker.launch("image/*") }, enabled = !state.loading) {
-                        Icon(Icons.Rounded.AddPhotoAlternate, "上传图片")
-                    }
-                    IconButton(onClick = { controller?.clear() }) { Icon(Icons.Rounded.DeleteSweep, "清屏") }
-                    Box(Modifier.padding(end = 16.dp).size(9.dp).background(if (state.connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, CircleShape))
+                    HorizontalDivider(color = TerminalDividerColor)
+                    if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp), color = TerminalAccentColor)
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp))
             }
         },
         bottomBar = {
-            Column(Modifier.background(MaterialTheme.colorScheme.surface).imePadding().navigationBarsPadding()) {
-                ErrorText(state.error, Modifier.padding(horizontal = 12.dp))
-                TerminalVirtualKeyboard(controller)
+            if (showVirtualKeyboard || state.error.isNotBlank()) {
+                Surface(color = TerminalSurfaceColor, contentColor = TerminalForegroundColor) {
+                    Column(Modifier.imePadding().navigationBarsPadding()) {
+                        ErrorText(state.error, Modifier.padding(horizontal = 12.dp))
+                        if (showVirtualKeyboard) TerminalVirtualKeyboard(controller)
+                    }
+                }
             }
         },
     ) { padding ->
@@ -362,7 +440,7 @@ class MainActivity : ComponentActivity() {
                         .also { controller = it }.viewport
                 },
             )
-            if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter).height(2.dp))
+            if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter).height(2.dp), color = TerminalAccentColor)
         }
     }
 }
@@ -371,6 +449,13 @@ class MainActivity : ComponentActivity() {
     var ctrl by remember { mutableStateOf(false) }
     var alt by remember { mutableStateOf(false) }
     var meta by remember { mutableStateOf(false) }
+    DisposableEffect(controller) {
+        onDispose {
+            controller?.setControlModifier(false)
+            controller?.setAltModifier(false)
+            controller?.setMetaModifier(false)
+        }
+    }
     Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 5.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             TerminalKeycap("Esc", 1f) { controller?.send("\u001b") }
@@ -406,29 +491,66 @@ class MainActivity : ComponentActivity() {
 @Composable private fun RowScope.TerminalKeycap(label: String, weight: Float, active: Boolean = false, onClick: () -> Unit) {
     Surface(
         modifier = Modifier.weight(weight).height(43.dp).clickable(onClick = onClick), shape = RoundedCornerShape(5.dp),
-        color = if (active) MaterialTheme.colorScheme.primary else Color(0xFF252D2B),
-        border = BorderStroke(1.dp, if (active) MaterialTheme.colorScheme.primary else Color(0xFF45514D)),
-    ) { Box(contentAlignment = Alignment.Center) { Text(label, color = if (active) MaterialTheme.colorScheme.onPrimary else Color(0xFFD7E2DE), fontFamily = MonoFamily, fontSize = 11.sp, maxLines = 1) } }
+        color = if (active) TerminalAccentColor else TerminalKeycapColor,
+        border = BorderStroke(1.dp, if (active) TerminalAccentColor else TerminalBorderColor),
+    ) { Box(contentAlignment = Alignment.Center) { Text(label, color = if (active) TerminalOnAccentColor else TerminalForegroundColor, fontFamily = MonoFamily, fontSize = 11.sp, maxLines = 1) } }
 }
 
 @Composable private fun RowScope.TerminalIconKey(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, weight: Float, onClick: () -> Unit) {
     Surface(
         modifier = Modifier.weight(weight).height(43.dp).clickable(onClick = onClick), shape = RoundedCornerShape(5.dp),
-        color = Color(0xFF252D2B), border = BorderStroke(1.dp, Color(0xFF45514D)),
-    ) { Box(contentAlignment = Alignment.Center) { Icon(icon, description, tint = Color(0xFFD7E2DE), modifier = Modifier.size(20.dp)) } }
+        color = TerminalKeycapColor, border = BorderStroke(1.dp, TerminalBorderColor),
+    ) { Box(contentAlignment = Alignment.Center) { Icon(icon, description, tint = TerminalForegroundColor, modifier = Modifier.size(20.dp)) } }
 }
 
+@Composable private fun CompactHeaderText(
+    title: String,
+    detail: String,
+    detailColor: Color,
+    modifier: Modifier = Modifier,
+    detailFontFamily: FontFamily? = null,
+) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1.05f, fill = false),
+        )
+        if (detail.isNotBlank()) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                detail,
+                style = MaterialTheme.typography.labelSmall,
+                color = detailColor,
+                fontFamily = detailFontFamily,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+        }
+    }
+}
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun PageScaffold(title: String, subtitle: String, onBack: () -> Unit, loading: Boolean = false, actions: @Composable RowScope.() -> Unit = {}, floating: @Composable () -> Unit = {}, content: @Composable (PaddingValues) -> Unit) {
     Scaffold(containerColor = MaterialTheme.colorScheme.background, floatingActionButton = floating, topBar = {
-        Column {
-            TopAppBar(
-                title = { Column { Text(title, style = MaterialTheme.typography.headlineSmall); Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) } },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") } },
-                actions = actions, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
-            )
-            if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp))
+        Surface(color = MaterialTheme.colorScheme.surface, contentColor = MaterialTheme.colorScheme.onSurface) {
+            Column(Modifier.statusBarsPadding()) {
+                Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") }
+                    CompactHeaderText(
+                        title = title,
+                        detail = subtitle,
+                        detailColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    actions()
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().height(2.dp))
+            }
         }
     }) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
@@ -462,7 +584,7 @@ class MainActivity : ComponentActivity() {
     ) { Icon(icon, null, tint = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp)) }
 }
 
-@Composable private fun ChatBubble(item: ChatItem, fontSize: Float) {
+@Composable private fun ChatBubble(item: ChatItem, fontSize: Float, imageData: Map<String, String>) {
     val user = item.role == "user"
     val tool = item.kind == "tool"
     if (tool) {
@@ -482,11 +604,71 @@ class MainActivity : ComponentActivity() {
             color = when { user -> MaterialTheme.colorScheme.onSurface; item.kind == "error" -> MaterialTheme.colorScheme.errorContainer; else -> Color.Transparent },
         ) {
             Column(Modifier.padding(horizontal = if (user) 13.dp else 0.dp, vertical = if (user) 10.dp else 0.dp)) {
+                if (user && item.attachments.isNotEmpty()) {
+                    Row(
+                        Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        item.attachments.forEach { attachment ->
+                            ChatAttachmentImage(
+                                dataUrl = attachment.dataUrl.ifBlank { imageData[attachment.path].orEmpty() },
+                                name = attachment.name,
+                                modifier = Modifier.size(220.dp).clip(RoundedCornerShape(6.dp)),
+                                contentScale = ContentScale.Fit,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
                 if (user) Text(item.text, color = MaterialTheme.colorScheme.surface, fontSize = fontSize.sp, lineHeight = (fontSize * 1.42f).sp)
                 else MarkdownText(item.text, fontSize)
             }
         }
     }
+}
+
+@Composable private fun ChatAttachmentImage(
+    dataUrl: String,
+    name: String,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Crop,
+) {
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, key1 = dataUrl) {
+        value = if (dataUrl.isBlank()) null else withContext(Dispatchers.Default) {
+            decodeDataUrlBitmap(dataUrl)?.asImageBitmap()
+        }
+    }
+    Box(modifier.background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!,
+                contentDescription = name,
+                modifier = Modifier.matchParentSize(),
+                contentScale = contentScale,
+            )
+        } else {
+            Icon(
+                Icons.Rounded.Image,
+                contentDescription = name,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(28.dp),
+            )
+        }
+    }
+}
+
+private fun decodeDataUrlBitmap(dataUrl: String): android.graphics.Bitmap? {
+    val marker = ";base64,"
+    val markerIndex = dataUrl.indexOf(marker)
+    if (!dataUrl.startsWith("data:image/") || markerIndex < 0) return null
+    val bytes = runCatching { Base64.decode(dataUrl.substring(markerIndex + marker.length), Base64.DEFAULT) }.getOrNull()
+        ?: return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    var sampleSize = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > 2048) sampleSize *= 2
+    val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
 }
 
 @Composable private fun ToolBubble(item: ChatItem, fontSize: Float) {

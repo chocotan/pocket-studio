@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -33,34 +34,42 @@ import (
 type Daemon struct {
 	cfg Config
 
-	mu                      sync.Mutex
-	tasks                   map[string]*runningTask
-	history                 map[string]protocol.TaskRecord
-	projects                map[string]protocol.Project
-	projectStates           map[string]json.RawMessage
-	send                    chan protocol.Envelope
-	sendBinary              chan []byte
-	terminalBinary          bool
-	termMu                  sync.Mutex
-	terminalPTYs            map[string]*runningPTY
-	directTerminalConns     map[string]map[*directTerminalSubscriber]struct{}
-	directAgentChatConns    map[string]map[*directAgentChatSubscriber]struct{}
-	directAgentChatProjects map[string]string
-	hookURL                 string
-	hookToken               string
-	hookAlerts              map[string]time.Time
-	directACP               map[string]*directACPSession
-	directACPStarts         map[string]*directACPStart
-	startingTasks           map[string]struct{}
-	taskDispatchMu          map[string]*sync.Mutex
-	directACPStoreErr       error
-	shuttingDown            bool
+	mu                            sync.Mutex
+	tasks                         map[string]*runningTask
+	history                       map[string]protocol.TaskRecord
+	projects                      map[string]protocol.Project
+	projectStates                 map[string]json.RawMessage
+	send                          chan protocol.Envelope
+	sendBinary                    chan []byte
+	terminalBinary                bool
+	termMu                        sync.Mutex
+	terminalPTYs                  map[string]*runningPTY
+	directTerminalConns           map[string]map[*directTerminalSubscriber]struct{}
+	directAgentChatConns          map[string]map[*directAgentChatSubscriber]struct{}
+	directAgentChatProjects       map[string]string
+	hookURL                       string
+	hookToken                     string
+	hookAlerts                    map[string]time.Time
+	directACP                     map[string]*directACPSession
+	directACPStarts               map[string]*directACPStart
+	startingTasks                 map[string]struct{}
+	taskDispatchMu                map[string]*sync.Mutex
+	directACPStoreErr             error
+	directACPStoreWriteMu         sync.Mutex
+	directACPStoreTimer           *time.Timer
+	directACPStoreTimerID         uint64
+	directACPStoreGeneration      uint64
+	directACPStoreSavedGeneration uint64
+	directACPStoreDebounce        time.Duration
+	directACPStoreWrite           func([]byte) error
+	shuttingDown                  bool
 }
 
 const (
-	reconnectInitialDelay = time.Second
-	reconnectMaxDelay     = 5 * time.Minute
-	reconnectStableAfter  = 30 * time.Second
+	reconnectInitialDelay       = time.Second
+	reconnectMaxDelay           = 5 * time.Minute
+	reconnectStableAfter        = 30 * time.Second
+	directACPStoreDebounceDelay = time.Second
 )
 
 type runningTask struct {
@@ -123,6 +132,7 @@ func New(cfg Config) *Daemon {
 		directACPStarts:         make(map[string]*directACPStart),
 		startingTasks:           make(map[string]struct{}),
 		taskDispatchMu:          make(map[string]*sync.Mutex),
+		directACPStoreDebounce:  directACPStoreDebounceDelay,
 	}
 }
 
@@ -214,6 +224,14 @@ func (d *Daemon) shutdownPersistentSessions() {
 	d.directACP = make(map[string]*directACPSession)
 	d.startingTasks = make(map[string]struct{})
 	d.mu.Unlock()
+	defer func() {
+		if err := d.flushDirectACPStore(); err != nil {
+			log.Printf("flush direct acp sessions after shutdown: %v", err)
+		}
+	}()
+	if err := d.flushDirectACPStore(); err != nil {
+		log.Printf("flush direct acp sessions during shutdown: %v", err)
+	}
 	for _, task := range tasks {
 		if task != nil && task.cancel != nil {
 			task.
@@ -590,7 +608,6 @@ func (d *Daemon) loadDirectACPStore() error {
 		return err
 	}
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.directACPStoreErr = nil
 	changed := false
 	for _, record := range store.Tasks {
@@ -605,9 +622,13 @@ func (d *Daemon) loadDirectACPStore() error {
 		d.history[record.TaskID] = record
 	}
 	if changed {
-		return d.saveDirectACPStoreLocked()
+		d.markDirectACPStoreDirtyLocked()
 	}
-	return nil
+	d.mu.Unlock()
+	if !changed {
+		return nil
+	}
+	return d.flushDirectACPStore()
 }
 
 func restoreInterruptedTaskRecord(record protocol.TaskRecord) (protocol.TaskRecord, bool) {
@@ -658,29 +679,163 @@ func isTerminalTaskEventType(eventType string) bool {
 	}
 }
 
+// saveDirectACPStoreLocked keeps the legacy locked-caller contract used by a
+// few migration tests. Production mutations should mark the store dirty and
+// let the debounced saver flush it.
 func (d *Daemon) saveDirectACPStoreLocked() error {
-	if d.directACPStoreErr != nil {
-		return fmt.Errorf("refusing to overwrite unreadable direct ACP session store: %w", d.directACPStoreErr)
+	d.markDirectACPStoreDirtyLocked()
+	d.mu.Unlock()
+	err := d.flushDirectACPStore()
+	d.mu.Lock()
+	return err
+}
+
+func (d *Daemon) markDirectACPStoreDirtyLocked() {
+	d.directACPStoreGeneration++
+	if d.shuttingDown {
+		return
 	}
+	d.scheduleDirectACPStoreSaveLocked()
+}
+
+func (d *Daemon) scheduleDirectACPStoreSaveLocked() {
+	if d.directACPStoreTimer != nil {
+		d.directACPStoreTimer.Stop()
+	}
+	d.directACPStoreTimerID++
+	timerID := d.directACPStoreTimerID
+	delay := d.directACPStoreDebounce
+	if delay <= 0 {
+		delay = directACPStoreDebounceDelay
+	}
+	d.directACPStoreTimer = time.AfterFunc(delay, func() {
+		d.flushDebouncedDirectACPStore(timerID)
+	})
+}
+
+func (d *Daemon) flushDebouncedDirectACPStore(timerID uint64) {
+	d.mu.Lock()
+	if timerID != d.directACPStoreTimerID {
+		d.mu.Unlock()
+		return
+	}
+	d.directACPStoreTimer = nil
+	d.mu.Unlock()
+	if err := d.flushDirectACPStore(); err != nil {
+		log.Printf("save direct acp sessions: %v", err)
+	}
+}
+
+func (d *Daemon) cancelDirectACPStoreTimerLocked() {
+	if d.directACPStoreTimer != nil {
+		d.directACPStoreTimer.Stop()
+		d.directACPStoreTimer = nil
+	}
+	d.directACPStoreTimerID++
+}
+
+func (d *Daemon) flushDirectACPStore() error {
+	d.directACPStoreWriteMu.Lock()
+	defer d.directACPStoreWriteMu.Unlock()
+
+	d.mu.Lock()
+	d.cancelDirectACPStoreTimerLocked()
+	generation := d.directACPStoreGeneration
+	if generation == d.directACPStoreSavedGeneration {
+		d.mu.Unlock()
+		return nil
+	}
+	if d.directACPStoreErr != nil {
+		err := fmt.Errorf("refusing to overwrite unreadable direct ACP session store: %w", d.directACPStoreErr)
+		d.mu.Unlock()
+		return err
+	}
+	store := d.directACPStoreSnapshotLocked()
+	writeStore := d.directACPStoreWrite
+	d.mu.Unlock()
+
+	raw, err := marshalDirectACPStore(store)
+	if err == nil {
+		if writeStore != nil {
+			err = writeStore(raw)
+		} else {
+			err = writeFileAtomic(daemonDirectACPSessionsPath(), raw, 0o600)
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	if generation > d.directACPStoreSavedGeneration {
+		d.directACPStoreSavedGeneration = generation
+	}
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *Daemon) directACPStoreSnapshotLocked() directACPStore {
 	tasks := make([]protocol.TaskRecord, 0)
 	for _, record := range d.history {
 		if !isDirectACPRecord(record) {
 			continue
 		}
-		record.Events = normalizedTaskHistoryEvents(record)
+		tasks = append(tasks, cloneTaskRecord(record))
+	}
+	return directACPStore{Version: 1, Tasks: tasks}
+}
+
+func cloneTaskRecord(record protocol.TaskRecord) protocol.TaskRecord {
+	if len(record.Events) == 0 {
+		return record
+	}
+	record.Events = append([]protocol.TaskEvent(nil), record.Events...)
+	for index := range record.Events {
+		record.Events[index].Data = append(json.RawMessage(nil), record.Events[index].Data...)
+		record.Events[index].Raw = append(json.RawMessage(nil), record.Events[index].Raw...)
+	}
+	return record
+}
+
+func marshalDirectACPStore(store directACPStore) ([]byte, error) {
+	for index := range store.Tasks {
+		record := &store.Tasks[index]
+		record.Events = normalizedTaskHistoryEvents(*record)
+		for eventIndex := range record.Events {
+			stripRedundantDirectACPEventRaw(&record.Events[eventIndex])
+		}
 		if record.Status == "running" || record.Status == "stopping" {
 			record.Status = "interrupted"
 		}
-		tasks = append(tasks, record)
 	}
-	sort.Slice(tasks, func(i, j int) bool {
-		return tasks[i].UpdatedAt > tasks[j].UpdatedAt
+	sort.Slice(store.Tasks, func(i, j int) bool {
+		return store.Tasks[i].UpdatedAt > store.Tasks[j].UpdatedAt
 	})
-	raw, err := json.MarshalIndent(directACPStore{Version: 1, Tasks: tasks}, "", "  ")
+	raw, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return writeFileAtomic(daemonDirectACPSessionsPath(), append(raw, '\n'), 0o600)
+	return append(raw, '\n'), nil
+}
+
+func stripRedundantDirectACPEventRaw(event *protocol.TaskEvent) {
+	if len(event.Data) == 0 {
+		return
+	}
+	var data map[string]any
+	if err := json.Unmarshal(event.Data, &data); err != nil || data == nil {
+		return
+	}
+	switch event.EventType {
+	case "assistant.message", "assistant.thinking":
+		if _, ok := data["text"]; ok {
+			event.Raw = nil
+		}
+	case "tool.call", "tool.output":
+		if stringField(data, "tool_use_id", "toolCallId", "tool_call_id", "id") != "" {
+			event.Raw = nil
+		}
+	}
 }
 
 func isDirectACPRecord(record protocol.TaskRecord) bool {
@@ -2435,8 +2590,13 @@ func (d *Daemon) readWorkspaceFile(request protocol.WorkspaceReadRequest) {
 		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: "cannot read directory"})
 		return
 	}
-	if info.Size() > 1024*1024 {
-		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: "file is larger than 1MB"})
+	readLimit := workspaceFileReadLimit(target)
+	if info.Size() > readLimit {
+		limitLabel := "1 MiB"
+		if readLimit > 1024*1024 {
+			limitLabel = "20 MiB"
+		}
+		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: "file is larger than " + limitLabel})
 		return
 	}
 	content, err := os.ReadFile(target)
@@ -2445,6 +2605,18 @@ func (d *Daemon) readWorkspaceFile(request protocol.WorkspaceReadRequest) {
 		return
 	}
 	d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Content: string(content)})
+}
+
+func workspaceFileReadLimit(path string) int64 {
+	const (
+		maxTextSize  = 1 << 20
+		maxImageSize = 20 << 20
+	)
+	mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if strings.HasPrefix(mimeType, "image/") {
+		return maxImageSize
+	}
+	return maxTextSize
 }
 
 func (d *Daemon) writeWorkspaceFile(request protocol.WorkspaceWriteRequest) {
@@ -3103,19 +3275,123 @@ func (d *Daemon) emitTaskEventWithNextSequence(taskID, eventType string, data an
 	record.UpdatedAt = now
 	record.Events = upsertTaskEvent(record.Events, event)
 	d.history[taskID] = record
-	if isDirectACPRecord(record) {
-		if err := d.saveDirectACPStoreLocked(); err != nil {
-			log.Printf("save direct acp sessions: %v", err)
-		}
+	directACPRecord := isDirectACPRecord(record)
+	if directACPRecord {
+		d.markDirectACPStoreDirtyLocked()
 	}
 	d.mu.Unlock()
 
 	d.sendTaskEvent(event)
 	d.maybeSendAgentCompletionAlert(record, event)
+	if directACPRecord && shouldFlushDirectACPStoreForEvent(event.EventType) {
+		if err := d.flushDirectACPStore(); err != nil {
+			log.Printf("flush direct acp sessions after %s: %v", event.EventType, err)
+		}
+	}
 }
 
 func upsertTaskEvent(events []protocol.TaskEvent, event protocol.TaskEvent) []protocol.TaskEvent {
+	key := taskEventUpsertKey(event)
+	if key == "" {
+		return append(events, event)
+	}
+	for index := len(events) - 1; index >= 0; index-- {
+		if taskEventUpsertKey(events[index]) != key {
+			continue
+		}
+		existing := events[index]
+		event.EventID = existing.EventID
+		event.Data = mergeAppendedTaskEventData(existing, event)
+		next := append([]protocol.TaskEvent(nil), events...)
+		next[index] = event
+		return next
+	}
 	return append(events, event)
+}
+
+func taskEventUpsertKey(event protocol.TaskEvent) string {
+	data := taskEventDataMap(event)
+	if data == nil {
+		return ""
+	}
+	if key := stringField(data, "acpx_event_key", "acpxEventKey"); key != "" {
+		switch event.EventType {
+		case "assistant.message", "assistant.thinking", "tool.call", "tool.output":
+			return "event:" + key
+		}
+	}
+	switch event.EventType {
+	case "assistant.message", "assistant.thinking":
+		if streamID := stringField(data, "stream_id", "streamId"); streamID != "" {
+			return event.EventType + ":stream:" + streamID
+		}
+	case "tool.call", "tool.output":
+		if toolID := stringField(data, "tool_use_id", "toolCallId", "tool_call_id", "id"); toolID != "" {
+			return event.EventType + ":tool:" + toolID
+		}
+		if streamID := stringField(data, "stream_id", "streamId"); streamID != "" {
+			return event.EventType + ":stream:" + streamID
+		}
+	}
+	return ""
+}
+
+func mergeAppendedTaskEventData(existing, event protocol.TaskEvent) json.RawMessage {
+	incoming := taskEventDataMap(protocol.TaskEvent{Data: event.Data})
+	if incoming == nil {
+		return event.Data
+	}
+	appendValue, _ := incoming["append"].(bool)
+	if !appendValue {
+		return event.Data
+	}
+	previous := taskEventDataMap(protocol.TaskEvent{Data: existing.Data})
+	if previous == nil {
+		return event.Data
+	}
+	field := "output"
+	if event.EventType == "assistant.message" || event.EventType == "assistant.thinking" {
+		field = "text"
+	}
+	merged, ok := appendTaskEventValue(previous[field], incoming[field])
+	if !ok {
+		return event.Data
+	}
+	incoming[field] = merged
+	incoming["append"] = false
+	raw, err := json.Marshal(incoming)
+	if err != nil {
+		return event.Data
+	}
+	return raw
+}
+
+func appendTaskEventValue(previous, incoming any) (any, bool) {
+	switch next := incoming.(type) {
+	case string:
+		prior, ok := previous.(string)
+		if !ok {
+			return nil, false
+		}
+		return prior + next, true
+	case []any:
+		prior, ok := previous.([]any)
+		if !ok {
+			return nil, false
+		}
+		return append(append([]any(nil), prior...), next...), true
+	default:
+		return nil, false
+	}
+}
+
+func shouldFlushDirectACPStoreForEvent(eventType string) bool {
+	switch eventType {
+	case "task.completed", "task.failed", "task.killed", "task.stopped":
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Daemon) emitTaskEvent(taskID, eventType string, sequence int64, data any, raw json.RawMessage) {
@@ -3134,8 +3410,13 @@ func (d *Daemon) emitTaskEvent(taskID, eventType string, sequence int64, data an
 		Data:      dataRaw,
 		Raw:       raw,
 	}
-	d.recordTaskEvent(event)
+	flushStore := d.recordTaskEvent(event)
 	d.sendTaskEvent(event)
+	if flushStore {
+		if err := d.flushDirectACPStore(); err != nil {
+			log.Printf("flush direct acp sessions after %s: %v", event.EventType, err)
+		}
+	}
 }
 
 func (d *Daemon) sendTaskEvent(event protocol.TaskEvent) {
@@ -3168,7 +3449,7 @@ func injectUniqueFields(data any, seq int64) any {
 	return data
 }
 
-func userPromptTaskEvent(taskID, turnID, prompt string, timestamp int64, sequence int64, turnIndex int) protocol.TaskEvent {
+func userPromptTaskEvent(taskID, turnID, prompt string, timestamp int64, sequence int64, turnIndex int, attachments []protocol.TaskAttachment) protocol.TaskEvent {
 	_ = turnIndex
 	prompt = strings.TrimSpace(prompt)
 	if taskID == "" || prompt == "" {
@@ -3177,6 +3458,9 @@ func userPromptTaskEvent(taskID, turnID, prompt string, timestamp int64, sequenc
 	data := map[string]any{"prompt": prompt}
 	if turnID != "" {
 		data["turn_id"] = turnID
+	}
+	if len(attachments) > 0 {
+		data["attachments"] = attachments
 	}
 	dataRaw, _ := json.Marshal(data)
 	if timestamp == 0 {
@@ -3199,7 +3483,7 @@ func normalizedTaskHistoryEvents(record protocol.TaskRecord) []protocol.TaskEven
 		return events
 	}
 	turnID, turnIndex := historyPromptTurnMetadata(record.Events, record.AgentRuntime)
-	promptEvent := userPromptTaskEvent(record.TaskID, turnID, record.Prompt, firstNonZero(record.StartedAt, record.UpdatedAt, protocolNow()), 0, turnIndex)
+	promptEvent := userPromptTaskEvent(record.TaskID, turnID, record.Prompt, firstNonZero(record.StartedAt, record.UpdatedAt, protocolNow()), 0, turnIndex, nil)
 	if promptEvent.TaskID == "" {
 		return events
 	}
@@ -3274,7 +3558,7 @@ func nextHistoryEventSequence(events []protocol.TaskEvent) int64 {
 	return maxSeq + 1
 }
 
-func (d *Daemon) recordTaskEvent(event protocol.TaskEvent) {
+func (d *Daemon) recordTaskEvent(event protocol.TaskEvent) bool {
 	var record protocol.TaskRecord
 	d.mu.Lock()
 	record = d.history[event.TaskID]
@@ -3288,15 +3572,15 @@ func (d *Daemon) recordTaskEvent(event protocol.TaskEvent) {
 		record.StartedAt = now
 	}
 	record.UpdatedAt = now
-	record.Events = append(record.Events, event)
+	record.Events = upsertTaskEvent(record.Events, event)
 	d.history[event.TaskID] = record
-	if isDirectACPRecord(record) {
-		if err := d.saveDirectACPStoreLocked(); err != nil {
-			log.Printf("save direct acp sessions: %v", err)
-		}
+	directACPRecord := isDirectACPRecord(record)
+	if directACPRecord {
+		d.markDirectACPStoreDirtyLocked()
 	}
 	d.mu.Unlock()
 	d.maybeSendAgentCompletionAlert(record, event)
+	return directACPRecord && shouldFlushDirectACPStoreForEvent(event.EventType)
 }
 
 func (d *Daemon) maybeSendAgentCompletionAlert(record protocol.TaskRecord, event protocol.TaskEvent) {

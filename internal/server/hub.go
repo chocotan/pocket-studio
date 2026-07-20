@@ -1404,6 +1404,9 @@ func (h *Hub) prepareTaskDispatchRecordLocked(userID string, deviceID string, ta
 	record.Status = "queued"
 	record.UpdatedAt = now
 	data := map[string]any{"prompt": task.Prompt, "turn_id": task.TurnID}
+	if len(task.Attachments) > 0 {
+		data["attachments"] = task.Attachments
+	}
 	userEvent := protocol.TaskEvent{
 		TaskID:    task.TaskID,
 		EventID:   protocol.NewID("evt"),

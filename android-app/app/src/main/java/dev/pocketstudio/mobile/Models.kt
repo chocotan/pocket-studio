@@ -8,7 +8,13 @@ import kotlinx.serialization.json.JsonElement
 @Serializable data class AgentCapability(val name: String, val label: String)
 data class TerminalOption(val value: String, val label: String, val title: String, val command: String)
 data class StudioTerminal(val id: String, val title: String, val type: String, val command: String, val path: String)
-data class ChatAttachment(val type: String = "image", val name: String, val path: String, val mimeType: String)
+data class ChatAttachment(
+    val type: String = "image",
+    val name: String,
+    val path: String,
+    val mimeType: String,
+    val dataUrl: String = "",
+)
 data class ProjectContent(val conversations: List<TaskRecord>, val terminals: List<StudioTerminal>)
 @Serializable data class Device(
     val id: String, val name: String, val status: String = "online",
@@ -56,6 +62,7 @@ data class ChatItem(
     val turnIndex: Long = Long.MAX_VALUE,
     val logicalSequence: Long = Long.MAX_VALUE,
     val timestamp: Long = Long.MAX_VALUE,
+    val attachments: List<ChatAttachment> = emptyList(),
 )
 enum class Screen { Login, Devices, Projects, Conversations, Chat, Terminal }
 
@@ -76,6 +83,7 @@ data class AppState(
     val connected: Boolean = false,
     val running: Boolean = false,
     val chatFontSize: Float = 14f,
+    val chatImageData: Map<String, String> = emptyMap(),
     val terminalOutput: String = "",
     val error: String = "",
 )

@@ -1,5 +1,5 @@
 import { buildAgentToolCallItems } from "@/lib/agent-protocol";
-import type { ChatMessage, TaskEvent } from "./types";
+import type { ChatAttachment, ChatMessage, TaskEvent } from "./types";
 import {
   compactStreamEvents,
   getMetadata,
@@ -44,6 +44,27 @@ function userPromptTurnID(evt: TaskEvent, dataPayload: EventRecord | undefined) 
   if (typeof dataPayload?.turn_id === "string") return dataPayload.turn_id;
   const raw = getMetadata(evt.raw);
   return typeof raw?.turn_id === "string" ? raw.turn_id : "";
+}
+
+function userPromptAttachments(dataPayload: EventRecord | undefined): ChatAttachment[] {
+  if (!Array.isArray(dataPayload?.attachments)) return [];
+  return dataPayload.attachments.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const attachment = value as EventRecord;
+    const path = typeof attachment.path === "string" ? attachment.path.trim() : "";
+    const type = typeof attachment.type === "string" ? attachment.type : "image";
+    if (!path || type !== "image") return [];
+    return [{
+      type: "image" as const,
+      name: typeof attachment.name === "string" && attachment.name.trim()
+        ? attachment.name
+        : path.split("/").at(-1) || path,
+      path,
+      mime_type: typeof attachment.mime_type === "string"
+        ? attachment.mime_type
+        : typeof attachment.mimeType === "string" ? attachment.mimeType : "image/png",
+    }];
+  });
 }
 
 function cloneState(prev: MessageState): MessageState {
@@ -173,6 +194,7 @@ function applyUserPrompt(state: MessageState, evt: TaskEvent, dataPayload: Event
   const prompt = String(dataPayload?.prompt || "");
   if (!prompt) return;
   const turnID = userPromptTurnID(evt, dataPayload);
+  const attachments = userPromptAttachments(dataPayload);
   const message: ChatMessage = {
     id: evt.event_id,
     seq: Number(evt.sequence),
@@ -180,6 +202,7 @@ function applyUserPrompt(state: MessageState, evt: TaskEvent, dataPayload: Event
     content: prompt,
     createdAt: new Date(taskEventTimeMs(evt)).toISOString(),
     ...(turnID ? { turnId: turnID } : {}),
+    ...(attachments.length > 0 ? { attachments } : {}),
   };
   if (!evt.event_id.startsWith("local-user.prompt-")) {
     const duplicateIndex = state.messages.findIndex((item) =>
@@ -190,7 +213,12 @@ function applyUserPrompt(state: MessageState, evt: TaskEvent, dataPayload: Event
     if (duplicateIndex >= 0) {
       const previous = state.messages[duplicateIndex];
       state.byId.delete(state.messages[duplicateIndex].id);
-      state.messages[duplicateIndex] = { ...message, seq: previous.seq, createdAt: previous.createdAt };
+      state.messages[duplicateIndex] = {
+        ...message,
+        seq: previous.seq,
+        createdAt: previous.createdAt,
+        ...(!message.attachments?.length && previous.attachments?.length ? { attachments: previous.attachments } : {}),
+      };
       rebuildMessageIndex(state);
     } else {
       appendMessage(state, message);

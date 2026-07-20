@@ -71,6 +71,43 @@ class ProtocolReducerTest {
         assertEquals("secret token", url.queryParameter("token"))
     }
 
+    @Test fun `task dispatch includes selected image attachments`() {
+        val task = TaskRecord(
+            taskId = "task-1",
+            agent = "codex",
+            sessionName = "Image chat",
+        )
+        val project = Project("project-1", "Project", "device-1", "/workspace")
+        val attachment = ChatAttachment(
+            name = "photo.jpg",
+            path = "photo.jpg",
+            mimeType = "image/jpeg",
+            dataUrl = "data:image/jpeg;base64,ignored-by-protocol",
+        )
+
+        val payload = taskDispatchPayload(task, project, "turn-1", "describe this", listOf(attachment))
+        val sent = payload.getValue("attachments").jsonArray.single().jsonObject
+
+        assertEquals("image", sent.getValue("type").jsonPrimitive.content)
+        assertEquals("photo.jpg", sent.getValue("path").jsonPrimitive.content)
+        assertEquals("image/jpeg", sent.getValue("mime_type").jsonPrimitive.content)
+        assertFalse("inline preview data must not inflate websocket dispatch", "data_url" in sent)
+    }
+
+    @Test fun `user prompt chat item retains image attachments`() {
+        val attachment = ChatAttachment(
+            name = "photo.png",
+            path = "photo.png",
+            mimeType = "image/png",
+            dataUrl = "data:image/png;base64,cHJldmlldw==",
+        )
+        val event = localUserPromptEvent("task-1", "turn-1", "describe this", emptyList(), listOf(attachment))
+        val item = buildChatItems(listOf(event)).single()
+
+        assertEquals("user", item.role)
+        assertEquals(listOf(attachment), item.attachments)
+    }
+
     @Test fun `project conversations come only from nested agent chat panels`() {
         val state = Json.parseToJsonElement("""{
           "layoutTree":{"type":"split","children":[
@@ -151,32 +188,94 @@ class ProtocolReducerTest {
     }
 
     @Test fun `late imported history sorts before newer turn`() {
-        val newer = event("assistant.message", "new", buildJsonObject { put("text", "new"); put("acpx_turn_index", 2); put("_seq", 2) })
-        val older = event("assistant.message", "old", buildJsonObject { put("text", "old"); put("acpx_turn_index", 0); put("_seq", 2) })
-        assertEquals(listOf("old", "new"), buildChatItems(listOf(newer, older)).map { it.id })
+        val newerPrompt = event("user.prompt", "new-user", buildJsonObject { put("prompt", "new"); put("acpx_turn_index", 2); put("_seq", 1) }, 11)
+        val newerAnswer = event("assistant.message", "new-answer", buildJsonObject { put("text", "new answer"); put("acpx_turn_index", 2); put("_seq", 2) }, 12)
+        val olderPrompt = event("user.prompt", "old-user", buildJsonObject { put("prompt", "old"); put("acpx_turn_index", 0); put("_seq", 1) }, 1)
+        val olderAnswer = event("assistant.message", "old-answer", buildJsonObject { put("text", "old answer"); put("acpx_turn_index", 0); put("_seq", 2) }, 2)
+        assertEquals(
+            listOf("old", "old answer", "new", "new answer"),
+            buildChatItems(listOf(newerPrompt, newerAnswer, olderPrompt, olderAnswer)).map { it.text },
+        )
     }
 
-    @Test fun `local user prompt stays before assistant event in same turn`() {
-        val local = localUserPromptEvent("task", "turn-1", "question", emptyList())
-        val assistant = event("assistant.message", "answer", buildJsonObject {
-            put("text", "answer"); put("acpx_turn_index", 0); put("_seq", 3)
-        })
-        assertEquals(listOf("user", "assistant"), buildChatItems(listOf(assistant, local)).map { it.role })
+    @Test fun `unindexed live turns keep transport order instead of grouping by role`() {
+        val events = listOf(
+            event("assistant.message", "answer-2", buildJsonObject { put("text", "answer 2") }, 4),
+            event("user.prompt", "question-2", buildJsonObject { put("prompt", "question 2"); put("turn_id", "turn-2") }, 3),
+            event("assistant.message", "answer-1", buildJsonObject { put("text", "answer 1") }, 2),
+            event("user.prompt", "question-1", buildJsonObject { put("prompt", "question 1"); put("turn_id", "turn-1") }, 1),
+        )
+        assertEquals(
+            listOf("question 1", "answer 1", "question 2", "answer 2"),
+            buildChatItems(events).map { it.text },
+        )
     }
 
-    @Test fun `user prompt stays first when assistant sequence starts at zero`() {
-        val local = localUserPromptEvent("task", "turn-1", "question", emptyList())
-        val assistant = event("assistant.message", "answer", buildJsonObject {
-            put("text", "answer"); put("acpx_turn_index", 0); put("_seq", 0)
-        })
-        val tool = event("tool.call", "tool", buildJsonObject {
-            put("name", "shell"); put("acpx_turn_index", 0); put("_seq", 1)
-        })
-        assertEquals(listOf("user", "assistant", "tool"), buildChatItems(listOf(tool, assistant, local)).map { it.role })
+    @Test fun `optimistic prompt uses next transport sequence and survives late server echo`() {
+        val existing = event("assistant.message", "old-answer", buildJsonObject { put("text", "old") }, 10)
+        val attachment = ChatAttachment(
+            name = "photo.png",
+            path = "photo.png",
+            mimeType = "image/png",
+            dataUrl = "data:image/png;base64,cHJldmlldw==",
+        )
+        val local = localUserPromptEvent("task-1", "turn-2", "question", listOf(existing), listOf(attachment))
+        val answer = event("assistant.message", "answer", buildJsonObject { put("text", "answer") }, 12)
+        val echo = event("user.prompt", "server-user", buildJsonObject {
+            put("prompt", "question"); put("turn_id", "turn-2")
+        }, 11)
+        val merged = mergeTaskEvents(listOf(existing, local, answer), listOf(echo))
+
+        assertEquals(11L, local.sequence)
+        assertNull(local.data?.jsonObject?.get("acpx_turn_index"))
+        assertEquals(listOf("old", "question", "answer"), buildChatItems(merged).map { it.text })
+        assertEquals(listOf(attachment), buildChatItems(merged).first { it.text == "question" }.attachments)
     }
 
-    private fun event(type: String, id: String, data: kotlinx.serialization.json.JsonObject) = TaskEvent(
+    @Test fun `identical unindexed content remains visible in separate live turns`() {
+        val events = listOf(
+            event("user.prompt", "question-1", buildJsonObject { put("prompt", "again") }, 1),
+            event("assistant.message", "answer-1", buildJsonObject { put("text", "same answer"); put("stream_id", "assistant") }, 2),
+            event("user.prompt", "question-2", buildJsonObject { put("prompt", "again") }, 3),
+            event("assistant.message", "answer-2", buildJsonObject { put("text", "same answer"); put("stream_id", "assistant") }, 4),
+        )
+
+        assertEquals(
+            listOf("again", "same answer", "again", "same answer"),
+            buildChatItems(events).map { it.text },
+        )
+    }
+
+    @Test fun `live incremental order matches restored indexed history`() {
+        var live = emptyList<TaskEvent>()
+        val localOne = localUserPromptEvent("task-1", "turn-1", "question 1", live)
+        live = mergeTaskEvents(live, listOf(localOne))
+        live = mergeTaskEvents(live, listOf(
+            event("assistant.message", "answer-1", buildJsonObject { put("text", "answer 1") }, 2),
+            event("user.prompt", "server-question-1", buildJsonObject { put("prompt", "question 1"); put("turn_id", "turn-1") }, 1),
+        ))
+        val localTwo = localUserPromptEvent("task-1", "turn-2", "question 2", live)
+        live = mergeTaskEvents(live, listOf(localTwo))
+        live = mergeTaskEvents(live, listOf(
+            event("assistant.message", "answer-2", buildJsonObject { put("text", "answer 2") }, 4),
+            event("user.prompt", "server-question-2", buildJsonObject { put("prompt", "question 2"); put("turn_id", "turn-2") }, 3),
+        ))
+
+        val restored = listOf(
+            event("assistant.message", "history-answer-2", buildJsonObject { put("text", "answer 2"); put("acpx_turn_index", 1); put("_seq", 2) }, 4),
+            event("user.prompt", "history-question-2", buildJsonObject { put("prompt", "question 2"); put("acpx_turn_index", 1); put("_seq", 1) }, 3),
+            event("assistant.message", "history-answer-1", buildJsonObject { put("text", "answer 1"); put("acpx_turn_index", 0); put("_seq", 2) }, 2),
+            event("user.prompt", "history-question-1", buildJsonObject { put("prompt", "question 1"); put("acpx_turn_index", 0); put("_seq", 1) }, 1),
+        )
+
+        assertEquals(
+            buildChatItems(restored).map { it.role to it.text },
+            buildChatItems(live).map { it.role to it.text },
+        )
+    }
+
+    private fun event(type: String, id: String, data: kotlinx.serialization.json.JsonObject, sequence: Long = 0) = TaskEvent(
         taskId = "task-1", eventId = id, eventType = type,
-        data = data,
+        sequence = sequence, timestamp = sequence, data = data,
     )
 }

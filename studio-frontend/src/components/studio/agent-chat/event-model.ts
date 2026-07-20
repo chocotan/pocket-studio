@@ -3,7 +3,7 @@ import {
   extractAgentConfigOptionsFromEvents,
   extractAgentModelsFromEvents,
 } from "@/lib/agent-protocol";
-import type { ChatMessage, TaskEvent } from "./types";
+import type { ChatAttachment, ChatMessage, TaskEvent } from "./types";
 
 export function getUnixTimestamp(): number {
   return Math.floor(Date.now() / 1000);
@@ -355,12 +355,21 @@ export function makeLocalUserPromptEvent(
   prompt: string,
   sequence?: number,
   turnIndex?: number,
+  attachments: ChatAttachment[] = [],
 ): TaskEvent {
   const now = getUnixTimestamp();
   const data: EventRecord = { prompt, turn_id: turnID };
   if (turnIndex !== undefined && Number.isInteger(turnIndex) && turnIndex >= 0) {
     data.acpx_turn_index = turnIndex;
     data.acpx_event_key = `turn:${turnIndex}:user.prompt:0`;
+  }
+  if (attachments.length > 0) {
+    data.attachments = attachments.map((attachment) => ({
+      type: attachment.type,
+      name: attachment.name,
+      path: attachment.path,
+      mime_type: attachment.mime_type,
+    }));
   }
   return {
     task_id: taskID,

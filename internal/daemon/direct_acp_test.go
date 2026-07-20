@@ -253,6 +253,23 @@ func TestDirectACPPromptContentIncludesWorkspaceImage(t *testing.T) {
 	}
 }
 
+func TestUserPromptTaskEventIncludesImageAttachments(t *testing.T) {
+	attachments := []protocol.TaskAttachment{{
+		Type: "image", Name: "photo.png", Path: "photo.png", MimeType: "image/png",
+	}}
+	event := userPromptTaskEvent("task-1", "turn-1", "describe this", 1, 2, -1, attachments)
+	var data struct {
+		Prompt      string                    `json:"prompt"`
+		Attachments []protocol.TaskAttachment `json:"attachments"`
+	}
+	if err := json.Unmarshal(event.Data, &data); err != nil {
+		t.Fatalf("decode prompt event: %v", err)
+	}
+	if data.Prompt != "describe this" || len(data.Attachments) != 1 || data.Attachments[0] != attachments[0] {
+		t.Fatalf("prompt event data = %#v", data)
+	}
+}
+
 func TestDirectACPPromptContentRejectsImageSymlinkOutsideWorkspace(t *testing.T) {
 	dir := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside.png")

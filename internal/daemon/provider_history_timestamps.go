@@ -67,7 +67,7 @@ func (d *Daemon) enrichImportedHistoryTimestamps(taskID, agent, sessionID, works
 	}
 	d.history[taskID] = record
 	if len(changed) > 0 {
-		_ = d.saveDirectACPStoreLocked()
+		d.markDirectACPStoreDirtyLocked()
 	}
 	d.mu.Unlock()
 
@@ -110,9 +110,16 @@ func (d *Daemon) importedHistoryNeedsTimestamps(taskID string) bool {
 }
 
 func taskEventDataMap(event protocol.TaskEvent) map[string]any {
-	var data map[string]any
-	_ = json.Unmarshal(event.Data, &data)
-	return data
+	for _, raw := range []json.RawMessage{event.Data, event.Raw} {
+		if len(raw) == 0 {
+			continue
+		}
+		var data map[string]any
+		if err := json.Unmarshal(raw, &data); err == nil {
+			return data
+		}
+	}
+	return nil
 }
 
 func loadProviderTurnTimings(agent, sessionID, workspacePath string) ([]providerTurnTiming, error) {

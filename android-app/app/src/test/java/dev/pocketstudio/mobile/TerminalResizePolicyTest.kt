@@ -5,11 +5,13 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class TerminalResizePolicyTest {
-    @Test fun keyboardHeightChangesDoNotRelayoutTerminalView() {
+    @Test fun viewportExpandsForBuiltInKeysButDoesNotShrinkForKeyboards() {
         val policy = TerminalResizePolicy()
 
-        assertEquals(1980, policy.fixedViewportHeight(1980))
-        assertEquals(1980, policy.fixedViewportHeight(720))
+        assertEquals(1980, policy.stableViewportHeight(1980))
+        assertEquals(1980, policy.stableViewportHeight(720))
+        assertEquals(2240, policy.stableViewportHeight(2240))
+        assertEquals(2240, policy.stableViewportHeight(1980))
     }
 
     @Test fun duplicateRemoteSizesAreIgnored() {

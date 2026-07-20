@@ -268,9 +268,7 @@ func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskD
 		record.ModelID = modelList.CurrentModelID
 	}
 	d.history[taskID] = record
-	if err := d.saveDirectACPStoreLocked(); err != nil {
-		log.Printf("save direct acp sessions: %v", err)
-	}
+	d.markDirectACPStoreDirtyLocked()
 	d.mu.Unlock()
 	if existing != nil {
 		existing.client.close()
@@ -593,14 +591,12 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 	}
 	record.Status = "running"
 	record.UpdatedAt = now
-	userEvent := userPromptTaskEvent(task.TaskID, turnID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events), -1)
+	userEvent := userPromptTaskEvent(task.TaskID, turnID, task.Prompt, record.UpdatedAt, nextHistoryEventSequence(record.Events), -1, task.Attachments)
 	if userEvent.TaskID != "" {
 		record.Events = append(record.Events, userEvent)
 	}
 	d.history[task.TaskID] = record
-	if err := d.saveDirectACPStoreLocked(); err != nil {
-		log.Printf("save direct acp sessions: %v", err)
-	}
+	d.markDirectACPStoreDirtyLocked()
 	rt := &runningTask{
 		id:        task.TaskID,
 		turnID:    turnID,
@@ -749,9 +745,7 @@ func (d *Daemon) persistDirectACPSession(taskID string, session *directACPSessio
 	record := d.history[taskID]
 	record.SessionID = session.client.session
 	d.history[taskID] = record
-	if err := d.saveDirectACPStoreLocked(); err != nil {
-		log.Printf("save direct acp sessions: %v", err)
-	}
+	d.markDirectACPStoreDirtyLocked()
 	d.mu.Unlock()
 	d.emitTaskEvent(taskID, "acp.session", 0, map[string]any{
 		"agent":          session.agent,
@@ -859,8 +853,9 @@ func (d *Daemon) deleteDirectACPSession(taskID string) bool {
 	if session == nil {
 		d.mu.Lock()
 		delete(d.history, taskID)
-		saveErr := d.saveDirectACPStoreLocked()
+		d.markDirectACPStoreDirtyLocked()
 		d.mu.Unlock()
+		saveErr := d.flushDirectACPStore()
 		if saveErr != nil {
 			log.Printf("save direct acp sessions: %v", saveErr)
 		}
@@ -873,8 +868,9 @@ func (d *Daemon) deleteDirectACPSession(taskID string) bool {
 	session.client.close()
 	d.mu.Lock()
 	delete(d.history, taskID)
-	saveErr := d.saveDirectACPStoreLocked()
+	d.markDirectACPStoreDirtyLocked()
 	d.mu.Unlock()
+	saveErr := d.flushDirectACPStore()
 	if saveErr != nil {
 		log.Printf("save direct acp sessions: %v", saveErr)
 	}
@@ -1009,9 +1005,7 @@ func (d *Daemon) recordDirectACPModel(taskID string, modelID string) {
 	record.ModelID = modelID
 	record.UpdatedAt = protocolNow()
 	d.history[taskID] = record
-	if err := d.saveDirectACPStoreLocked(); err != nil {
-		log.Printf("save direct acp sessions: %v", err)
-	}
+	d.markDirectACPStoreDirtyLocked()
 	d.mu.Unlock()
 }
 

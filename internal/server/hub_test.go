@@ -385,6 +385,9 @@ func TestPrepareTaskDispatchRecordAddsUserPromptEvent(t *testing.T) {
 		Agent:         "codex",
 		SessionName:   "agent-task-1",
 		Prompt:        "hello",
+		Attachments: []protocol.TaskAttachment{{
+			Type: "image", Name: "photo.png", Path: "photo.png", MimeType: "image/png",
+		}},
 	}
 	userEvent := h.prepareTaskDispatchRecordLocked(auth.OwnerAdmin, "device-1", task)
 
@@ -397,6 +400,15 @@ func TestPrepareTaskDispatchRecordAddsUserPromptEvent(t *testing.T) {
 	}
 	if userEvent.EventID == "" || userEvent.EventID != record.Events[0].EventID {
 		t.Fatalf("returned user prompt event = %#v, record event = %#v", userEvent, record.Events[0])
+	}
+	var userData struct {
+		Attachments []protocol.TaskAttachment `json:"attachments"`
+	}
+	if err := json.Unmarshal(userEvent.Data, &userData); err != nil {
+		t.Fatalf("decode user prompt data: %v", err)
+	}
+	if len(userData.Attachments) != 1 || userData.Attachments[0].Path != "photo.png" || userData.Attachments[0].MimeType != "image/png" {
+		t.Fatalf("user prompt attachments = %#v", userData.Attachments)
 	}
 	h.prepareTaskDispatchRecordLocked(auth.OwnerAdmin, "device-1", task)
 	record = h.taskRecords[scopedKey(auth.OwnerAdmin, "task-1")]

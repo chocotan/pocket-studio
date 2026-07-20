@@ -56,6 +56,21 @@ class PocketApi {
         }
     }
 
+    fun readProjectImage(profile: ConnectionProfile, project: Project, path: String): String {
+        val body = buildJsonObject {
+            put("project_id", project.id)
+            put("path", path)
+        }.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+        return client.newCall(request(profile, "/api/project/file/read").newBuilder().post(body).build()).execute().use { response ->
+            val result = decode<JsonElement>(response).jsonObject
+            val error = result["error"]?.jsonPrimitive?.contentOrNull
+            if (!error.isNullOrBlank()) throw IllegalStateException(error)
+            result["data_url"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf(String::isNotBlank)
+                ?: throw IllegalStateException("图片数据为空")
+        }
+    }
+
     private fun updateProjectState(profile: ConnectionProfile, project: Project, transform: (JsonObject) -> JsonObject) {
         val state = client.newCall(request(profile, "/api/project/state?project_id=${project.id}"))
             .execute().use { response -> decode<JsonElement>(response).jsonObject }
