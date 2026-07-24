@@ -7,6 +7,7 @@ import {
   ArrowRight,
   Loader2,
   Paperclip,
+  ChevronUp,
   X
 } from "lucide-react";
 import { Antigravity, ClaudeCode, Codex, Cursor, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
@@ -132,6 +133,9 @@ export function AgentChatTab({
   const [error, setError] = useState("");
   const [historyLoading, setHistoryLoading] = useState(() => Boolean(sessionId));
   const [historyLoadedOnce, setHistoryLoadedOnce] = useState(() => !sessionId);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyCursor, setHistoryCursor] = useState("");
+  const [historyLoadingOlder, setHistoryLoadingOlder] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [localRunStartedAtMs, setLocalRunStartedAtMs] = useState(0);
   const [modelUpdating, setModelUpdating] = useState(false);
@@ -144,6 +148,9 @@ export function AgentChatTab({
   const onUpdateTabPropertiesRef = useRef(onUpdateTabProperties);
   const pendingEnvelopesRef = useRef<AgentEnvelope[]>([]);
   const pendingHistoryEventsRef = useRef<TaskEvent[]>([]);
+  const historyCollectingRef = useRef(Boolean(sessionId));
+  const historyScrollRestoreRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const skipNextAutoScrollRef = useRef(false);
   const sessionCreateSentRef = useRef<Set<string>>(new Set());
   const ensureSessionRef = useRef<Promise<string> | null>(null);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
@@ -238,15 +245,32 @@ export function AgentChatTab({
     }
   }, []);
 
+  const commitPendingHistoryEvents = useCallback(() => {
+    const pending = pendingHistoryEventsRef.current;
+    if (pending.length === 0) return;
+    pendingHistoryEventsRef.current = [];
+    lastEventSeqRef.current = pending.reduce(
+      (maxSequence, event) => Math.max(maxSequence, Number(event.sequence || 0)),
+      lastEventSeqRef.current,
+    );
+    setEvents((prev) => mergeTaskEvents(prev, pending));
+  }, []);
+
   const resetHistoryForSocketOpen = useCallback((activeSessionId: string) => {
     // Keep prompts submitted while a new ACP session is being established.
     // The server echo replaces them by turn_id once it arrives.
     setEvents((prev) => prev.filter((event) => event.event_id.startsWith("local-user.prompt-")));
     pendingHistoryEventsRef.current = [];
+    historyCollectingRef.current = true;
+    historyScrollRestoreRef.current = null;
+    skipNextAutoScrollRef.current = false;
     lastEventSeqRef.current = 0;
     historyLoadedOnceRef.current = false;
     setHistoryLoading(true);
     setHistoryLoadedOnce(false);
+    setHistoryHasMore(false);
+    setHistoryCursor("");
+    setHistoryLoadingOlder(false);
     sessionCreateSentRef.current.delete(activeSessionId);
     pushAgentChatDebug({
       phase: "history.reset",
@@ -316,11 +340,22 @@ export function AgentChatTab({
 
     socket.onmessage = (message) => {
       if (closed || socketRef.current !== socket) return;
+      let envelope: AgentEnvelope;
       try {
-        const envelope = JSON.parse(String(message.data));
+        envelope = JSON.parse(String(message.data)) as AgentEnvelope;
+      } catch (err) {
+        console.error("ACP websocket JSON parse error:", err);
+        pushAgentChatDebug({
+          phase: "ws.parse_error",
+          taskId: activeSessionId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      try {
         if (envelope?.type === "pong") return;
         if (envelope?.type === "task.event") {
-          const taskEvent = envelope.payload as TaskEvent;
+          const taskEvent = envelope.payload as unknown as TaskEvent;
           if (!taskEvent || taskEvent.task_id !== activeSessionId) return;
           pushAgentChatDebug({
             phase: "ws.message",
@@ -329,18 +364,13 @@ export function AgentChatTab({
             sequence: taskEvent.sequence,
           });
           const completesHistoryImport = awaitingResumedHistory && taskEvent.event_type === "session.created";
-          if (awaitingResumedHistory) {
-            pendingHistoryEventsRef.current = mergeTaskEvents(pendingHistoryEventsRef.current, [taskEvent]);
+          if (historyCollectingRef.current || awaitingResumedHistory) {
+            pendingHistoryEventsRef.current.push(taskEvent);
           }
           if (completesHistoryImport) {
             awaitingResumedHistory = false;
-            const importedEvents = pendingHistoryEventsRef.current;
-            pendingHistoryEventsRef.current = [];
-            lastEventSeqRef.current = importedEvents.reduce(
-              (maxSequence, event) => Math.max(maxSequence, Number(event.sequence || 0)),
-              lastEventSeqRef.current,
-            );
-            setEvents((prev) => mergeTaskEvents(prev, importedEvents));
+            historyCollectingRef.current = false;
+            commitPendingHistoryEvents();
             setHistoryLoading(false);
             setHistoryLoadedOnce(true);
           }
@@ -371,7 +401,7 @@ export function AgentChatTab({
           if (taskEvent.sequence > lastEventSeqRef.current) {
             lastEventSeqRef.current = taskEvent.sequence;
           }
-          if (!awaitingResumedHistory && !completesHistoryImport) {
+          if (!historyCollectingRef.current && !awaitingResumedHistory && !completesHistoryImport) {
             setEvents((prev) => mergeTaskEvents(prev, [taskEvent]));
           }
           if (isTerminalTaskEvent(taskEvent, agentRuntime)) {
@@ -386,14 +416,21 @@ export function AgentChatTab({
         } else if (envelope?.type === "task.history.ready") {
           const payload = envelope.payload || {};
           const taskId = typeof payload.task_id === "string" ? payload.task_id : "";
+          const nextCursor = typeof payload.next_cursor === "string" ? payload.next_cursor : "";
+          setHistoryHasMore(payload.has_more === true && nextCursor !== "");
+          setHistoryCursor(nextCursor);
           if ((!taskId || taskId === activeSessionId) && !awaitingResumedHistory) {
             pushAgentChatDebug({
               phase: "history.ready",
               taskId: activeSessionId,
               hasEvents: payload.has_events === true,
+              hasMore: payload.has_more === true,
             });
+            historyCollectingRef.current = false;
+            commitPendingHistoryEvents();
             setHistoryLoading(false);
             setHistoryLoadedOnce(true);
+            setHistoryLoadingOlder(false);
           }
         } else if (envelope?.type === "server.error") {
           const payload = envelope.payload || {};
@@ -406,15 +443,13 @@ export function AgentChatTab({
           pendingSessionRejectRef.current?.(new Error(message));
           pendingSessionResolveRef.current = null;
           pendingSessionRejectRef.current = null;
-          if (pendingHistoryEventsRef.current.length > 0) {
-            const pendingHistory = pendingHistoryEventsRef.current;
-            pendingHistoryEventsRef.current = [];
-            setEvents((prev) => mergeTaskEvents(prev, pendingHistory));
-          }
+          historyCollectingRef.current = false;
+          commitPendingHistoryEvents();
           awaitingResumedHistory = false;
           showError(message);
           setHistoryLoading(false);
           setHistoryLoadedOnce(true);
+          setHistoryLoadingOlder(false);
           setRunStatus("idle");
           awaitingNewTurnRef.current = false;
           awaitingTurnIdRef.current = "";
@@ -422,9 +457,9 @@ export function AgentChatTab({
           setModelUpdating(false);
         }
       } catch (err) {
-        console.error("ACP websocket parse error:", err);
+        console.error("ACP websocket message handling error:", err);
         pushAgentChatDebug({
-          phase: "ws.parse_error",
+          phase: "ws.message_error",
           taskId: activeSessionId,
           message: err instanceof Error ? err.message : String(err),
         });
@@ -439,6 +474,7 @@ export function AgentChatTab({
       if (socketRef.current === socket) {
         setHistoryLoading(false);
         setHistoryLoadedOnce(true);
+        setHistoryLoadingOlder(false);
       }
       if (!closed) showError("Agent WebSocket 连接失败");
     };
@@ -455,8 +491,11 @@ export function AgentChatTab({
       });
       if (socketRef.current === socket) {
         socketRef.current = null;
+        historyCollectingRef.current = false;
+        commitPendingHistoryEvents();
         setHistoryLoading(false);
         setHistoryLoadedOnce(true);
+        setHistoryLoadingOlder(false);
       }
     };
 
@@ -478,6 +517,7 @@ export function AgentChatTab({
     agentSocketProject,
     agentRuntime,
     buildSessionCreateEnvelope,
+    commitPendingHistoryEvents,
     flushPendingEnvelopes,
     resetHistoryForSocketOpen,
     showError,
@@ -521,6 +561,12 @@ export function AgentChatTab({
       awaitingPreviousStartEventIdRef.current = "";
       setHistoryLoading(false);
       setHistoryLoadedOnce(true);
+      setHistoryHasMore(false);
+      setHistoryCursor("");
+      setHistoryLoadingOlder(false);
+      historyCollectingRef.current = false;
+      pendingHistoryEventsRef.current = [];
+      historyScrollRestoreRef.current = null;
       lastEventSeqRef.current = 0;
       socketTaskIdRef.current = "";
       pendingEnvelopesRef.current = [];
@@ -560,8 +606,22 @@ export function AgentChatTab({
     eventsEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [historyLoadedOnce, messages.length]);
 
+  useLayoutEffect(() => {
+    const restore = historyScrollRestoreRef.current;
+    if (!restore || historyLoadingOlder) return;
+    historyScrollRestoreRef.current = null;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const addedHeight = Math.max(0, container.scrollHeight - restore.scrollHeight);
+    container.scrollTop = restore.scrollTop + addedHeight;
+  }, [historyLoadingOlder, messages.length]);
+
   // Auto scroll to bottom
   useEffect(() => {
+    if (skipNextAutoScrollRef.current) {
+      skipNextAutoScrollRef.current = false;
+      return;
+    }
     if (historyLoading && !historyLoadedOnce) return;
     eventsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [events.length, historyLoadedOnce, historyLoading]);
@@ -641,6 +701,66 @@ export function AgentChatTab({
   const hasActiveBackendTurn = backendRunStartedAtMs > 0;
   const workingStartedAtMs = hasActiveBackendTurn ? backendRunStartedAtMs : localRunStartedAtMs || nowMs;
   const showHistoryLoading = historyLoading && !historyLoadedOnce;
+
+  const loadOlderHistory = useCallback(() => {
+    const socket = socketRef.current;
+    if (
+      !sessionId ||
+      !historyHasMore ||
+      !historyCursor ||
+      historyLoadingOlder ||
+      !socket ||
+      socket.readyState !== WebSocket.OPEN
+    ) {
+      return;
+    }
+    const container = scrollContainerRef.current;
+    historyScrollRestoreRef.current = container
+      ? { scrollHeight: container.scrollHeight, scrollTop: container.scrollTop }
+      : null;
+    skipNextAutoScrollRef.current = true;
+    pendingHistoryEventsRef.current = [];
+    historyCollectingRef.current = true;
+    setHistoryLoadingOlder(true);
+    const requestId = makeId("req");
+    const envelope: AgentEnvelope = {
+      id: requestId,
+      type: "task.history.get",
+      version: 1,
+      timestamp: getUnixTimestamp(),
+      from: "web",
+      to: { device_id: projectDeviceId },
+      payload: {
+        request_id: requestId,
+        task_id: sessionId,
+        cursor: historyCursor,
+        limit: 200,
+      },
+    };
+    try {
+      socket.send(JSON.stringify(envelope));
+      pushAgentChatDebug({
+        phase: "history.load_older",
+        taskId: sessionId,
+        cursor: historyCursor,
+      });
+    } catch (err) {
+      historyCollectingRef.current = false;
+      historyScrollRestoreRef.current = null;
+      skipNextAutoScrollRef.current = false;
+      commitPendingHistoryEvents();
+      setHistoryLoadingOlder(false);
+      showError("加载更早消息失败: " + (err instanceof Error ? err.message : String(err)));
+    }
+  }, [
+    commitPendingHistoryEvents,
+    historyCursor,
+    historyHasMore,
+    historyLoadingOlder,
+    projectDeviceId,
+    sessionId,
+    showError,
+  ]);
 
   useEffect(() => {
     if (!tab.agentModelId) {
@@ -1127,6 +1247,24 @@ export function AgentChatTab({
         ) : (
           /* Timeline */
           <div className="w-full min-w-0 space-y-1.5">
+            {(historyHasMore || historyLoadingOlder) && (
+              <div className="flex h-8 items-center justify-center select-none">
+                <button
+                  type="button"
+                  onClick={loadOlderHistory}
+                  disabled={historyLoadingOlder}
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[10.5px] font-medium text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground disabled:cursor-default disabled:opacity-60"
+                  aria-label="加载更早消息"
+                >
+                  {historyLoadingOlder ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <ChevronUp className="h-3.5 w-3.5" />
+                  )}
+                  <span>{historyLoadingOlder ? "加载中" : "加载更早消息"}</span>
+                </button>
+              </div>
+            )}
             {(() => {
               const rendered: React.ReactNode[] = [];
               let i = 0;

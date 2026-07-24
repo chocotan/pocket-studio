@@ -255,73 +255,82 @@ function compareToolLifecycleEvents(left: TaskEvent, right: TaskEvent) {
 }
 
 export function mergeTaskEvents(prev: TaskEvent[], nextEvents: TaskEvent[]) {
-  const existingIds = new Set(prev.map((event) => event.event_id));
-  const existingKeys = new Set(prev.map((event) => taskEventStableKey(event)).filter(Boolean));
   const merged = [...prev];
+  const indexById = new Map<string, number>();
+  const indexByStableKey = new Map<string, number>();
+  const userPromptIndexByTurnId = new Map<string, number>();
+
+  const removeIndex = (event: TaskEvent, index: number) => {
+    if (indexById.get(event.event_id) === index) indexById.delete(event.event_id);
+    const stableKey = taskEventStableKey(event);
+    if (stableKey && indexByStableKey.get(stableKey) === index) indexByStableKey.delete(stableKey);
+    if (event.event_type === "user.prompt") {
+      const data = getMetadata(event.data);
+      const turnId = typeof data?.turn_id === "string" ? data.turn_id : "";
+      if (turnId && userPromptIndexByTurnId.get(turnId) === index) userPromptIndexByTurnId.delete(turnId);
+    }
+  };
+  const addIndex = (event: TaskEvent, index: number) => {
+    indexById.set(event.event_id, index);
+    const stableKey = taskEventStableKey(event);
+    if (stableKey) indexByStableKey.set(stableKey, index);
+    if (event.event_type === "user.prompt") {
+      const data = getMetadata(event.data);
+      const turnId = typeof data?.turn_id === "string" ? data.turn_id : "";
+      if (turnId) userPromptIndexByTurnId.set(turnId, index);
+    }
+  };
+  for (let index = 0; index < merged.length; index++) addIndex(merged[index], index);
+
   for (const event of nextEvents) {
     const stableKey = taskEventStableKey(event);
-    if (existingIds.has(event.event_id)) {
-      const existingIndex = merged.findIndex((existing) => existing.event_id === event.event_id);
-      if (existingIndex >= 0) {
-        const existing = merged[existingIndex];
-        const oldStableKey = taskEventStableKey(existing);
-        if (oldStableKey) existingKeys.delete(oldStableKey);
-        merged[existingIndex] = {
+    const existingIndex = indexById.get(event.event_id);
+    if (existingIndex !== undefined) {
+      const existing = merged[existingIndex];
+      removeIndex(existing, existingIndex);
+      merged[existingIndex] = {
+        ...event,
+        sequence: Math.max(Number(existing.sequence || 0), Number(event.sequence || 0)),
+        timestamp: Math.max(Number(existing.timestamp || 0), Number(event.timestamp || 0)),
+      };
+      addIndex(merged[existingIndex], existingIndex);
+      continue;
+    }
+    const stableIndex = stableKey ? indexByStableKey.get(stableKey) : undefined;
+    if (stableIndex !== undefined) {
+      if (shouldReplaceStableTaskEvent(event)) {
+        const existing = merged[stableIndex];
+        removeIndex(existing, stableIndex);
+        merged[stableIndex] = {
           ...event,
-          sequence: Math.max(Number(existing.sequence || 0), Number(event.sequence || 0)),
-          timestamp: Math.max(Number(existing.timestamp || 0), Number(event.timestamp || 0)),
+          event_id: existing.event_id,
+          sequence: existing.sequence,
+          timestamp: existing.timestamp,
         };
-        if (stableKey) existingKeys.add(stableKey);
+        addIndex(merged[stableIndex], stableIndex);
       }
       continue;
     }
-    if (stableKey && existingKeys.has(stableKey)) {
-      const existingIndex = merged.findIndex((existing) => taskEventStableKey(existing) === stableKey);
-      if (existingIndex >= 0 && shouldReplaceStableTaskEvent(event)) {
-        existingIds.delete(merged[existingIndex].event_id);
-        merged[existingIndex] = {
-          ...event,
-          event_id: merged[existingIndex].event_id,
-          sequence: merged[existingIndex].sequence,
-          timestamp: merged[existingIndex].timestamp,
-        };
-        existingIds.add(merged[existingIndex].event_id);
-      }
-      continue;
-    }
-    let isDuplicate = false;
     if (event.event_type === "user.prompt") {
       const eventData = getMetadata(event.data);
       const eventTurnId = typeof eventData?.turn_id === "string" ? eventData.turn_id : "";
       if (eventTurnId) {
-        for (let index = 0; index < merged.length; index++) {
-          const existing = merged[index];
-          if (existing.event_type === "user.prompt") {
-            const existingData = getMetadata(existing.data);
-            const existingTurnId = typeof existingData?.turn_id === "string" ? existingData.turn_id : "";
-            if (existingTurnId === eventTurnId) {
-              const oldStableKey = taskEventStableKey(existing);
-              if (oldStableKey) existingKeys.delete(oldStableKey);
-              merged[index] = {
-                ...event,
-                sequence: Math.max(Number(existing.sequence || 0), Number(event.sequence || 0)),
-                timestamp: existing.timestamp,
-              };
-              existingIds.add(event.event_id);
-              existingIds.delete(existing.event_id);
-              if (stableKey) existingKeys.add(stableKey);
-              isDuplicate = true;
-              break;
-            }
-          }
+        const promptIndex = userPromptIndexByTurnId.get(eventTurnId);
+        if (promptIndex !== undefined) {
+          const existing = merged[promptIndex];
+          removeIndex(existing, promptIndex);
+          merged[promptIndex] = {
+            ...event,
+            sequence: Math.max(Number(existing.sequence || 0), Number(event.sequence || 0)),
+            timestamp: existing.timestamp,
+          };
+          addIndex(merged[promptIndex], promptIndex);
+          continue;
         }
       }
     }
-    if (!isDuplicate) {
-      existingIds.add(event.event_id);
-      if (stableKey) existingKeys.add(stableKey);
-      merged.push(event);
-    }
+    merged.push(event);
+    addIndex(event, merged.length - 1);
   }
   return merged;
 }

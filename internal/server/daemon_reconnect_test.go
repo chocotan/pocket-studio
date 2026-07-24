@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -538,8 +539,12 @@ func TestDaemonWriteFailureShutsDownAndRemovesConnection(t *testing.T) {
 		dc = h.daemons[daemonKey(auth.OwnerAdmin, "dev-write-failure")]
 		return dc != nil
 	})
-	if err := dc.conn.SetWriteDeadline(time.Now().Add(-time.Second)); err != nil {
-		t.Fatalf("set expired daemon write deadline: %v", err)
+	tcp, ok := dc.conn.UnderlyingConn().(*net.TCPConn)
+	if !ok {
+		t.Fatalf("daemon websocket transport = %T, want *net.TCPConn", dc.conn.UnderlyingConn())
+	}
+	if err := tcp.CloseWrite(); err != nil {
+		t.Fatalf("close daemon TCP write side: %v", err)
 	}
 	if !dc.enqueue(protocol.NewEnvelope("force-write-failure", "server", nil)) {
 		t.Fatal("enqueue before forced write failure returned false")

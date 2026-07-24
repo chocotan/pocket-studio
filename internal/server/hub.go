@@ -31,7 +31,40 @@ var (
 	safeTerminalIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,96}$`)
 )
 
-const terminalRelayWriteTimeout = 2 * time.Second
+const (
+	terminalRelayWriteTimeout = 2 * time.Second
+	webSocketWriteTimeout     = 10 * time.Second
+	daemonSocketPongTimeout   = 45 * time.Second
+	daemonSocketPingInterval  = 15 * time.Second
+)
+
+type daemonConnectionTimings struct {
+	writeTimeout time.Duration
+	pongTimeout  time.Duration
+	pingInterval time.Duration
+}
+
+func defaultDaemonConnectionTimings() daemonConnectionTimings {
+	return daemonConnectionTimings{
+		writeTimeout: webSocketWriteTimeout,
+		pongTimeout:  daemonSocketPongTimeout,
+		pingInterval: daemonSocketPingInterval,
+	}
+}
+
+func (timings daemonConnectionTimings) withDefaults() daemonConnectionTimings {
+	defaults := defaultDaemonConnectionTimings()
+	if timings.writeTimeout <= 0 {
+		timings.writeTimeout = defaults.writeTimeout
+	}
+	if timings.pongTimeout <= 0 {
+		timings.pongTimeout = defaults.pongTimeout
+	}
+	if timings.pingInterval <= 0 {
+		timings.pingInterval = defaults.pingInterval
+	}
+	return timings
+}
 
 type Project struct {
 	ID             string                   `json:"id"`
@@ -90,6 +123,7 @@ type Hub struct {
 	agentChatConns      map[string]map[*agentChatConn]struct{}
 	agentChatHistoryReq map[string]agentChatHistoryRequest
 	daemonSwitchHook    func(stage string)
+	daemonTimings       daemonConnectionTimings
 }
 
 type agentChatHistoryRequest struct {
@@ -114,7 +148,20 @@ type daemonConn struct {
 	mu             sync.Mutex
 	terminalBinary bool
 	directEndpoint *protocol.DirectEndpoint
-	lastSeen       time.Time
+	lastSeen       atomic.Int64
+}
+
+func (dc *daemonConn) markSeen(now time.Time) {
+	if dc != nil {
+		dc.lastSeen.Store(now.Unix())
+	}
+}
+
+func (dc *daemonConn) lastSeenUnix() int64 {
+	if dc == nil {
+		return 0
+	}
+	return dc.lastSeen.Load()
 }
 
 func (dc *daemonConn) enqueue(env protocol.Envelope) bool {
@@ -150,11 +197,17 @@ func (dc *daemonConn) writeEnvelopeDirect(env protocol.Envelope) bool {
 		return false
 	}
 	dc.mu.Lock()
-	defer dc.mu.Unlock()
 	if dc.closed.Load() {
+		dc.mu.Unlock()
 		return false
 	}
-	return writeEnvelope(dc.conn, env) == nil
+	err := writeEnvelopeWithin(dc.conn, env, webSocketWriteTimeout)
+	dc.mu.Unlock()
+	if err != nil {
+		dc.shutdown()
+		return false
+	}
+	return true
 }
 
 func (dc *daemonConn) writeMessageDirect(messageType int, data []byte) bool {
@@ -162,11 +215,17 @@ func (dc *daemonConn) writeMessageDirect(messageType int, data []byte) bool {
 		return false
 	}
 	dc.mu.Lock()
-	defer dc.mu.Unlock()
 	if dc.closed.Load() {
+		dc.mu.Unlock()
 		return false
 	}
-	return dc.conn.WriteMessage(messageType, data) == nil
+	err := writeWebSocketMessageWithin(dc.conn, messageType, data, webSocketWriteTimeout)
+	dc.mu.Unlock()
+	if err != nil {
+		dc.shutdown()
+		return false
+	}
+	return true
 }
 
 type webConn struct {
@@ -185,14 +244,15 @@ type terminalConn struct {
 }
 
 type agentChatConn struct {
-	userID    string
-	taskID    string
-	projectID string
-	conn      *websocket.Conn
-	send      chan protocol.Envelope
-	done      chan struct{}
-	closeOnce sync.Once
-	closed    atomic.Bool
+	userID        string
+	taskID        string
+	projectID     string
+	historyPaging bool
+	conn          *websocket.Conn
+	send          chan protocol.Envelope
+	done          chan struct{}
+	closeOnce     sync.Once
+	closed        atomic.Bool
 }
 
 func enqueueClientEnvelope(send chan protocol.Envelope, done <-chan struct{}, closed *atomic.Bool, env protocol.Envelope, wait bool) bool {
@@ -318,6 +378,7 @@ func NewHub(authManager *auth.Manager) *Hub {
 		terminalConns:       make(map[string]map[*terminalConn]struct{}),
 		agentChatConns:      make(map[string]map[*agentChatConn]struct{}),
 		agentChatHistoryReq: make(map[string]agentChatHistoryRequest),
+		daemonTimings:       defaultDaemonConnectionTimings(),
 	}
 	return h
 }
@@ -820,9 +881,25 @@ func (h *Hub) ServeDaemonSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	enableTCPNoDelay(conn)
 
-	dc := &daemonConn{userID: userID, conn: conn, send: make(chan protocol.Envelope, 64), done: make(chan struct{}), lastSeen: time.Now()}
-	go writeDaemonLoop(dc)
-	h.readDaemonLoop(dc)
+	timings := h.daemonTimings.withDefaults()
+	dc := &daemonConn{userID: userID, conn: conn, send: make(chan protocol.Envelope, 64), done: make(chan struct{})}
+	dc.markSeen(time.Now())
+	if err := refreshWebSocketReadDeadline(conn, timings.pongTimeout); err != nil {
+		dc.shutdown()
+		return
+	}
+	conn.SetPongHandler(func(string) error {
+		return refreshWebSocketReadDeadline(conn, timings.pongTimeout)
+	})
+	pingHandler := conn.PingHandler()
+	conn.SetPingHandler(func(message string) error {
+		if err := refreshWebSocketReadDeadline(conn, timings.pongTimeout); err != nil {
+			return err
+		}
+		return pingHandler(message)
+	})
+	go writeDaemonLoop(dc, timings)
+	h.readDaemonLoop(dc, timings)
 }
 
 func (h *Hub) ServeAgentChatWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -841,7 +918,15 @@ func (h *Hub) ServeAgentChatWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("upgrade agent chat: %v", err)
 		return
 	}
-	ac := &agentChatConn{userID: userID, taskID: taskID, projectID: projectID, conn: conn, send: make(chan protocol.Envelope, 128), done: make(chan struct{})}
+	ac := &agentChatConn{
+		userID:        userID,
+		taskID:        taskID,
+		projectID:     projectID,
+		historyPaging: r.URL.Query().Get("history_paging") == "1",
+		conn:          conn,
+		send:          make(chan protocol.Envelope, 128),
+		done:          make(chan struct{}),
+	}
 	key := scopedKey(userID, taskID)
 	h.mu.Lock()
 	if h.agentChatConns[key] == nil {
@@ -959,7 +1044,7 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 			h.mu.Lock()
 			if dc := h.daemons[daemonKey(userID, req.DeviceID)]; dc != nil {
 				dc.deviceName = result.DeviceName
-				dc.lastSeen = time.Now()
+				dc.markSeen(time.Now())
 			}
 			h.mu.Unlock()
 		}) {
@@ -1523,6 +1608,24 @@ func (h *Hub) readAgentChatLoop(ac *agentChatConn) {
 			}
 			continue
 		}
+		if env.Type == protocol.TypeTaskHistoryGet {
+			request, err := protocol.DecodePayload[protocol.TaskHistoryGet](env)
+			if err != nil {
+				if !ac.enqueue(serverErrorForEnvelope(env, "bad_payload", "invalid task history request")) {
+					return
+				}
+				continue
+			}
+			if request.RequestID == "" {
+				request.RequestID = env.ID
+			}
+			if request.Limit <= 0 {
+				request.Limit = protocol.DefaultTaskHistoryLimit
+			}
+			request.TaskID = ac.taskID
+			h.requestTaskHistoryPageForAgentChat(ac, request)
+			continue
+		}
 		if errEnv, ok := h.forwardAgentChatCommand(ac.userID, env); !ok {
 			if !ac.enqueue(errEnv) {
 				return
@@ -1532,6 +1635,25 @@ func (h *Hub) readAgentChatLoop(ac *agentChatConn) {
 }
 
 func (h *Hub) requestTaskHistoryForAgentChat(ac *agentChatConn) {
+	limit := 0
+	if ac.historyPaging {
+		limit = protocol.DefaultTaskHistoryLimit
+	}
+	h.requestTaskHistoryPageForAgentChat(ac, protocol.TaskHistoryGet{
+		TaskID: ac.taskID,
+		Limit:  limit,
+	})
+}
+
+func (h *Hub) requestTaskHistoryPageForAgentChat(ac *agentChatConn, request protocol.TaskHistoryGet) {
+	request.TaskID = ac.taskID
+	if request.RequestID == "" {
+		request.RequestID = protocol.NewID("req")
+	}
+	if request.Limit > protocol.MaxTaskHistoryLimit {
+		request.Limit = protocol.MaxTaskHistoryLimit
+	}
+
 	h.mu.RLock()
 	resolvedTaskID := h.resolveTaskIDLocked(ac.userID, ac.taskID)
 	record := h.taskRecords[scopedKey(ac.userID, resolvedTaskID)]
@@ -1551,48 +1673,41 @@ func (h *Hub) requestTaskHistoryForAgentChat(ac *agentChatConn) {
 	}
 	dc := h.daemons[daemonKey(ac.userID, deviceID)]
 	h.mu.RUnlock()
+	request.WorkspacePath = workspacePath
 
 	if dc == nil {
-		sent := 0
-		for _, event := range h.taskHistory(ac.userID, ac.taskID) {
-			if !ac.enqueue(taskEventEnvelope(event)) {
-				return
-			}
-			sent++
-		}
-		ac.enqueue(protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "server", protocol.TaskHistoryReady{
-			TaskID:    ac.taskID,
-			HasEvents: sent > 0,
-		}))
+		h.sendCachedTaskHistoryPage(ac, request)
 		return
 	}
 
-	requestID := protocol.NewID("req")
-	env := protocol.NewEnvelope(protocol.TypeTaskHistoryGet, "server", protocol.TaskHistoryGet{
-		RequestID:     requestID,
-		TaskID:        ac.taskID,
-		WorkspacePath: workspacePath,
-	})
+	env := protocol.NewEnvelope(protocol.TypeTaskHistoryGet, "server", request)
 	env.To.TaskID = ac.taskID
 	h.mu.Lock()
-	h.agentChatHistoryReq[requestID] = agentChatHistoryRequest{requester: ac, deviceID: deviceID, envelope: env}
+	h.agentChatHistoryReq[request.RequestID] = agentChatHistoryRequest{requester: ac, deviceID: deviceID, envelope: env}
 	h.mu.Unlock()
 	if !dc.enqueue(env) {
 		h.mu.Lock()
-		delete(h.agentChatHistoryReq, requestID)
+		delete(h.agentChatHistoryReq, request.RequestID)
 		h.mu.Unlock()
-		sent := 0
-		for _, event := range h.taskHistory(ac.userID, ac.taskID) {
-			if !ac.enqueue(taskEventEnvelope(event)) {
-				return
-			}
-			sent++
-		}
-		ac.enqueue(protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "server", protocol.TaskHistoryReady{
-			TaskID:    ac.taskID,
-			HasEvents: sent > 0,
-		}))
+		h.sendCachedTaskHistoryPage(ac, request)
 	}
+}
+
+func (h *Hub) sendCachedTaskHistoryPage(ac *agentChatConn, request protocol.TaskHistoryGet) {
+	events := protocol.SanitizeTaskHistoryEvents(h.taskHistory(ac.userID, ac.taskID))
+	page, nextCursor, hasMore := protocol.PaginateTaskHistory(events, request.Cursor, request.Limit)
+	for _, event := range page {
+		if !ac.enqueue(taskEventEnvelope(event)) {
+			return
+		}
+	}
+	ac.enqueue(protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "server", protocol.TaskHistoryReady{
+		RequestID:  request.RequestID,
+		TaskID:     ac.taskID,
+		HasEvents:  len(page) > 0,
+		HasMore:    hasMore,
+		NextCursor: nextCursor,
+	}))
 }
 
 func (h *Hub) pendingAgentChatHistoryRequests(userID, deviceID string) []protocol.Envelope {
@@ -1639,12 +1754,16 @@ func (h *Hub) closeTerminal(userID string, projectID string, terminalID string) 
 	}
 }
 
-func (h *Hub) readDaemonLoop(dc *daemonConn) {
+func (h *Hub) readDaemonLoop(dc *daemonConn, timings daemonConnectionTimings) {
 	defer h.disconnectDaemon(dc)
 
 	for {
 		msgType, raw, err := dc.conn.ReadMessage()
 		if err != nil {
+			log.Printf("daemon websocket %s closed: %v", dc.deviceID, err)
+			return
+		}
+		if err := refreshWebSocketReadDeadline(dc.conn, timings.pongTimeout); err != nil {
 			return
 		}
 		if msgType == websocket.BinaryMessage {
@@ -1710,7 +1829,7 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 		dc.workspaces = hello.Workspaces
 		dc.terminalBinary = hasFeature(hello.Features, protocol.FeatureTerminalBinaryV1)
 		dc.directEndpoint = hello.DirectEndpoint
-		dc.lastSeen = time.Now()
+		dc.markSeen(time.Now())
 		h.mu.Lock()
 		key := daemonKey(dc.userID, hello.DeviceID)
 		old := h.daemons[key]
@@ -1737,7 +1856,7 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 		}
 		h.broadcastToUser(dc.userID, protocol.NewEnvelope("server.state", "server", h.stateView(dc.userID)))
 	case protocol.TypeDaemonHeartbeat, protocol.TypeDaemonSnapshot:
-		dc.lastSeen = time.Now()
+		dc.markSeen(time.Now())
 		// The daemon's heartbeat carries the authoritative set of task ids it is
 		// actually still running (process-level liveness, opcode-style). Use it
 		// to clear any task the server still thinks is running but the daemon no
@@ -1908,11 +2027,25 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 	case protocol.TypeTaskHistoryResult:
 		result, err := protocol.DecodePayload[protocol.TaskHistoryResult](env)
 		if err == nil && result.TaskID != "" {
-			eventsToForward := result.Events
+			h.mu.Lock()
+			pendingRequest := h.agentChatHistoryReq[result.RequestID]
+			delete(h.agentChatHistoryReq, result.RequestID)
+			h.mu.Unlock()
+
+			requestedPage := protocol.TaskHistoryGet{}
+			if pendingRequest.envelope.Type == protocol.TypeTaskHistoryGet {
+				requestedPage, _ = protocol.DecodePayload[protocol.TaskHistoryGet](pendingRequest.envelope)
+			}
+			eventsToForward := protocol.SanitizeTaskHistoryEvents(result.Events)
 			if result.Record != nil {
 				h.mu.Lock()
 				taskKey := scopedKey(dc.userID, result.TaskID)
 				record := *result.Record
+				if result.Paginated {
+					record.Events = append([]protocol.TaskEvent(nil), eventsToForward...)
+				} else {
+					record.Events = protocol.SanitizeTaskHistoryEvents(record.Events)
+				}
 				if existing, ok := h.taskRecords[taskKey]; ok {
 					incoming := record
 					if len(existing.Events) > 0 {
@@ -1937,29 +2070,42 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 					h.taskDevices[taskKey] = dc.deviceID
 				}
 				h.taskRecords[taskKey] = record
-				eventsToForward = append([]protocol.TaskEvent(nil), record.Events...)
+				if !result.Paginated {
+					eventsToForward = append([]protocol.TaskEvent(nil), record.Events...)
+				}
 				h.mu.Unlock()
 			}
-			h.mu.Lock()
-			requester := h.agentChatHistoryReq[result.RequestID].requester
-			delete(h.agentChatHistoryReq, result.RequestID)
-			h.mu.Unlock()
+
+			hasMore := result.HasMore
+			nextCursor := result.NextCursor
+			if requestedPage.Limit > 0 && !result.Paginated {
+				eventsToForward, nextCursor, hasMore = protocol.PaginateTaskHistory(
+					eventsToForward,
+					requestedPage.Cursor,
+					requestedPage.Limit,
+				)
+			}
+			requester := pendingRequest.requester
 			for _, event := range eventsToForward {
 				forward := taskEventEnvelope(event)
 				forward.From = "server"
 				if requester != nil {
-					requester.tryEnqueue(forward)
+					if !requester.enqueue(forward) {
+						return
+					}
 				} else {
 					h.broadcastToTask(dc.userID, result.TaskID, forward)
 				}
 			}
 			if requester != nil {
 				ready := protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "server", protocol.TaskHistoryReady{
-					RequestID: result.RequestID,
-					TaskID:    result.TaskID,
-					HasEvents: len(eventsToForward) > 0,
+					RequestID:  result.RequestID,
+					TaskID:     result.TaskID,
+					HasEvents:  len(eventsToForward) > 0,
+					HasMore:    hasMore,
+					NextCursor: nextCursor,
 				})
-				requester.tryEnqueue(ready)
+				requester.enqueue(ready)
 			}
 		}
 	case protocol.TypeTerminalStreamData:
@@ -2051,7 +2197,7 @@ func (h *Hub) stateView(userID string) StateView {
 			Agent:      dc.agent,
 			AgentLabel: dc.agentLabel,
 			Agents:     dc.agents,
-			LastSeenAt: dc.lastSeen.Unix(),
+			LastSeenAt: dc.lastSeenUnix(),
 			Workspaces: dc.workspaces,
 			Features:   deviceFeatures(dc),
 		})
@@ -2712,15 +2858,24 @@ func writeLoop(conn *websocket.Conn, ch <-chan protocol.Envelope, done <-chan st
 	}
 }
 
-func writeDaemonLoop(dc *daemonConn) {
+func writeDaemonLoop(dc *daemonConn, timings daemonConnectionTimings) {
 	defer dc.shutdown()
+	ticker := time.NewTicker(timings.pingInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-dc.done:
 			return
 		case env := <-dc.send:
 			dc.mu.Lock()
-			err := writeEnvelope(dc.conn, env)
+			err := writeEnvelopeWithin(dc.conn, env, timings.writeTimeout)
+			dc.mu.Unlock()
+			if err != nil {
+				return
+			}
+		case <-ticker.C:
+			dc.mu.Lock()
+			err := writeWebSocketPing(dc.conn, timings.writeTimeout)
 			dc.mu.Unlock()
 			if err != nil {
 				return
@@ -2730,6 +2885,10 @@ func writeDaemonLoop(dc *daemonConn) {
 }
 
 func writeEnvelope(conn *websocket.Conn, env protocol.Envelope) error {
+	return writeEnvelopeWithin(conn, env, webSocketWriteTimeout)
+}
+
+func writeEnvelopeWithin(conn *websocket.Conn, env protocol.Envelope, timeout time.Duration) error {
 	if env.Version == 0 {
 		env.Version = 1
 	}
@@ -2739,7 +2898,25 @@ func writeEnvelope(conn *websocket.Conn, env protocol.Envelope) error {
 	if env.ID == "" {
 		env.ID = protocol.NewID("msg")
 	}
+	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
 	return conn.WriteJSON(env)
+}
+
+func writeWebSocketMessageWithin(conn *websocket.Conn, messageType int, data []byte, timeout time.Duration) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	return conn.WriteMessage(messageType, data)
+}
+
+func writeWebSocketPing(conn *websocket.Conn, timeout time.Duration) error {
+	return conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(timeout))
+}
+
+func refreshWebSocketReadDeadline(conn *websocket.Conn, timeout time.Duration) error {
+	return conn.SetReadDeadline(time.Now().Add(timeout))
 }
 
 func enableTCPNoDelay(conn *websocket.Conn) {
@@ -2750,7 +2927,7 @@ func enableTCPNoDelay(conn *websocket.Conn) {
 
 func isAgentChatCommandType(messageType string) bool {
 	switch messageType {
-	case protocol.TypeSessionList, protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete:
+	case protocol.TypeSessionList, protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete, protocol.TypeTaskHistoryGet:
 		return true
 	default:
 		return false

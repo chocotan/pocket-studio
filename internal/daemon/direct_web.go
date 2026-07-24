@@ -196,10 +196,20 @@ func (d *Daemon) handleDirectAgentChatWebSocket(w http.ResponseWriter, r *http.R
 	d.addDirectAgentChatSubscriber(projectID, taskID, subscriber)
 	defer d.removeDirectAgentChatSubscriber(key, subscriber)
 
-	historyEvents := d.sendDirectTaskHistory(subscriber, taskID, project.WorkspacePath)
+	historyLimit := 0
+	if r.URL.Query().Get("history_paging") == "1" {
+		historyLimit = protocol.DefaultTaskHistoryLimit
+	}
+	historyEvents, nextCursor, hasMore := d.sendDirectTaskHistory(subscriber, protocol.TaskHistoryGet{
+		TaskID:        taskID,
+		WorkspacePath: project.WorkspacePath,
+		Limit:         historyLimit,
+	})
 	_ = subscriber.writeEnvelope(protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "daemon", protocol.TaskHistoryReady{
-		TaskID:    taskID,
-		HasEvents: historyEvents > 0,
+		TaskID:     taskID,
+		HasEvents:  historyEvents > 0,
+		HasMore:    hasMore,
+		NextCursor: nextCursor,
 	}))
 
 	for {
@@ -220,6 +230,30 @@ func (d *Daemon) handleDirectAgentChatWebSocket(w http.ResponseWriter, r *http.R
 		}
 		if !envelopeMatchesDirectTask(env, taskID) {
 			_ = subscriber.writeEnvelope(directServerError("task_mismatch", "message task_id does not match websocket task_id", env.ID))
+			continue
+		}
+		if env.Type == protocol.TypeTaskHistoryGet {
+			request, err := protocol.DecodePayload[protocol.TaskHistoryGet](env)
+			if err != nil {
+				_ = subscriber.writeEnvelope(directServerError("bad_payload", "invalid task history request", env.ID))
+				continue
+			}
+			request.TaskID = taskID
+			request.WorkspacePath = project.WorkspacePath
+			if request.RequestID == "" {
+				request.RequestID = env.ID
+			}
+			if request.Limit <= 0 {
+				request.Limit = protocol.DefaultTaskHistoryLimit
+			}
+			historyEvents, nextCursor, hasMore := d.sendDirectTaskHistory(subscriber, request)
+			_ = subscriber.writeEnvelope(protocol.NewEnvelope(protocol.TypeTaskHistoryReady, "daemon", protocol.TaskHistoryReady{
+				RequestID:  request.RequestID,
+				TaskID:     taskID,
+				HasEvents:  historyEvents > 0,
+				HasMore:    hasMore,
+				NextCursor: nextCursor,
+			}))
 			continue
 		}
 		if env.To.DeviceID == "" {
@@ -395,23 +429,31 @@ func (d *Daemon) projectIDForTask(taskID string) string {
 	return d.projectIDForWorkspacePath(record.WorkspacePath)
 }
 
-func (d *Daemon) sendDirectTaskHistory(subscriber *directAgentChatSubscriber, taskID string, workspacePath string) int {
-	record := d.taskHistoryForRequest(taskID, workspacePath)
+func (d *Daemon) sendDirectTaskHistory(subscriber *directAgentChatSubscriber, request protocol.TaskHistoryGet) (int, string, bool) {
+	record := d.taskHistoryForRequest(request.TaskID, request.WorkspacePath)
 	if record.TaskID == "" {
-		return 0
+		return 0, "", false
 	}
-	record.TaskID = taskID
+	record = cloneTaskRecord(record)
+	record.TaskID = request.TaskID
 	for i := range record.Events {
-		record.Events[i].TaskID = taskID
+		record.Events[i].TaskID = request.TaskID
 	}
+	events := protocol.SanitizeTaskHistoryEvents(normalizedTaskHistoryEvents(record))
+	if isDirectACPRecord(record) {
+		for index := range events {
+			stripRedundantDirectACPEventRaw(&events[index])
+		}
+	}
+	page, nextCursor, hasMore := protocol.PaginateTaskHistory(events, request.Cursor, request.Limit)
 	sent := 0
-	for _, event := range normalizedTaskHistoryEvents(record) {
+	for _, event := range page {
 		if err := subscriber.writeEnvelope(protocol.NewEnvelope(protocol.TypeTaskEvent, "daemon", event)); err != nil {
-			return sent
+			return sent, "", false
 		}
 		sent++
 	}
-	return sent
+	return sent, nextCursor, hasMore
 }
 
 func (d *Daemon) handleDirectAgentChatEnvelope(env protocol.Envelope) bool {
@@ -466,7 +508,7 @@ func (d *Daemon) handleDirectAgentChatEnvelope(env protocol.Envelope) bool {
 
 func isDirectAgentChatCommandType(messageType string) bool {
 	switch messageType {
-	case protocol.TypeSessionList, protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete:
+	case protocol.TypeSessionList, protocol.TypeSessionCreate, protocol.TypeTaskDispatch, protocol.TypeTaskStop, protocol.TypeTaskSetModel, protocol.TypeTaskSetConfigOption, protocol.TypeSessionDelete, protocol.TypeTaskHistoryGet:
 		return true
 	default:
 		return false

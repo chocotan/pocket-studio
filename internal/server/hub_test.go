@@ -1272,14 +1272,15 @@ func TestDirectEndpointMaterializesDaemonWorkspaceProject(t *testing.T) {
 func TestDeviceAliasAPIUpdatesDeviceName(t *testing.T) {
 	h := NewHub(auth.NewOpen(""))
 	send := make(chan protocol.Envelope, 1)
-	h.mu.Lock()
-	h.daemons[daemonKey(auth.OwnerAdmin, "dev-1")] = &daemonConn{
+	dc := &daemonConn{
 		userID:     auth.OwnerAdmin,
 		deviceID:   "dev-1",
 		deviceName: "old-name",
 		send:       send,
-		lastSeen:   time.Unix(100, 0),
 	}
+	dc.markSeen(time.Unix(100, 0))
+	h.mu.Lock()
+	h.daemons[daemonKey(auth.OwnerAdmin, "dev-1")] = dc
 	h.mu.Unlock()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/device/alias", strings.NewReader(`{"device_id":"dev-1","alias":"Desk Rig"}`))

@@ -6,7 +6,6 @@ import {
   getToolEventId,
   normalizeTextForDedup,
   normalizeToolEventMetadata,
-  sortTaskEventsForDisplay,
 } from "./event-model";
 
 type EventRecord = Record<string, unknown>;
@@ -400,7 +399,7 @@ export function applyTaskEventToMessageState(prev: MessageState, event: TaskEven
 export function buildMessageStateFromEvents(events: TaskEvent[], taskID: string): MessageState {
   void taskID;
   const state = createMessageState();
-  for (const event of orderEventsForMessageState(compactStreamEvents(sortTaskEventsForDisplay(events)))) {
+  for (const event of orderEventsForMessageState(compactStreamEvents(events))) {
     applyMessageEvent(state, event);
   }
   const importedPromptIDs = new Set(events.filter((event) => (

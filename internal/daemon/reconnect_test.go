@@ -42,3 +42,14 @@ func TestReconnectDelayResetsAfterStableConnection(t *testing.T) {
 		t.Fatalf("reconnectDelay() next after stable connection = %s, want 2s", next)
 	}
 }
+
+func TestReconnectJitterStaysWithinHalfToFullDelay(t *testing.T) {
+	for _, maximum := range []time.Duration{time.Second, 8 * time.Second, reconnectMaxDelay} {
+		for range 100 {
+			got := jitterReconnectDelay(maximum)
+			if got < maximum/2 || got > maximum {
+				t.Fatalf("jitterReconnectDelay(%s) = %s, want within [%s, %s]", maximum, got, maximum/2, maximum)
+			}
+		}
+	}
+}

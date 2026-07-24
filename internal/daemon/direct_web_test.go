@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +172,101 @@ func TestDirectAgentChatEndpointRoutesHistoryAndLiveEvents(t *testing.T) {
 	}
 	if live.Type != protocol.TypeTaskEvent || event.EventType != "model.list" {
 		t.Fatalf("live envelope = %#v event=%#v", live, event)
+	}
+}
+
+func TestDirectAgentChatEndpointLoadsOlderHistoryPage(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Device.ID = "dev"
+	cfg.DirectWeb.Enabled = true
+	cfg.DirectWeb.Token = "secret"
+	workspacePath := t.TempDir()
+	cfg.Workspaces = []protocol.Workspace{{ID: "project", Name: "Project", Path: workspacePath}}
+	d := New(cfg)
+	events := make([]protocol.TaskEvent, 250)
+	for index := range events {
+		events[index] = protocol.TaskEvent{
+			TaskID:    "task",
+			EventID:   "event-" + strconv.Itoa(index),
+			EventType: "assistant.message",
+			Sequence:  int64(index + 1),
+		}
+	}
+	d.mu.Lock()
+	d.projects["project"] = protocol.Project{ID: "project", Name: "Project", DeviceID: "dev", WorkspacePath: workspacePath, DirectMode: true}
+	d.history["task"] = protocol.TaskRecord{
+		TaskID:        "task",
+		WorkspacePath: workspacePath,
+		Status:        "completed",
+		Events:        events,
+	}
+	d.mu.Unlock()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/agent", d.handleDirectAgentChatWebSocket)
+	server := http.Server{Handler: mux}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	go server.Serve(listener)
+
+	token := protocol.NewDirectTerminalToken("secret", "project", time.Now().Add(time.Minute))
+	ws, _, err := websocket.DefaultDialer.Dial("ws://"+listener.Addr().String()+"/ws/agent?project_id=project&task_id=task&history_paging=1&token="+token, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	readEvent := func(wantID string) {
+		t.Helper()
+		var envelope protocol.Envelope
+		if err := ws.ReadJSON(&envelope); err != nil {
+			t.Fatalf("read %s: %v", wantID, err)
+		}
+		event, err := protocol.DecodePayload[protocol.TaskEvent](envelope)
+		if err != nil || envelope.Type != protocol.TypeTaskEvent || event.EventID != wantID {
+			t.Fatalf("history event = %#v payload=%#v err=%v, want %s", envelope, event, err, wantID)
+		}
+	}
+	readReady := func() protocol.TaskHistoryReady {
+		t.Helper()
+		var envelope protocol.Envelope
+		if err := ws.ReadJSON(&envelope); err != nil {
+			t.Fatalf("read history ready: %v", err)
+		}
+		ready, err := protocol.DecodePayload[protocol.TaskHistoryReady](envelope)
+		if err != nil || envelope.Type != protocol.TypeTaskHistoryReady {
+			t.Fatalf("history ready = %#v payload=%#v err=%v", envelope, ready, err)
+		}
+		return ready
+	}
+
+	for index := 50; index < 250; index++ {
+		readEvent("event-" + strconv.Itoa(index))
+	}
+	ready := readReady()
+	if !ready.HasMore || ready.NextCursor != "event-50" {
+		t.Fatalf("initial ready = %#v", ready)
+	}
+
+	requestID := "older-request"
+	if err := ws.WriteJSON(protocol.NewEnvelope(protocol.TypeTaskHistoryGet, "web", protocol.TaskHistoryGet{
+		RequestID: requestID,
+		TaskID:    "task",
+		Cursor:    ready.NextCursor,
+		Limit:     protocol.DefaultTaskHistoryLimit,
+	})); err != nil {
+		t.Fatalf("request older history: %v", err)
+	}
+	for index := 0; index < 50; index++ {
+		readEvent("event-" + strconv.Itoa(index))
+	}
+	olderReady := readReady()
+	if olderReady.RequestID != requestID || olderReady.HasMore || olderReady.NextCursor != "" {
+		t.Fatalf("older ready = %#v", olderReady)
 	}
 }
 

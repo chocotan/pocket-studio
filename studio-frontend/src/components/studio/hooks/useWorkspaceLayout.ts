@@ -46,6 +46,11 @@ import {
 import { directWebsocketURL, getJSON, postJSON, websocketURL } from "@/lib/api";
 import { agentChatWebSocketURL } from "../agent-chat/direct-websocket";
 import type { NotificationHostTarget, NotificationJumpTarget } from "../terminal-notifications";
+import {
+  cacheWorkspaceState,
+  loadWorkspaceState,
+  readWorkspaceStateCache,
+} from "./workspace-state-cache";
 
 function collectAllPanels(node: LayoutNode | null): TerminalPanel[] {
   if (!node) return [];
@@ -278,7 +283,20 @@ export function useWorkspaceLayout({
       setLayoutVersion((value) => value + 1);
     };
 
-    getJSON<unknown>(`/api/project/state?project_id=${encodeURIComponent(projectId)}`)
+    const cachedState = readWorkspaceStateCache(projectId);
+    if (cachedState.found) {
+      applyState({ ...project, studio_state: cachedState.state });
+      setLoadedProjectId(projectId);
+      setStateLoaded(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    loadWorkspaceState(
+      projectId,
+      () => getJSON<unknown>(`/api/project/state?project_id=${encodeURIComponent(projectId)}`),
+    )
       .then((state) => {
         if (cancelled) return;
         applyState({ ...project, studio_state: state });
@@ -300,7 +318,15 @@ export function useWorkspaceLayout({
   }, [project.id, projectId]);
 
   useEffect(() => {
-    if (!stateLoaded) return;
+    if (!stateLoaded || loadedProjectId !== projectId) return;
+    const state = {
+      layoutTree: cleanLayoutTitles(layoutTree),
+      focusedId,
+      newTerminalType,
+      layoutMode,
+      floatingPanels,
+    };
+    cacheWorkspaceState(projectId, state);
     if (skipSaveRef.current) {
       skipSaveRef.current = false;
       return;
@@ -308,19 +334,13 @@ export function useWorkspaceLayout({
     const timer = window.setTimeout(() => {
       postJSON("/api/project/state", {
         project_id: projectId,
-        state: {
-          layoutTree: cleanLayoutTitles(layoutTree),
-          focusedId,
-          newTerminalType,
-          layoutMode,
-          floatingPanels,
-        },
+        state,
       }).catch((err) => {
         console.error("failed to save studio state:", err);
       });
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [layoutTree, focusedId, newTerminalType, layoutMode, floatingPanels, projectId, stateLoaded]);
+  }, [layoutTree, focusedId, newTerminalType, layoutMode, floatingPanels, loadedProjectId, projectId, stateLoaded]);
 
   const panels = collectAllPanels(layoutTree);
 

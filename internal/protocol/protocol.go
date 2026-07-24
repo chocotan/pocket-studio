@@ -51,6 +51,8 @@ const (
 const (
 	FeatureTerminalBinaryV1 = "terminal.binary.v1"
 	FeatureDirectTerminalV1 = "terminal.direct.v1"
+	DefaultTaskHistoryLimit = 200
+	MaxTaskHistoryLimit     = 500
 )
 
 type Envelope struct {
@@ -216,19 +218,26 @@ type TaskHistoryGet struct {
 	RequestID     string `json:"request_id,omitempty"`
 	TaskID        string `json:"task_id"`
 	WorkspacePath string `json:"workspace_path,omitempty"`
+	Cursor        string `json:"cursor,omitempty"`
+	Limit         int    `json:"limit,omitempty"`
 }
 
 type TaskHistoryResult struct {
-	RequestID string      `json:"request_id,omitempty"`
-	TaskID    string      `json:"task_id"`
-	Record    *TaskRecord `json:"record,omitempty"`
-	Events    []TaskEvent `json:"events,omitempty"`
+	RequestID  string      `json:"request_id,omitempty"`
+	TaskID     string      `json:"task_id"`
+	Record     *TaskRecord `json:"record,omitempty"`
+	Events     []TaskEvent `json:"events,omitempty"`
+	Paginated  bool        `json:"paginated,omitempty"`
+	HasMore    bool        `json:"has_more,omitempty"`
+	NextCursor string      `json:"next_cursor,omitempty"`
 }
 
 type TaskHistoryReady struct {
-	RequestID string `json:"request_id,omitempty"`
-	TaskID    string `json:"task_id"`
-	HasEvents bool   `json:"has_events"`
+	RequestID  string `json:"request_id,omitempty"`
+	TaskID     string `json:"task_id"`
+	HasEvents  bool   `json:"has_events"`
+	HasMore    bool   `json:"has_more,omitempty"`
+	NextCursor string `json:"next_cursor,omitempty"`
 }
 
 type TaskSnapshot struct {

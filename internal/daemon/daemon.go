@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	mathrand "math/rand/v2"
 	"mime"
 	"net"
 	"net/http"
@@ -62,15 +63,53 @@ type Daemon struct {
 	directACPStoreSavedGeneration uint64
 	directACPStoreDebounce        time.Duration
 	directACPStoreWrite           func([]byte) error
+	connectionTimings             daemonConnectionTimings
 	shuttingDown                  bool
 }
 
 const (
 	reconnectInitialDelay       = time.Second
-	reconnectMaxDelay           = 5 * time.Minute
+	reconnectMaxDelay           = 30 * time.Second
 	reconnectStableAfter        = 30 * time.Second
 	directACPStoreDebounceDelay = time.Second
+	daemonHandshakeTimeout      = 10 * time.Second
+	daemonSocketWriteTimeout    = 10 * time.Second
+	daemonSocketPongTimeout     = 45 * time.Second
+	daemonHeartbeatInterval     = 15 * time.Second
 )
+
+type daemonConnectionTimings struct {
+	handshakeTimeout  time.Duration
+	writeTimeout      time.Duration
+	pongTimeout       time.Duration
+	heartbeatInterval time.Duration
+}
+
+func defaultDaemonConnectionTimings() daemonConnectionTimings {
+	return daemonConnectionTimings{
+		handshakeTimeout:  daemonHandshakeTimeout,
+		writeTimeout:      daemonSocketWriteTimeout,
+		pongTimeout:       daemonSocketPongTimeout,
+		heartbeatInterval: daemonHeartbeatInterval,
+	}
+}
+
+func (timings daemonConnectionTimings) withDefaults() daemonConnectionTimings {
+	defaults := defaultDaemonConnectionTimings()
+	if timings.handshakeTimeout <= 0 {
+		timings.handshakeTimeout = defaults.handshakeTimeout
+	}
+	if timings.writeTimeout <= 0 {
+		timings.writeTimeout = defaults.writeTimeout
+	}
+	if timings.pongTimeout <= 0 {
+		timings.pongTimeout = defaults.pongTimeout
+	}
+	if timings.heartbeatInterval <= 0 {
+		timings.heartbeatInterval = defaults.heartbeatInterval
+	}
+	return timings
+}
 
 type runningTask struct {
 	id        string
@@ -133,6 +172,7 @@ func New(cfg Config) *Daemon {
 		startingTasks:           make(map[string]struct{}),
 		taskDispatchMu:          make(map[string]*sync.Mutex),
 		directACPStoreDebounce:  directACPStoreDebounceDelay,
+		connectionTimings:       defaultDaemonConnectionTimings(),
 	}
 }
 
@@ -173,8 +213,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		var delay time.Duration
-		delay, nextDelay = reconnectDelay(nextDelay, time.Since(started))
+		var baseDelay time.Duration
+		baseDelay, nextDelay = reconnectDelay(nextDelay, time.Since(started))
+		delay := jitterReconnectDelay(baseDelay)
 		log.Printf("daemon reconnecting in %s", delay)
 		select {
 		case <-ctx.Done():
@@ -287,6 +328,15 @@ func reconnectDelay(current time.Duration, connectedFor time.Duration) (time.Dur
 	return delay, nextReconnectDelay(delay)
 }
 
+func jitterReconnectDelay(maximum time.Duration) time.Duration {
+	if maximum <= 0 {
+		return 0
+	}
+	minimum := maximum / 2
+	span := maximum - minimum
+	return minimum + time.Duration(mathrand.Int64N(int64(span)+1))
+}
+
 func nextReconnectDelay(current time.Duration) time.Duration {
 	if current < reconnectInitialDelay {
 		return reconnectInitialDelay
@@ -303,59 +353,60 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	timings := d.connectionTimings.withDefaults()
 	header := http.Header{}
 	if token := strings.TrimSpace(d.cfg.Server.Token); token != "" {
 		header.Set("Authorization", "Bearer "+token)
 	}
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), header)
+	dialer := *websocket.DefaultDialer
+	dialer.HandshakeTimeout = timings.handshakeTimeout
+	dialer.NetDialContext = (&net.Dialer{
+		Timeout:   timings.handshakeTimeout,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	conn, response, err := dialer.DialContext(ctx, u.String(), header)
 	if err != nil {
-		return err
+		responseStatus := ""
+		if response != nil && response.Body != nil {
+			responseStatus = response.Status
+			_ = response.Body.Close()
+		}
+		if responseStatus != "" {
+			return fmt.Errorf("dial server websocket (%s): %w", responseStatus, err)
+		}
+		return fmt.Errorf("dial server websocket: %w", err)
 	}
 	defer conn.Close()
 	enableTCPNoDelay(conn)
+	if err := refreshWebSocketReadDeadline(conn, timings.pongTimeout); err != nil {
+		return fmt.Errorf("set server websocket read deadline: %w", err)
+	}
+	conn.SetPongHandler(func(string) error {
+		return refreshWebSocketReadDeadline(conn, timings.pongTimeout)
+	})
+	pingHandler := conn.PingHandler()
+	conn.SetPingHandler(func(message string) error {
+		if err := refreshWebSocketReadDeadline(conn, timings.pongTimeout); err != nil {
+			return err
+		}
+		return pingHandler(message)
+	})
+	// These frames identify a new socket before queues retained across reconnects
+	// can drain stale task or terminal traffic onto it.
+	if err := writeEnvelopeWithin(conn, d.helloEnvelope(), timings.writeTimeout); err != nil {
+		return fmt.Errorf("send daemon hello: %w", err)
+	}
+	if err := writeEnvelopeWithin(conn, d.taskSnapshotEnvelope(nil), timings.writeTimeout); err != nil {
+		return fmt.Errorf("send daemon snapshot: %w", err)
+	}
+	log.Printf("daemon connection established")
+
 	connCtx, cancelConn := context.WithCancel(ctx)
 	defer cancelConn()
 
 	writeDone := make(chan error, 1)
 	go func() {
-		for {
-			select {
-			case <-connCtx.Done():
-				writeDone <- connCtx.Err()
-				return
-			case raw := <-d.sendBinary:
-				if err := conn.WriteMessage(websocket.BinaryMessage, raw); err != nil {
-					writeDone <- err
-					return
-				}
-			case env := <-d.send:
-				if err := writeEnvelope(conn, env); err != nil {
-					writeDone <- err
-					return
-				}
-			}
-		}
-	}()
-
-	d.sendHello()
-	d.sendSnapshot(connCtx)
-
-	go func() {
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-connCtx.Done():
-				return
-			case <-ticker.C:
-				d.send <- protocol.NewEnvelope(protocol.TypeDaemonHeartbeat, "daemon", protocol.DaemonHeartbeat{
-					DeviceID:       d.cfg.Device.ID,
-					Status:         "online",
-					RunningTaskIDs: d.runningTaskIDs(),
-					DaemonVersion:  "0.1.0",
-				})
-			}
-		}
+		writeDone <- d.writeServerLoop(connCtx, conn, timings)
 	}()
 
 	readErr := make(chan error, 1)
@@ -363,6 +414,10 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 		for {
 			msgType, raw, err := conn.ReadMessage()
 			if err != nil {
+				readErr <- err
+				return
+			}
+			if err := refreshWebSocketReadDeadline(conn, timings.pongTimeout); err != nil {
 				readErr <- err
 				return
 			}
@@ -397,6 +452,41 @@ func (d *Daemon) runOnce(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (d *Daemon) writeServerLoop(ctx context.Context, conn *websocket.Conn, timings daemonConnectionTimings) error {
+	ticker := time.NewTicker(timings.heartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case raw := <-d.sendBinary:
+			if err := writeWebSocketMessageWithin(conn, websocket.BinaryMessage, raw, timings.writeTimeout); err != nil {
+				return err
+			}
+		case env := <-d.send:
+			if err := writeEnvelopeWithin(conn, env, timings.writeTimeout); err != nil {
+				return err
+			}
+		case <-ticker.C:
+			if err := writeEnvelopeWithin(conn, d.heartbeatEnvelope(), timings.writeTimeout); err != nil {
+				return err
+			}
+			if err := writeWebSocketPing(conn, timings.writeTimeout); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (d *Daemon) heartbeatEnvelope() protocol.Envelope {
+	return protocol.NewEnvelope(protocol.TypeDaemonHeartbeat, "daemon", protocol.DaemonHeartbeat{
+		DeviceID:       d.cfg.Device.ID,
+		Status:         "online",
+		RunningTaskIDs: d.runningTaskIDs(),
+		DaemonVersion:  "0.1.0",
+	})
 }
 
 func (d *Daemon) agentName() string {
@@ -1183,15 +1273,28 @@ func (d *Daemon) sendTaskHistory(request protocol.TaskHistoryGet) {
 	result := protocol.TaskHistoryResult{
 		RequestID: request.RequestID,
 		TaskID:    request.TaskID,
+		Paginated: request.Limit > 0,
 	}
 	if record.TaskID != "" {
+		record = cloneTaskRecord(record)
 		record.TaskID = request.TaskID
 		for i := range record.Events {
 			record.Events[i].TaskID = request.TaskID
 		}
-		record.Events = normalizedTaskHistoryEvents(record)
+		events := protocol.SanitizeTaskHistoryEvents(normalizedTaskHistoryEvents(record))
+		if isDirectACPRecord(record) {
+			for index := range events {
+				stripRedundantDirectACPEventRaw(&events[index])
+			}
+		}
+		if request.Limit > 0 {
+			result.Events, result.NextCursor, result.HasMore = protocol.PaginateTaskHistory(events, request.Cursor, request.Limit)
+			record.Events = nil
+		} else {
+			record.Events = events
+			result.Events = append([]protocol.TaskEvent(nil), events...)
+		}
 		result.Record = &record
-		result.Events = append([]protocol.TaskEvent(nil), record.Events...)
 	}
 	d.send <- protocol.NewEnvelope(protocol.TypeTaskHistoryResult, "daemon", result)
 }
@@ -2899,8 +3002,8 @@ func (d *Daemon) sendProjectError(requestID string, message string) {
 	d.sendProjectResult(protocol.ProjectResult{RequestID: requestID, Error: message})
 }
 
-func (d *Daemon) sendHello() {
-	d.send <- protocol.NewEnvelope(protocol.TypeDaemonHello, "daemon", protocol.DaemonHello{
+func (d *Daemon) helloEnvelope() protocol.Envelope {
+	return protocol.NewEnvelope(protocol.TypeDaemonHello, "daemon", protocol.DaemonHello{
 		DeviceID:       d.cfg.Device.ID,
 		DeviceName:     d.cfg.DisplayDeviceName(),
 		DaemonVersion:  "0.1.0",
@@ -2911,6 +3014,10 @@ func (d *Daemon) sendHello() {
 		Features:       []string{protocol.FeatureTerminalBinaryV1, protocol.FeatureDirectTerminalV1},
 		DirectEndpoint: d.directEndpoint(),
 	})
+}
+
+func (d *Daemon) sendHello() {
+	d.send <- d.helloEnvelope()
 }
 
 func (d *Daemon) setDeviceAlias(request protocol.DeviceAliasSetRequest) {
@@ -3045,22 +3152,29 @@ func (d *Daemon) sendSnapshot(ctx context.Context) {
 }
 
 func (d *Daemon) sendTaskSnapshot(ctx context.Context, deletedTaskIDs []string) {
-	d.mu.Lock()
-	tasks := make([]protocol.TaskRecord, 0, len(d.history))
-	for _, record := range d.history {
-		record.Events = normalizedTaskHistoryEvents(record)
-		tasks = append(tasks, record)
-	}
-	d.mu.Unlock()
-	envelope := protocol.NewEnvelope(protocol.TypeTaskSnapshot, "daemon", protocol.TaskSnapshot{
-		DeviceID:       d.cfg.Device.ID,
-		Tasks:          tasks,
-		DeletedTaskIDs: deletedTaskIDs,
-	})
+	envelope := d.taskSnapshotEnvelope(deletedTaskIDs)
 	select {
 	case d.send <- envelope:
 	case <-ctx.Done():
 	}
+}
+
+func (d *Daemon) taskSnapshotEnvelope(deletedTaskIDs []string) protocol.Envelope {
+	d.mu.Lock()
+	tasks := make([]protocol.TaskRecord, 0, len(d.history))
+	for _, record := range d.history {
+		// Conversation events are fetched through bounded history pages. Keeping
+		// them out of the reconnect snapshot prevents one large conversation from
+		// delaying daemon registration or exceeding a WebSocket frame limit.
+		record.Events = nil
+		tasks = append(tasks, record)
+	}
+	d.mu.Unlock()
+	return protocol.NewEnvelope(protocol.TypeTaskSnapshot, "daemon", protocol.TaskSnapshot{
+		DeviceID:       d.cfg.Device.ID,
+		Tasks:          tasks,
+		DeletedTaskIDs: deletedTaskIDs,
+	})
 }
 
 func indexedEventKey(turnIndex int, eventType string, ordinal int) string {
@@ -3946,6 +4060,17 @@ func hasFeature(features []string, target string) bool {
 }
 
 func writeEnvelope(conn *websocket.Conn, env protocol.Envelope) error {
+	return conn.WriteJSON(normalizedEnvelope(env))
+}
+
+func writeEnvelopeWithin(conn *websocket.Conn, env protocol.Envelope, timeout time.Duration) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	return writeEnvelope(conn, env)
+}
+
+func normalizedEnvelope(env protocol.Envelope) protocol.Envelope {
 	if env.ID == "" {
 		env.ID = protocol.NewID("msg")
 	}
@@ -3955,7 +4080,22 @@ func writeEnvelope(conn *websocket.Conn, env protocol.Envelope) error {
 	if env.Timestamp == 0 {
 		env.Timestamp = time.Now().Unix()
 	}
-	return conn.WriteJSON(env)
+	return env
+}
+
+func writeWebSocketMessageWithin(conn *websocket.Conn, messageType int, data []byte, timeout time.Duration) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	return conn.WriteMessage(messageType, data)
+}
+
+func writeWebSocketPing(conn *websocket.Conn, timeout time.Duration) error {
+	return conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(timeout))
+}
+
+func refreshWebSocketReadDeadline(conn *websocket.Conn, timeout time.Duration) error {
+	return conn.SetReadDeadline(time.Now().Add(timeout))
 }
 
 func enableTCPNoDelay(conn *websocket.Conn) {

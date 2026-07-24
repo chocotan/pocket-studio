@@ -20,19 +20,20 @@ export function agentChatDirectEndpointURL(project: AgentChatProjectEndpoint) {
 }
 
 export function agentChatWebSocketURL(project: AgentChatProjectEndpoint, taskId: string): { url: string; transport: AgentChatTransport } {
+  const params = new URLSearchParams({ task_id: taskId, project_id: project.id, history_paging: "1" });
   const directEndpointURL = agentChatDirectEndpointURL(project);
   if (directEndpointURL) {
     return {
       url: directWebsocketURL(
         directEndpointURL,
-        new URLSearchParams({ task_id: taskId, project_id: project.id }),
+        params,
         project.direct_endpoint?.token
       ),
       transport: "direct",
     };
   }
   return {
-    url: websocketURL("/ws/agent", new URLSearchParams({ task_id: taskId, project_id: project.id })),
+    url: websocketURL("/ws/agent", params),
     transport: "relay",
   };
 }

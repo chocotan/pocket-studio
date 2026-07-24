@@ -386,6 +386,7 @@ class MainActivity : ComponentActivity() {
         onDispose { controller?.close() }
     }
     Scaffold(
+        modifier = Modifier.imePadding(),
         containerColor = TerminalBackgroundColor,
         topBar = {
             Surface(color = TerminalSurfaceColor, contentColor = TerminalForegroundColor) {
@@ -424,7 +425,7 @@ class MainActivity : ComponentActivity() {
         bottomBar = {
             if (showVirtualKeyboard || state.error.isNotBlank()) {
                 Surface(color = TerminalSurfaceColor, contentColor = TerminalForegroundColor) {
-                    Column(Modifier.imePadding().navigationBarsPadding()) {
+                    Column(Modifier.navigationBarsPadding()) {
                         ErrorText(state.error, Modifier.padding(horizontal = 12.dp))
                         if (showVirtualKeyboard) TerminalVirtualKeyboard(controller)
                     }
@@ -437,7 +438,7 @@ class MainActivity : ComponentActivity() {
                 modifier = Modifier.fillMaxSize(),
                 factory = { context ->
                     RemoteTerminalController(context, vm.terminalUrl(), vm::terminalOpened, vm::terminalClosed, vm::terminalError)
-                        .also { controller = it }.viewport
+                        .also { controller = it }.view
                 },
             )
             if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth().align(Alignment.TopCenter).height(2.dp), color = TerminalAccentColor)

@@ -1,8 +1,14 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 
 	"remote-agent/internal/auth"
 	"remote-agent/internal/protocol"
@@ -107,5 +113,72 @@ func TestClientEnqueueUnblocksOnShutdown(t *testing.T) {
 				t.Fatalf("%s enqueue succeeded after shutdown", kind)
 			}
 		})
+	}
+}
+
+func TestServerExpiresSilentDaemonAndAcceptsReplacement(t *testing.T) {
+	h := NewHub(auth.NewOpen(""))
+	h.daemonTimings = daemonConnectionTimings{
+		writeTimeout: 100 * time.Millisecond,
+		pongTimeout:  120 * time.Millisecond,
+		pingInterval: 30 * time.Millisecond,
+	}
+	server := httptest.NewServer(http.HandlerFunc(h.ServeDaemonSocket))
+	t.Cleanup(server.Close)
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+
+	first, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial first daemon websocket: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	if err := first.WriteJSON(protocol.NewEnvelope(protocol.TypeDaemonHello, "daemon", protocol.DaemonHello{DeviceID: "device-liveness"})); err != nil {
+		t.Fatalf("write first daemon hello: %v", err)
+	}
+	var stale *daemonConn
+	waitForServerTest(t, func() bool {
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		stale = h.daemons[daemonKey(auth.OwnerAdmin, "device-liveness")]
+		return stale != nil
+	})
+
+	// This client deliberately never reads, so it cannot process server Ping
+	// frames and produce Pong responses. The server must evict it promptly.
+	waitForServerTest(t, func() bool {
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		return h.daemons[daemonKey(auth.OwnerAdmin, "device-liveness")] == nil && stale.closed.Load()
+	})
+
+	second, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial replacement daemon websocket: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		for {
+			if _, _, err := second.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	if err := second.WriteJSON(protocol.NewEnvelope(protocol.TypeDaemonHello, "daemon", protocol.DaemonHello{DeviceID: "device-liveness"})); err != nil {
+		t.Fatalf("write replacement daemon hello: %v", err)
+	}
+	var replacement *daemonConn
+	waitForServerTest(t, func() bool {
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		replacement = h.daemons[daemonKey(auth.OwnerAdmin, "device-liveness")]
+		return replacement != nil && replacement != stale && !replacement.closed.Load()
+	})
+	_ = second.Close()
+	select {
+	case <-readDone:
+	case <-time.After(time.Second):
+		t.Fatal("replacement daemon reader did not stop")
 	}
 }

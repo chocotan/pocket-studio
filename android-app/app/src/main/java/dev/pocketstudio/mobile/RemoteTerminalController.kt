@@ -3,12 +3,9 @@ package dev.pocketstudio.mobile
 import android.content.Context
 import android.util.Log
 import android.view.GestureDetector
-import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
-import android.widget.FrameLayout
 import com.termux.terminal.KeyHandler
 import com.termux.terminal.RemoteTerminalEmulator
 import com.termux.terminal.TerminalOutput
@@ -35,19 +32,6 @@ class RemoteTerminalController(
 ) {
     val view = TerminalView(context, null).apply {
         setBackgroundColor(TerminalLightPalette.backgroundArgb)
-    }
-    val viewport = FrameLayout(context).apply {
-        setBackgroundColor(TerminalLightPalette.backgroundArgb)
-        clipChildren = true
-        clipToPadding = true
-        addView(
-            view,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                Gravity.BOTTOM,
-            ),
-        )
     }
     private var socket: WebSocket? = null
     private val resizePolicy = TerminalResizePolicy()
@@ -206,7 +190,6 @@ class RemoteTerminalController(
             }
             consumed
         }
-        viewport.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> fitStableViewportHeight() }
         view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> sendResizeIfChanged() }
     }
 
@@ -242,19 +225,6 @@ class RemoteTerminalController(
         view.onScreenUpdated()
     }
     fun close() { socket?.close(1000, "leave terminal"); socket = null; session.finishIfRunning() }
-
-    private fun fitStableViewportHeight() {
-        if (viewport.height <= 0) return
-        resizePolicy.stableViewportHeight(viewport.height)
-        view.post {
-            val stableHeight = resizePolicy.stableViewportHeight(viewport.height)
-            val params = view.layoutParams as? FrameLayout.LayoutParams ?: return@post
-            if (params.height == stableHeight) return@post
-            params.height = stableHeight
-            params.gravity = Gravity.BOTTOM
-            view.layoutParams = params
-        }
-    }
 
     private fun sendResizeIfChanged() {
         if (socket == null) return
