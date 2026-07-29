@@ -24,11 +24,11 @@ export function TokenPanel({
     <section className="panel">
       <div className="panel-header">
         <div>
-          <h2>Tokens</h2>
-          <p>用于 daemon 和 studio-frontend 连接 server</p>
+          <h2>访问令牌</h2>
+          <p>给 daemon 与 Studio 共用，完成认证与调度</p>
         </div>
-        <button className="icon-button" type="button" onClick={onRefresh} title="刷新">
-          <RefreshCw size={17} />
+        <button className="icon-button" type="button" onClick={onRefresh} title="刷新" aria-label="刷新令牌列表">
+          <RefreshCw size={16} />
         </button>
       </div>
 
@@ -40,9 +40,9 @@ export function TokenPanel({
           setName("");
         }}
       >
-        <input value={name} placeholder="例如 my laptop" onChange={(event) => setName(event.target.value)} />
+        <input value={name} placeholder="例如 my laptop" onChange={(event) => setName(event.target.value)} aria-label="令牌名称" />
         <button className="primary-button compact" type="submit" disabled={busy}>
-          <Plus size={16} />
+          <Plus size={15} />
           创建
         </button>
       </form>

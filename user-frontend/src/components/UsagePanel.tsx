@@ -35,8 +35,8 @@ export function UsagePanel({ tokens }: UsagePanelProps) {
     <section className="panel usage-panel">
       <div className="panel-header">
         <div>
-          <h2>配置示例</h2>
-          <p>daemon 和 studio-frontend 使用同一个 token</p>
+          <h2>接入示例</h2>
+          <p>daemon 与 Studio 共用同一枚 token</p>
         </div>
       </div>
       <Snippet title="daemon 启动命令" value={daemonCommand} />

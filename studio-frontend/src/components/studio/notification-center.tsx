@@ -66,7 +66,7 @@ export function NotificationCenter({
           type="button"
           onClick={() => onSelect(visibleTickerItem)}
           data-alert={unreadCount > 0 ? "true" : "false"}
-          className="studio-notification-ticker-button relative hidden h-6 min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white px-2 text-left text-slate-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 sm:block"
+          className="studio-notification-ticker-button relative hidden h-6 min-w-0 overflow-hidden rounded-md border border-border bg-card px-2 text-left text-muted-foreground shadow-sm transition-colors hover:border-primary/25 hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring dark:border-border dark:bg-card dark:text-foreground/80 sm:block"
           title={notificationTickerText(visibleTickerItem, now)}
           aria-label={`跳转消息：${notificationTickerText(visibleTickerItem, now)}`}
         >
@@ -87,7 +87,7 @@ export function NotificationCenter({
         type="button"
         onClick={() => onOpenChange(!open)}
         data-alert={unreadCount > 0 ? "true" : "false"}
-        className="studio-notification-button relative flex h-6 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-slate-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+        className="studio-notification-button relative flex h-6 items-center gap-1 rounded-md border border-border bg-card px-2 text-muted-foreground shadow-sm transition-colors hover:border-primary/25 hover:text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring dark:border-border dark:bg-card dark:text-foreground/80"
         title="消息列表"
         aria-label={`消息列表${unreadCount ? `，${unreadCount} 条未读` : ""}`}
       >
@@ -103,14 +103,14 @@ export function NotificationCenter({
       {open && (
         <>
           <div className="fixed inset-0 z-40 cursor-default" onClick={() => onOpenChange(false)} />
-          <div className="absolute right-0 top-8 z-50 w-[min(22rem,calc(100dvw-1rem))] overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
-            <div className="flex h-9 items-center justify-between border-b border-slate-100 px-3 dark:border-slate-800">
-              <span className="text-xs font-bold text-slate-800 dark:text-slate-100">消息</span>
+          <div className="absolute right-0 top-8 z-50 w-[min(22rem,calc(100dvw-1rem))] overflow-hidden rounded-lg border border-border bg-card shadow-xl dark:border-border dark:bg-card">
+            <div className="flex h-9 items-center justify-between border-b border-border/70 px-3 dark:border-border">
+              <span className="text-xs font-bold text-foreground dark:text-foreground">消息</span>
               <button
                 type="button"
                 onClick={onMarkAllRead}
                 disabled={unreadCount === 0}
-                className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] font-semibold text-slate-500 hover:bg-slate-50 hover:text-slate-700 disabled:opacity-40 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] font-semibold text-muted-foreground hover:bg-muted/50 hover:text-foreground/85 disabled:opacity-40 dark:text-muted-foreground dark:hover:bg-muted dark:hover:text-foreground"
               >
                 <Check className="h-3 w-3" />
                 全部已读
@@ -118,7 +118,7 @@ export function NotificationCenter({
             </div>
 
             {notifications.length === 0 ? (
-              <div className="flex h-32 flex-col items-center justify-center gap-2 text-slate-400">
+              <div className="flex h-32 flex-col items-center justify-center gap-2 text-muted-foreground/80">
                 <Inbox className="h-5 w-5" />
                 <span className="text-xs font-semibold">暂无消息</span>
               </div>
@@ -130,18 +130,18 @@ export function NotificationCenter({
                     type="button"
                     onClick={() => onSelect(item)}
                     className={cn(
-                      "block w-full border-b border-slate-100 px-3 py-2.5 text-left transition-colors last:border-b-0 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/80",
+                      "block w-full border-b border-border/70 px-3 py-2.5 text-left transition-colors last:border-b-0 hover:bg-muted/50 dark:border-border dark:hover:bg-muted/80",
                       !item.read && "bg-amber-50/55 dark:bg-amber-400/10"
                     )}
                   >
                     <span className="flex min-w-0 items-center gap-2">
-                      <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", item.read ? "bg-slate-300 dark:bg-slate-600" : "bg-amber-500")} />
-                      <span className="min-w-0 flex-1 truncate text-[11px] font-bold text-slate-800 dark:text-slate-100">
+                      <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", item.read ? "bg-border dark:bg-muted-foreground/40" : "bg-amber-500")} />
+                      <span className="min-w-0 flex-1 truncate text-[11px] font-bold text-foreground dark:text-foreground">
                         {item.projectName} / {item.terminalTitle}
                       </span>
-                      <span className="shrink-0 text-[10px] text-slate-400">{formatNotificationTime(item.createdAt)}</span>
+                      <span className="shrink-0 text-[10px] text-muted-foreground/80">{formatNotificationTime(item.createdAt)}</span>
                     </span>
-                    <span className="mt-1 block truncate pl-3.5 text-[11px] text-slate-500 dark:text-slate-400">
+                    <span className="mt-1 block truncate pl-3.5 text-[11px] text-muted-foreground dark:text-muted-foreground">
                       {item.message || notificationReasonText(item.reason)}
                     </span>
                   </button>
@@ -159,7 +159,7 @@ function TickerLine({ item, now }: { item: TerminalNotification; now: number }) 
   return (
     <span className="flex h-4 min-w-0 items-center gap-1 text-[10px] font-semibold leading-4">
       <span className="min-w-0 truncate">{notificationTickerMainText(item)}</span>
-      <span className="shrink-0 text-slate-400 dark:text-slate-500">{relativeNotificationTime(item.createdAt, now)}</span>
+      <span className="shrink-0 text-muted-foreground/80 dark:text-muted-foreground/80">{relativeNotificationTime(item.createdAt, now)}</span>
     </span>
   );
 }

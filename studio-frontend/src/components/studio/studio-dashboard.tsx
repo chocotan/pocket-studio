@@ -297,12 +297,12 @@ export function StudioDashboard({
       className="studio-square theme-light flex h-dvh w-dvw flex-col overflow-hidden bg-background text-foreground font-sans"
       style={{ fontFamily: "var(--font-sans)" }}
     >
-      <header className="shrink-0 h-8 bg-white/95 border-b border-slate-200/70 flex items-center justify-between px-3 z-50 shadow-sm">
+      <header className="studio-header shrink-0 h-8 border-b border-border/80 bg-card/95 flex items-center justify-between px-3 z-50 shadow-sm">
         <div className="flex h-6 min-w-0 items-center gap-1.5">
-          <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-indigo-600 shadow-sm shadow-indigo-500/25">
-            <span className="text-white font-black text-[8px] leading-none">P</span>
+          <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-primary shadow-sm shadow-primary/25">
+            <span className="text-primary-foreground font-black text-[8px] leading-none">P</span>
           </div>
-          <span className="font-bold text-slate-800 text-xs tracking-tight">Pocket Studio</span>
+          <span className="font-bold text-foreground text-xs tracking-tight">Pocket Studio</span>
         </div>
 
         <div className="flex items-center gap-2">
@@ -327,7 +327,7 @@ export function StudioDashboard({
           <button
             type="button"
             onClick={onRefreshProjects}
-            className="flex h-6 w-6 items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            className="flex h-6 w-6 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground cursor-pointer"
             title="刷新设备和项目"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -335,7 +335,7 @@ export function StudioDashboard({
           <button
             type="button"
             onClick={() => setShortcutSettingsOpen(true)}
-            className="flex h-6 w-6 items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            className="flex h-6 w-6 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground cursor-pointer"
             title="快捷键设置"
           >
             <Keyboard className="h-3.5 w-3.5" />
@@ -343,7 +343,7 @@ export function StudioDashboard({
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
-            className="flex h-6 w-6 items-center justify-center rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer"
+            className="flex h-6 w-6 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground cursor-pointer"
             title="配置服务端地址"
           >
             <Settings className="h-3.5 w-3.5" />
@@ -351,25 +351,25 @@ export function StudioDashboard({
         </div>
       </header>
 
-      <main className="min-h-0 flex-1 overflow-hidden bg-slate-50 p-2.5">
+      <main className="min-h-0 flex-1 overflow-hidden bg-muted/45 p-2.5">
         <div className="grid h-full min-h-0 grid-cols-[minmax(220px,260px)_1fr] gap-2.5 max-lg:grid-cols-1">
-          <aside className="studio-panel min-h-0 overflow-hidden border border-slate-200/80 bg-white shadow-sm max-lg:h-64">
-            <div className="flex h-9 items-center justify-between border-b border-slate-200/70 bg-slate-100/70 px-3">
+          <aside className="studio-panel min-h-0 overflow-hidden border border-border/80 bg-card shadow-sm max-lg:h-64">
+            <div className="flex h-9 items-center justify-between border-b border-border/70 bg-muted/70 px-3">
               <div className="flex items-center gap-2">
-                <Server className="h-3.5 w-3.5 text-slate-500" />
-                <span className="text-[11px] font-bold text-slate-700">开发设备</span>
+                <Server className="h-3.5 w-3.5 text-muted-foreground" />
+                <span className="text-[11px] font-bold text-foreground/85">开发设备</span>
               </div>
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
                   onClick={onRefreshProjects}
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white hover:text-slate-800 cursor-pointer"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-card hover:text-foreground cursor-pointer"
                   title="刷新设备列表"
                   aria-label="刷新设备列表"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
                 </button>
-                <Badge className="rounded bg-white px-1.5 py-0 text-[9px] font-bold text-slate-500 border border-slate-200">
+                <Badge className="rounded border border-border bg-card px-1.5 py-0 text-[9px] font-bold text-muted-foreground">
                   {devices.length}
                 </Badge>
               </div>
@@ -377,8 +377,8 @@ export function StudioDashboard({
 
             <div className="h-[calc(100%-2.25rem)] overflow-y-auto p-2">
               {devices.length === 0 ? (
-                <div className="flex h-full min-h-36 flex-col items-center justify-center border border-dashed border-slate-200 bg-slate-50 text-center text-xs text-slate-500">
-                  <Server className="mb-2 h-6 w-6 text-slate-300" />
+                <div className="flex h-full min-h-36 flex-col items-center justify-center border border-dashed border-border bg-muted/40 text-center text-xs text-muted-foreground">
+                  <Server className="mb-2 h-6 w-6 text-muted-foreground/40" />
                   无在线设备
                 </div>
               ) : (
@@ -392,8 +392,8 @@ export function StudioDashboard({
                         key={device.id}
                         className={`group grid w-full grid-cols-[1.75rem_1fr_auto] items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors cursor-pointer ${
                           isSelected
-                            ? "border-indigo-200 bg-indigo-50 text-slate-900"
-                            : "border-transparent text-slate-600 hover:border-slate-200 hover:bg-slate-50"
+                            ? "border-primary/25 bg-accent text-foreground"
+                            : "border-transparent text-muted-foreground hover:border-border hover:bg-muted/50"
                         }`}
                       >
                         <button
@@ -402,24 +402,24 @@ export function StudioDashboard({
                           className="contents text-left"
                         >
                           <span className={`flex h-7 w-7 items-center justify-center rounded-md ${
-                            isSelected ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-500 group-hover:bg-white"
+                            isSelected ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground group-hover:bg-card"
                           }`}>
                             <Server className="h-3.5 w-3.5" />
                           </span>
                           <span className="min-w-0">
                             <span className="block truncate text-xs font-bold">{deviceDisplayName(device, device.id)}</span>
-                            <span className="mt-0.5 block truncate text-[9px] text-slate-400">
+                            <span className="mt-0.5 block truncate text-[9px] text-muted-foreground/80">
                               {device.workspaces?.length || 0} 个工作区
                             </span>
                           </span>
                         </button>
                         <span className="flex items-center gap-1">
-                          <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-emerald-500" : "bg-slate-300"}`} />
-                          <span className="font-mono text-[9px] font-bold text-slate-400">{projectCount}</span>
+                          <span className={`h-1.5 w-1.5 rounded-full ${online ? "bg-emerald-500/100" : "bg-border"}`} />
+                          <span className="font-mono text-[9px] font-bold text-muted-foreground/80">{projectCount}</span>
                           <button
                             type="button"
                             onClick={() => openAliasDialog(device)}
-                            className="flex h-5 w-5 items-center justify-center rounded text-slate-400 opacity-0 transition-opacity hover:bg-white hover:text-slate-700 group-hover:opacity-100 focus:opacity-100"
+                            className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground/70 opacity-0 transition-opacity hover:bg-card hover:text-foreground group-hover:opacity-100 focus:opacity-100"
                             title="编辑设备别名"
                             aria-label="编辑设备别名"
                           >
@@ -434,31 +434,31 @@ export function StudioDashboard({
             </div>
           </aside>
 
-          <section className="studio-panel min-h-0 overflow-hidden border border-slate-200/80 bg-white shadow-sm">
-            <div className="flex h-9 items-center justify-between border-b border-slate-200/70 bg-slate-100/70 px-3">
+          <section className="studio-panel min-h-0 overflow-hidden border border-border/80 bg-card shadow-sm">
+            <div className="flex h-9 items-center justify-between border-b border-border/70 bg-muted/70 px-3">
               <div className="flex min-w-0 items-center gap-2">
-                <FolderGit2 className="h-3.5 w-3.5 text-indigo-600" />
-                <span className="truncate text-[11px] font-bold text-slate-700">
+                <FolderGit2 className="h-3.5 w-3.5 text-primary" />
+                <span className="truncate text-[11px] font-bold text-foreground/85">
                   {activeDevice ? `${activeDevice.name || activeDevice.id} 的项目` : "项目工作区"}
                 </span>
                 {activeDevice && (
-                  <Badge className="rounded bg-white px-1.5 py-0 text-[9px] font-bold text-slate-500 border border-slate-200">
+                  <Badge className="rounded border border-border bg-card px-1.5 py-0 text-[9px] font-bold text-muted-foreground">
                     {deviceProjects.length}
                   </Badge>
                 )}
               </div>
               <div className="flex items-center gap-3">
-                <div className="hidden items-center gap-2 text-[10px] font-mono text-slate-400 sm:flex">
+                <div className="hidden items-center gap-2 text-[10px] font-mono text-muted-foreground/70 sm:flex">
                   <span>name</span>
-                  <span className="text-slate-300">/</span>
+                  <span className="text-border">/</span>
                   <span>workspace</span>
-                  <span className="text-slate-300">/</span>
+                  <span className="text-border">/</span>
                   <span>term</span>
                 </div>
                 <button
                   type="button"
                   onClick={onRefreshProjects}
-                  className="flex h-6 w-6 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-white hover:text-slate-800 cursor-pointer"
+                  className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-card hover:text-foreground cursor-pointer"
                   title="刷新项目列表"
                   aria-label="刷新项目列表"
                 >
@@ -468,7 +468,7 @@ export function StudioDashboard({
                   size="sm"
                   onClick={openCreateModal}
                   disabled={!activeDevice}
-                  className="h-6 rounded-md bg-indigo-600 px-2 text-[10px] font-semibold text-white hover:bg-indigo-500 shadow-sm shadow-indigo-500/15 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+                  className="h-6 rounded-md bg-primary px-2 text-[10px] font-semibold text-primary-foreground hover:bg-primary/90 shadow-sm shadow-primary/15 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Plus className="h-3 w-3" />
                   创建
@@ -479,18 +479,18 @@ export function StudioDashboard({
             <div className="h-[calc(100%-2.25rem)] overflow-y-auto p-2">
               {activeDevice ? (
                 deviceProjects.length === 0 ? (
-                  <div className="flex h-full min-h-80 flex-col items-center justify-center border border-dashed border-slate-200 bg-slate-50 text-center text-slate-500">
-                    <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-md border border-slate-200 bg-white">
-                      <FolderGit2 className="h-5 w-5 text-slate-400" />
+                  <div className="flex h-full min-h-80 flex-col items-center justify-center border border-dashed border-border bg-muted/40 text-center text-muted-foreground">
+                    <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-md border border-border bg-card shadow-sm">
+                      <FolderGit2 className="h-5 w-5 text-muted-foreground" />
                     </div>
-                    <h3 className="text-sm font-bold text-slate-800">暂无项目</h3>
-                    <p className="mt-1 max-w-sm text-xs leading-relaxed text-slate-500">
+                    <h3 className="text-sm font-bold text-foreground">暂无项目</h3>
+                    <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
                       该设备还没有关联项目目录。创建一个项目后可直接进入工作区。
                     </p>
                     <Button
                       size="sm"
                       onClick={openCreateModal}
-                      className="mt-4 h-8 rounded-md bg-indigo-600 px-3 text-xs font-semibold text-white hover:bg-indigo-500 cursor-pointer"
+                      className="mt-4 h-8 rounded-md bg-primary px-3 text-xs font-semibold text-primary-foreground hover:bg-primary/90 cursor-pointer"
                     >
                       <Plus className="mr-1.5 h-3.5 w-3.5" />
                       创建项目
@@ -511,10 +511,10 @@ export function StudioDashboard({
                   </div>
                 )
               ) : (
-                <div className="flex h-full min-h-80 flex-col items-center justify-center border border-dashed border-slate-200 bg-slate-50 text-center text-slate-500">
-                  <HelpCircle className="mb-3 h-8 w-8 text-slate-300" />
-                  <span className="text-sm font-bold text-slate-800">请选择一台开发机</span>
-                  <span className="mt-1 text-xs text-slate-500">在左侧设备面板中选择在线守护进程。</span>
+                <div className="flex h-full min-h-80 flex-col items-center justify-center border border-dashed border-border bg-muted/40 text-center text-muted-foreground">
+                  <HelpCircle className="mb-3 h-8 w-8 text-muted-foreground/40" />
+                  <span className="text-sm font-bold text-foreground">请选择一台开发机</span>
+                  <span className="mt-1 text-xs text-muted-foreground">在左侧设备面板中选择在线守护进程。</span>
                 </div>
               )}
             </div>
@@ -524,11 +524,11 @@ export function StudioDashboard({
 
       {/* ── Create Project Dialog ── */}
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-md p-0 overflow-hidden border-slate-200/80 shadow-2xl rounded-2xl animate-scale-in">
-          <DialogHeader className="px-6 py-4 bg-slate-50 border-b border-slate-100 flex-shrink-0">
-            <DialogTitle className="text-sm font-bold text-slate-800 flex items-center gap-2">
-              <div className="h-6.5 w-6.5 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center">
-                <FolderPlus className="h-3.5 w-3.5 text-indigo-600" />
+        <DialogContent className="max-w-md p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
+          <DialogHeader className="px-6 py-4 bg-muted/50 border-b border-border/70 flex-shrink-0">
+            <DialogTitle className="text-sm font-bold text-foreground flex items-center gap-2">
+              <div className="h-6.5 w-6.5 rounded-lg bg-accent border border-primary/15 flex items-center justify-center">
+                <FolderPlus className="h-3.5 w-3.5 text-primary" />
               </div>
               创建项目
             </DialogTitle>
@@ -536,7 +536,7 @@ export function StudioDashboard({
 
           <form onSubmit={handleCreate} className="p-6 space-y-4">
             {error && (
-              <div className="bg-rose-50 text-rose-600 rounded-xl p-3.5 border border-rose-100 text-xs font-semibold">
+              <div className="bg-destructive/10 text-destructive rounded-xl p-3.5 border border-destructive/20 text-xs font-semibold">
                 {error}
               </div>
             )}
@@ -544,13 +544,13 @@ export function StudioDashboard({
             {/* Field: Target Device */}
             {devices.length > 1 && (
               <div className="space-y-1.5">
-                <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/80">
                   开发机 (目标设备)
                 </Label>
                 <select
                   value={dialogDeviceId}
                   onChange={(e) => setDialogDeviceId(e.target.value)}
-                  className="w-full text-xs rounded-xl border border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 h-9 px-3 outline-none"
+                  className="w-full text-xs rounded-xl border border-border focus:border-primary/50 focus:ring-primary/20 bg-muted/40 h-9 px-3 outline-none"
                 >
                   {devices.map((device) => (
                     <option key={device.id} value={device.id}>
@@ -563,7 +563,7 @@ export function StudioDashboard({
 
             {/* Field: Name (Display Name) */}
             <div className="space-y-1.5">
-              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/80">
                 项目名称 (显示名称)
               </Label>
               <Input
@@ -571,13 +571,13 @@ export function StudioDashboard({
                 value={newProjName}
                 onChange={(e) => setNewProjName(e.target.value)}
                 placeholder="例如 my-pocket-studio"
-                className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 h-9"
+                className="text-xs rounded-xl border-border focus:border-primary/50 focus:ring-primary/20 bg-muted/40 h-9"
               />
             </div>
 
             {/* Field: Path */}
             <div className="space-y-1.5">
-              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/80">
                 项目路径
               </Label>
               <Input
@@ -585,15 +585,15 @@ export function StudioDashboard({
                 value={newProjPath}
                 onChange={(e) => setNewProjPath(e.target.value)}
                 placeholder="例如 /home/user/projects/my-project"
-                className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 font-mono h-9"
+                className="text-xs rounded-xl border-border focus:border-primary/50 focus:ring-primary/20 bg-muted/40 font-mono h-9"
               />
             </div>
 
             {/* Footer Buttons */}
-            <DialogFooter className="pt-3 flex justify-end gap-2 border-t border-slate-100 flex-shrink-0">
+            <DialogFooter className="pt-3 flex justify-end gap-2 border-t border-border/70 flex-shrink-0">
               <DialogClose
                 type="button"
-                className="inline-flex items-center justify-center text-xs rounded-xl border border-slate-250 text-slate-600 hover:text-slate-800 hover:bg-slate-50 px-4 h-9 font-semibold transition-colors cursor-pointer"
+                className="inline-flex items-center justify-center text-xs rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 px-4 h-9 font-semibold transition-colors cursor-pointer"
               >
                 取消
               </DialogClose>
@@ -601,7 +601,7 @@ export function StudioDashboard({
                 type="submit"
                 size="sm"
                 disabled={submitting}
-                className="text-xs h-9 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow shadow-indigo-500/20 font-semibold cursor-pointer"
+                className="text-xs h-9 px-4 rounded-xl bg-primary hover:bg-accent0 text-primary-foreground shadow shadow-primary/20 font-semibold cursor-pointer"
               >
                 {submitting ? "正在创建..." : "确认创建"}
               </Button>
@@ -611,11 +611,11 @@ export function StudioDashboard({
       </Dialog>
 
       <Dialog open={shortcutSettingsOpen} onOpenChange={setShortcutSettingsOpen}>
-        <DialogContent className="w-[min(52rem,calc(100dvw-2rem))] max-w-none p-0 overflow-hidden border-slate-200/80 shadow-2xl rounded-2xl animate-scale-in">
-          <DialogHeader className="px-6 py-4 bg-slate-50 border-b border-slate-100">
-            <DialogTitle className="text-sm font-bold text-slate-800 flex items-center gap-2">
-              <div className="h-6.5 w-6.5 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center">
-                <Keyboard className="h-3.5 w-3.5 text-indigo-600" />
+        <DialogContent className="w-[min(52rem,calc(100dvw-2rem))] max-w-none p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
+          <DialogHeader className="px-6 py-4 bg-muted/50 border-b border-border/70">
+            <DialogTitle className="text-sm font-bold text-foreground flex items-center gap-2">
+              <div className="h-6.5 w-6.5 rounded-lg bg-accent border border-primary/15 flex items-center justify-center">
+                <Keyboard className="h-3.5 w-3.5 text-primary" />
               </div>
               快捷键
             </DialogTitle>
@@ -625,18 +625,18 @@ export function StudioDashboard({
       </Dialog>
 
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent className="max-w-md p-0 overflow-hidden border-slate-200/80 shadow-2xl rounded-2xl animate-scale-in">
-          <DialogHeader className="px-6 py-4 bg-slate-50 border-b border-slate-100">
-            <DialogTitle className="text-sm font-bold text-slate-800 flex items-center gap-2">
-              <div className="h-6.5 w-6.5 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center">
-                <Settings className="h-3.5 w-3.5 text-indigo-600" />
+        <DialogContent className="max-w-md p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
+          <DialogHeader className="px-6 py-4 bg-muted/50 border-b border-border/70">
+            <DialogTitle className="text-sm font-bold text-foreground flex items-center gap-2">
+              <div className="h-6.5 w-6.5 rounded-lg bg-accent border border-primary/15 flex items-center justify-center">
+                <Settings className="h-3.5 w-3.5 text-primary" />
               </div>
               服务端地址
             </DialogTitle>
           </DialogHeader>
           <form onSubmit={handleSaveSettings} className="p-6 space-y-4">
             {settingsError && (
-              <div className="bg-rose-50 text-rose-600 rounded-xl p-3.5 border border-rose-100 text-xs font-semibold">
+              <div className="bg-destructive/10 text-destructive rounded-xl p-3.5 border border-destructive/20 text-xs font-semibold">
                 {settingsError}
               </div>
             )}
@@ -645,15 +645,15 @@ export function StudioDashboard({
                 aria-live="polite"
                 className={`rounded-xl p-3.5 border text-xs font-semibold ${
                   settingsValidationOK
-                    ? "bg-emerald-50 text-emerald-700 border-emerald-100"
-                    : "bg-rose-50 text-rose-600 border-rose-100"
+                    ? "bg-emerald-500/10 text-emerald-700 border-emerald-500/20"
+                    : "bg-destructive/10 text-destructive border-destructive/20"
                 }`}
               >
                 {settingsValidation}
               </div>
             )}
             <div className="space-y-1.5">
-              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/80">
                 Server URL
               </Label>
               <Input
@@ -661,32 +661,32 @@ export function StudioDashboard({
                 value={serverURL}
                 onChange={(e) => setServerURL(e.target.value)}
                 placeholder="http://127.0.0.1:18080"
-                className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 font-mono h-9"
+                className="text-xs rounded-xl border-border focus:border-primary/50 focus:ring-primary/20 bg-muted/40 font-mono h-9"
               />
-              <p className="text-[11px] text-slate-500 leading-relaxed">
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
                 使用本地模式时填本机地址；使用云端时填云端 server 地址。
               </p>
             </div>
             <div className="space-y-1.5">
-              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/80">
                 Access Token
               </Label>
               <Input
                 value={accessToken}
                 onChange={(e) => setAccessToken(e.target.value)}
                 placeholder="ps_xxxxx 或 server admin token"
-                className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 font-mono h-9"
+                className="text-xs rounded-xl border-border focus:border-primary/50 focus:ring-primary/20 bg-muted/40 font-mono h-9"
               />
-              <p className="text-[11px] text-slate-500 leading-relaxed">
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
                 auth 开启后使用 user-frontend 创建的 token；admin-token 模式下填 server 启动时指定的 token。
               </p>
             </div>
             {isAppImagePage() && (
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+              <div className="rounded-xl border border-border bg-muted/50 p-3.5">
                 <div className="flex items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-xs font-bold text-slate-700">本机模式</p>
-                    <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+                    <p className="text-xs font-bold text-foreground/85">本机模式</p>
+                    <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
                       清除已保存的 Server URL 和 token，并切回 AppImage 启动的本机 server。
                     </p>
                   </div>
@@ -696,17 +696,17 @@ export function StudioDashboard({
                     variant="outline"
                     disabled={switchingLocalMode || savingSettings || validatingSettings}
                     onClick={handleLocalMode}
-                    className="h-8 shrink-0 rounded-lg border-slate-250 px-3 text-xs font-semibold text-slate-600 hover:bg-white hover:text-slate-800 cursor-pointer"
+                    className="h-8 shrink-0 rounded-lg border-border px-3 text-xs font-semibold text-muted-foreground hover:bg-card hover:text-foreground cursor-pointer"
                   >
                     {switchingLocalMode ? "切换中..." : "切回本机"}
                   </Button>
                 </div>
               </div>
             )}
-            <DialogFooter className="pt-3 flex justify-end gap-2 border-t border-slate-100">
+            <DialogFooter className="pt-3 flex justify-end gap-2 border-t border-border/70">
               <DialogClose
                 type="button"
-                className="inline-flex items-center justify-center text-xs rounded-xl border border-slate-250 text-slate-600 hover:text-slate-800 hover:bg-slate-50 px-4 h-9 font-semibold transition-colors cursor-pointer"
+                className="inline-flex items-center justify-center text-xs rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 px-4 h-9 font-semibold transition-colors cursor-pointer"
               >
                 取消
               </DialogClose>
@@ -716,7 +716,7 @@ export function StudioDashboard({
                 variant="outline"
                 disabled={validatingSettings || savingSettings}
                 onClick={handleValidateSettings}
-                className="text-xs h-9 px-4 rounded-xl border-slate-250 text-slate-600 hover:text-slate-800 hover:bg-slate-50 font-semibold cursor-pointer"
+                className="text-xs h-9 px-4 rounded-xl border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 font-semibold cursor-pointer"
               >
                 {validatingSettings ? "校验中..." : "校验"}
               </Button>
@@ -724,7 +724,7 @@ export function StudioDashboard({
                 type="submit"
                 size="sm"
                 disabled={savingSettings || validatingSettings}
-                className="text-xs h-9 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow shadow-indigo-500/20 font-semibold cursor-pointer"
+                className="text-xs h-9 px-4 rounded-xl bg-primary hover:bg-accent0 text-primary-foreground shadow shadow-primary/20 font-semibold cursor-pointer"
               >
                 {savingSettings ? "保存中..." : "保存"}
               </Button>
@@ -739,40 +739,40 @@ export function StudioDashboard({
           setAliasError("");
         }
       }}>
-        <DialogContent className="max-w-sm p-0 overflow-hidden border-slate-200/80 shadow-2xl rounded-2xl animate-scale-in">
-          <DialogHeader className="px-6 py-4 bg-slate-50 border-b border-slate-100">
-            <DialogTitle className="text-sm font-bold text-slate-800 flex items-center gap-2">
-              <div className="h-6.5 w-6.5 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center">
-                <Server className="h-3.5 w-3.5 text-indigo-600" />
+        <DialogContent className="max-w-sm p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
+          <DialogHeader className="px-6 py-4 bg-muted/50 border-b border-border/70">
+            <DialogTitle className="text-sm font-bold text-foreground flex items-center gap-2">
+              <div className="h-6.5 w-6.5 rounded-lg bg-accent border border-primary/15 flex items-center justify-center">
+                <Server className="h-3.5 w-3.5 text-primary" />
               </div>
               编辑设备别名
             </DialogTitle>
           </DialogHeader>
           <form onSubmit={handleSaveAlias} className="p-6 space-y-4">
             {aliasError && (
-              <div className="bg-rose-50 text-rose-600 rounded-xl p-3.5 border border-rose-100 text-xs font-semibold">
+              <div className="bg-destructive/10 text-destructive rounded-xl p-3.5 border border-destructive/20 text-xs font-semibold">
                 {aliasError}
               </div>
             )}
             <div className="space-y-1.5">
-              <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+              <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/80">
                 设备别名
               </Label>
               <Input
                 value={aliasValue}
                 onChange={(e) => setAliasValue(e.target.value)}
                 placeholder={aliasDevice?.id || "设备别名"}
-                className="text-xs rounded-xl border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/20 bg-slate-50/50 h-9"
+                className="text-xs rounded-xl border-border focus:border-primary/50 focus:ring-primary/20 bg-muted/40 h-9"
                 autoFocus
               />
-              <p className="text-[11px] text-slate-500 leading-relaxed">
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
                 留空会恢复为 Daemon 自动上报的设备名称。
               </p>
             </div>
-            <DialogFooter className="pt-3 flex justify-end gap-2 border-t border-slate-100">
+            <DialogFooter className="pt-3 flex justify-end gap-2 border-t border-border/70">
               <DialogClose
                 type="button"
-                className="inline-flex items-center justify-center text-xs rounded-xl border border-slate-250 text-slate-600 hover:text-slate-800 hover:bg-slate-50 px-4 h-9 font-semibold transition-colors cursor-pointer"
+                className="inline-flex items-center justify-center text-xs rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 px-4 h-9 font-semibold transition-colors cursor-pointer"
               >
                 取消
               </DialogClose>
@@ -780,7 +780,7 @@ export function StudioDashboard({
                 type="submit"
                 size="sm"
                 disabled={savingAlias}
-                className="text-xs h-9 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white shadow shadow-indigo-500/20 font-semibold cursor-pointer"
+                className="text-xs h-9 px-4 rounded-xl bg-primary hover:bg-accent0 text-primary-foreground shadow shadow-primary/20 font-semibold cursor-pointer"
               >
                 {savingAlias ? "保存中..." : "保存"}
               </Button>

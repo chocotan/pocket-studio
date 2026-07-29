@@ -642,18 +642,18 @@ export function StudioWorkspace({
               {themeMenuOpen && (
                 <>
                   <div className="fixed inset-0 z-40 cursor-default" onClick={() => setThemeMenuOpen(false)} />
-                  <div className="absolute right-0 mt-2 w-48 rounded-lg border border-border bg-card text-card-foreground p-1.5 shadow-lg z-50 animate-scale-in">
+                  <div className="absolute right-0 mt-2 w-40 rounded-lg border border-border bg-card text-card-foreground p-1.5 shadow-lg z-50 animate-scale-in">
                     <div className="px-2.5 py-1.5 text-[9px] font-bold text-muted-foreground uppercase tracking-widest border-b border-border mb-1">
-                      选择主题 / Themes
+                      选择主题
                     </div>
                     {[
-                      { id: "light" as const, name: "极光白 (Light)", preview: "bg-[#fafafa] border-slate-350" },
-                      { id: "claude" as const, name: "Claude 暖白", preview: "bg-[#f7f1e8] border-[#b66a2c]" },
-                      { id: "sandalwood" as const, name: "古雅檀香 (Sandalwood)", preview: "bg-[#f9f6f0] border-[#c86446]" },
-                      { id: "dark" as const, name: "暗夜黑 (Dark)", preview: "bg-[#121824] border-slate-700" },
-                      { id: "synthwave" as const, name: "霓虹幻境 (Synthwave)", preview: "bg-[#1c0d2e] border-fuchsia-900" },
-                      { id: "onedark" as const, name: "黑客帝国 (One Dark)", preview: "bg-[#1e222a] border-slate-800" },
-                      { id: "charcoal" as const, name: "柔和深灰 (Charcoal)", preview: "bg-[#383d47] border-[#6ca7c3]" },
+                      { id: "light" as const, name: "雾白瓷", preview: "bg-[#f7f8fc] border-[#4f46e5]" },
+                      { id: "claude" as const, name: "纸暖", preview: "bg-[#f4ecdf] border-[#b35f2a]" },
+                      { id: "sandalwood" as const, name: "檀香", preview: "bg-[#f5f0e7] border-[#c86446]" },
+                      { id: "dark" as const, name: "墨渊", preview: "bg-[#171c28] border-[#a5b4fc]" },
+                      { id: "synthwave" as const, name: "夜霓", preview: "bg-[#1b1029] border-[#e879f9]" },
+                      { id: "onedark" as const, name: "代码墨", preview: "bg-[#282c34] border-[#61afef]" },
+                      { id: "charcoal" as const, name: "柔烟", preview: "bg-[#3b414c] border-[#8bb7cc]" },
                     ].map((t) => (
                       <button
                         key={t.id}
@@ -668,11 +668,11 @@ export function StudioWorkspace({
                             : "text-muted-foreground hover:bg-muted hover:text-foreground"
                         }`}
                       >
-                        <div className="flex items-center gap-2">
-                          <span className={`w-2.5 h-2.5 rounded-full border ${t.preview}`} />
-                          <span>{t.name}</span>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className={`h-2.5 w-2.5 shrink-0 rounded-full border shadow-sm ${t.preview}`} />
+                          <span className="truncate">{t.name}</span>
                         </div>
-                        {theme === t.id && <Check className="h-3.5 w-3.5 text-accent-foreground" />}
+                        {theme === t.id && <Check className="h-3.5 w-3.5 shrink-0 text-accent-foreground" />}
                       </button>
                     ))}
                   </div>

@@ -92,14 +92,14 @@ export function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark"><Shield size={18} /></div>
+          <div className="brand-mark" aria-hidden="true"><Shield size={18} /></div>
           <div>
             <h1>Pocket Studio</h1>
-            <p>{user.username}</p>
+            <p>已登录 · {user.username}</p>
           </div>
         </div>
-        <button className="icon-button" type="button" onClick={handleLogout} title="退出登录">
-          <LogOut size={18} />
+        <button className="icon-button" type="button" onClick={handleLogout} title="退出登录" aria-label="退出登录">
+          <LogOut size={17} />
         </button>
       </header>
 
@@ -114,7 +114,7 @@ export function App() {
         <UsagePanel tokens={tokens} />
       </section>
 
-      {error && <div className="toast">{error}</div>}
+      {error && <div className="toast" role="alert">{error}</div>}
     </main>
   );
 }
