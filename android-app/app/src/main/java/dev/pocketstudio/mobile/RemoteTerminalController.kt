@@ -33,7 +33,8 @@ class RemoteTerminalController(
     val view = TerminalView(context, null).apply {
         setBackgroundColor(TerminalLightPalette.backgroundArgb)
     }
-    internal val viewport = TerminalViewport(context, view)
+    private val resizeRunnable = Runnable(::sendResizeIfChanged)
+    internal val viewport = TerminalViewport(context, view, ::onResizeSuppressionChanged)
     private var socket: WebSocket? = null
     private val resizePolicy = TerminalResizePolicy()
     private val scrollPolicy = TerminalScrollPolicy()
@@ -195,13 +196,13 @@ class RemoteTerminalController(
             }
             consumed
         }
-        view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> sendResizeIfChanged() }
+        view.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> requestResize() }
     }
 
     private fun connect() {
         if (socket != null) return
         socket = OkHttpClient().newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) { view.post { onConnected(); sendResizeIfChanged() } }
+            override fun onOpen(webSocket: WebSocket, response: Response) { view.post { onConnected(); requestResize() } }
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) { append(bytes.toByteArray()) }
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (!text.trimStart().startsWith("{")) append(text.toByteArray(StandardCharsets.UTF_8))
@@ -231,12 +232,31 @@ class RemoteTerminalController(
         view.onScreenUpdated()
         viewport.onScreenUpdated()
     }
-    fun close() { socket?.close(1000, "leave terminal"); socket = null; session.finishIfRunning() }
+    fun close() {
+        view.removeCallbacks(resizeRunnable)
+        socket?.close(1000, "leave terminal")
+        socket = null
+        session.finishIfRunning()
+    }
+
+    private fun requestResize() {
+        view.removeCallbacks(resizeRunnable)
+        view.postOnAnimation(resizeRunnable)
+    }
+
+    private fun onResizeSuppressionChanged(suppressed: Boolean) {
+        view.removeCallbacks(resizeRunnable)
+        if (!suppressed) requestResize()
+    }
 
     private fun sendResizeIfChanged() {
         if (socket == null) return
         val emulator = session.emulator ?: return
-        val size = resizePolicy.next(emulator.mColumns, emulator.mRows, freezeRows = viewport.isImeVisible) ?: return
+        val size = resizePolicy.next(
+            emulator.mColumns,
+            emulator.mRows,
+            suppress = viewport.suppressRemoteResize,
+        ) ?: return
         socket?.send("{\"type\":\"resize\",\"cols\":${size.columns},\"rows\":${size.rows}}")
     }
 }

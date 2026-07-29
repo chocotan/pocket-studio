@@ -15,13 +15,20 @@ class TerminalResizePolicyTest {
         assertNull(policy.next(60, 18))
     }
 
-    @Test fun imeRowChangesAreIgnoredWhileRealColumnChangesStillApply() {
+    @Test fun imeSuppressesAllResizeEventsWithoutReplacingTheLastRemoteSize() {
         val policy = TerminalResizePolicy()
 
         assertEquals(RemoteTerminalSize(51, 42), policy.next(51, 42))
-        assertNull(policy.next(51, 18, freezeRows = true))
-        assertEquals(RemoteTerminalSize(60, 42), policy.next(60, 18, freezeRows = true))
-        assertNull(policy.next(60, 42))
-        assertEquals(RemoteTerminalSize(60, 35), policy.next(60, 35))
+        assertNull(policy.next(51, 18, suppress = true))
+        assertNull(policy.next(60, 18, suppress = true))
+        assertNull(policy.next(51, 42))
+        assertEquals(RemoteTerminalSize(60, 42), policy.next(60, 42))
+    }
+
+    @Test fun firstRealSizeIsSentAfterInitialSuppression() {
+        val policy = TerminalResizePolicy()
+
+        assertNull(policy.next(51, 18, suppress = true))
+        assertEquals(RemoteTerminalSize(51, 42), policy.next(51, 42))
     }
 }

@@ -5,6 +5,7 @@ import android.content.Context
 import android.view.View
 import android.widget.FrameLayout
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import com.termux.view.TerminalView
 
@@ -39,12 +40,16 @@ internal class TerminalViewportPolicy {
 internal class TerminalViewport(
     context: Context,
     private val terminalView: TerminalView,
+    private val onResizeSuppressionChanged: (Boolean) -> Unit,
 ) : FrameLayout(context) {
     private val policy = TerminalViewportPolicy()
     private val updatePositionRunnable = Runnable(::updateTerminalPosition)
+    private var isImeAnimationRunning = false
 
     var isImeVisible: Boolean = false
         private set
+    val suppressRemoteResize: Boolean
+        get() = isImeVisible || isImeAnimationRunning
 
     init {
         setBackgroundColor(TerminalLightPalette.backgroundArgb)
@@ -58,6 +63,27 @@ internal class TerminalViewport(
             updateImeVisibility(insets.isVisible(WindowInsetsCompat.Type.ime()))
             insets
         }
+        ViewCompat.setWindowInsetsAnimationCallback(
+            this,
+            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+                override fun onPrepare(animation: WindowInsetsAnimationCompat) {
+                    if (animation.affectsIme()) updateImeAnimationRunning(true)
+                }
+
+                override fun onProgress(
+                    insets: WindowInsetsCompat,
+                    runningAnimations: MutableList<WindowInsetsAnimationCompat>,
+                ): WindowInsetsCompat = insets
+
+                override fun onEnd(animation: WindowInsetsAnimationCompat) {
+                    if (!animation.affectsIme()) return
+                    ViewCompat.getRootWindowInsets(this@TerminalViewport)?.let { insets ->
+                        updateImeVisibility(insets.isVisible(WindowInsetsCompat.Type.ime()))
+                    }
+                    updateImeAnimationRunning(false)
+                }
+            },
+        )
     }
 
     override fun onAttachedToWindow() {
@@ -107,8 +133,23 @@ internal class TerminalViewport(
 
     private fun updateImeVisibility(visible: Boolean, relayout: Boolean = true) {
         if (visible == isImeVisible) return
+        val wasSuppressed = suppressRemoteResize
         isImeVisible = visible
         if (relayout) requestLayout()
+        notifyResizeSuppressionChanged(wasSuppressed)
+    }
+
+    private fun updateImeAnimationRunning(running: Boolean) {
+        if (running == isImeAnimationRunning) return
+        val wasSuppressed = suppressRemoteResize
+        isImeAnimationRunning = running
+        notifyResizeSuppressionChanged(wasSuppressed)
+    }
+
+    private fun notifyResizeSuppressionChanged(wasSuppressed: Boolean) {
+        if (wasSuppressed != suppressRemoteResize) {
+            onResizeSuppressionChanged(suppressRemoteResize)
+        }
     }
 
     private fun updateTerminalPosition() {
@@ -129,4 +170,7 @@ internal class TerminalViewport(
         }
         terminalView.translationY = -offset.toFloat()
     }
+
+    private fun WindowInsetsAnimationCompat.affectsIme(): Boolean =
+        typeMask and WindowInsetsCompat.Type.ime() != 0
 }
