@@ -25,6 +25,7 @@ import {
   makeLocalUserPromptEvent,
   mergeTaskEvents,
   modelListFromTaskEvents,
+  shouldUpdateTransientErrorFromTaskEvent,
   taskRunTimingMatchesAwaitedTurn,
 } from "./event-model";
 import {
@@ -363,6 +364,10 @@ export function AgentChatTab({
             eventType: taskEvent.event_type,
             sequence: taskEvent.sequence,
           });
+          const shouldUpdateTransientError = shouldUpdateTransientErrorFromTaskEvent(
+            historyCollectingRef.current,
+            awaitingResumedHistory,
+          );
           const completesHistoryImport = awaitingResumedHistory && taskEvent.event_type === "session.created";
           if (historyCollectingRef.current || awaitingResumedHistory) {
             pendingHistoryEventsRef.current.push(taskEvent);
@@ -404,7 +409,7 @@ export function AgentChatTab({
           if (!historyCollectingRef.current && !awaitingResumedHistory && !completesHistoryImport) {
             setEvents((prev) => mergeTaskEvents(prev, [taskEvent]));
           }
-          if (isTerminalTaskEvent(taskEvent, agentRuntime)) {
+          if (shouldUpdateTransientError && isTerminalTaskEvent(taskEvent, agentRuntime)) {
             if (taskEvent.event_type === "task.failed") {
               const meta = getMetadata(taskEvent.data) || {};
               showError(String(meta.message || meta.error || "任务执行失败"));

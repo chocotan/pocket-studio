@@ -30,6 +30,26 @@ try {
   const agentProtocol = await vite.ssrLoadModule('/src/lib/agent-protocol.ts');
   const chatWidgets = await vite.ssrLoadModule('/src/components/studio/agent-chat/chat-widgets.tsx');
   const dispatchPayload = await vite.ssrLoadModule('/src/components/studio/agent-chat/dispatch-payload.ts');
+  assert.equal(
+    eventModel.shouldUpdateTransientErrorFromTaskEvent(true, false),
+    false,
+    'a task failure from initial history replay must not reopen the transient error banner',
+  );
+  assert.equal(
+    eventModel.shouldUpdateTransientErrorFromTaskEvent(false, true),
+    false,
+    'a task failure from resumed provider history must not reopen the transient error banner',
+  );
+  assert.equal(
+    eventModel.shouldUpdateTransientErrorFromTaskEvent(true, true),
+    false,
+    'a task failure replayed after refresh or reconnect must stay out of the transient error banner',
+  );
+  assert.equal(
+    eventModel.shouldUpdateTransientErrorFromTaskEvent(false, false),
+    true,
+    'a live task failure after history is ready must still surface in the transient error banner',
+  );
   const directACPDispatch = dispatchPayload.buildDirectACPDispatchPayload({
     taskId: 'task-model',
     turnId: 'turn-model',
@@ -625,6 +645,62 @@ try {
     timedImportedMessages.at(-1).durationMs,
     7_000,
     'provider replay timestamps must derive the completed historical turn duration',
+  );
+
+  const restartAfterImportedHistory = [
+    ...importedHistory,
+    taskEvent('import-restart-failed', 'task.failed', 5, 7_400, {
+      error: 'task interrupted by daemon restart', reason: 'interrupted',
+    }),
+    taskEvent('import-recovery-user', 'user.prompt', 6, 7_410, {
+      prompt: 'continue', turn_id: 'recovery-turn',
+    }),
+    taskEvent('import-recovery-start', 'task.started', 7, 7_411, {
+      turn_id: 'recovery-turn',
+    }),
+    taskEvent('import-recovery-answer', 'assistant.message', 8, 7_414, {
+      text: 'recovered', turn_id: 'recovery-turn',
+    }),
+    taskEvent('import-recovery-done', 'task.completed', 9, 7_416, {
+      turn_id: 'recovery-turn', exit_code: 0,
+    }),
+  ];
+  restartAfterImportedHistory[4].source = 'daemon';
+  assert.deepEqual(
+    reducer.buildMessageStateFromEvents(restartAfterImportedHistory, 'task-import-restart').messages
+      .filter((message) => message.kind === 'run_duration').map((message) => message.durationMs),
+    [undefined, undefined, 5_000],
+    'daemon restart must not pair imported prompts with a later interruption timestamp',
+  );
+
+  const segmentedThinkingEvents = [
+    taskEvent('thinking-user', 'user.prompt', 1, 3_000, { prompt: 'inspect' }),
+    taskEvent('thinking-1a', 'assistant.thinking', 2, 3_002, { text: 'first', stream_id: 'thinking-1' }),
+    taskEvent('thinking-1b', 'assistant.thinking', 3, 3_004, { text: 'first done', stream_id: 'thinking-1' }),
+    taskEvent('thinking-call', 'tool.call', 4, 3_005, {
+      tool_use_id: 'thinking-tool', name: 'bash', status: 'pending', input: { command: 'sleep 5' },
+    }),
+    taskEvent('thinking-output', 'tool.output', 5, 3_010, {
+      tool_use_id: 'thinking-tool', name: 'bash', status: 'completed', output: 'done',
+    }),
+    taskEvent('thinking-2a', 'assistant.thinking', 6, 3_012, { text: 'second', stream_id: 'thinking-2' }),
+    taskEvent('thinking-2b', 'assistant.thinking', 7, 3_014, { text: 'second done', stream_id: 'thinking-2' }),
+    taskEvent('thinking-answer', 'assistant.message', 8, 3_015, { text: 'finished' }),
+  ];
+  let liveThinkingState = reducer.createMessageState();
+  for (const event of segmentedThinkingEvents) {
+    liveThinkingState = reducer.applyTaskEventToMessageState(liveThinkingState, event);
+  }
+  assert.deepEqual(
+    liveThinkingState.messages.filter((message) => message.kind === 'thought').map((message) => message.durationMs),
+    [5_000, 5_000],
+    'each live thinking block must stop at activity boundaries instead of accumulating the whole turn',
+  );
+  assert.deepEqual(
+    reducer.buildMessageStateFromEvents(segmentedThinkingEvents, 'task-thinking').messages
+      .filter((message) => message.kind === 'thought').map((message) => message.durationMs),
+    [5_000, 5_000],
+    'compacted history thinking must use the same per-block timing as live events',
   );
 
   console.log('agent event model tests: PASS');

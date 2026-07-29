@@ -33,6 +33,9 @@ type MessageState = {
   emittedToolIds: Set<string>;
   lastActivityStartedMs: number;
   runStartedAtMs: number;
+  runStartedFromImportedPrompt: boolean;
+  activeThoughtId: string;
+  activeThoughtStartedMs: number;
 };
 
 function isLocalUserPromptMessage(message: ChatMessage) {
@@ -78,6 +81,9 @@ function cloneState(prev: MessageState): MessageState {
     emittedToolIds: new Set(prev.emittedToolIds),
     lastActivityStartedMs: prev.lastActivityStartedMs,
     runStartedAtMs: prev.runStartedAtMs,
+    runStartedFromImportedPrompt: prev.runStartedFromImportedPrompt,
+    activeThoughtId: prev.activeThoughtId,
+    activeThoughtStartedMs: prev.activeThoughtStartedMs,
   };
 }
 
@@ -93,6 +99,9 @@ export function createMessageState(): MessageState {
     emittedToolIds: new Set(),
     lastActivityStartedMs: 0,
     runStartedAtMs: 0,
+    runStartedFromImportedPrompt: false,
+    activeThoughtId: "",
+    activeThoughtStartedMs: 0,
   };
 }
 
@@ -119,6 +128,41 @@ function setMessageContent(state: MessageState, id: string, content: string, dur
   return true;
 }
 
+function finalizeActiveThought(state: MessageState, endedAtMs: number) {
+  const id = state.activeThoughtId;
+  const startedAtMs = state.activeThoughtStartedMs;
+  if (id && startedAtMs > 0 && endedAtMs >= startedAtMs) {
+    const index = state.byId.get(id);
+    if (index !== undefined) {
+      const message = state.messages[index];
+      const durationMs = Math.max(message.durationMs || 0, endedAtMs - startedAtMs);
+      state.messages[index] = { ...message, durationMs };
+    }
+  }
+  state.activeThoughtId = "";
+  state.activeThoughtStartedMs = 0;
+}
+
+function markActivityBoundary(state: MessageState, atMs: number) {
+  if (atMs <= 0) return;
+  finalizeActiveThought(state, atMs);
+  state.lastActivityStartedMs = atMs;
+}
+
+function durationForThought(state: MessageState, id: string, atMs: number) {
+  if (state.activeThoughtId !== id) {
+    if (state.activeThoughtId) {
+      finalizeActiveThought(state, atMs);
+      state.lastActivityStartedMs = atMs;
+    }
+    state.activeThoughtId = id;
+    state.activeThoughtStartedMs = state.lastActivityStartedMs > 0 && state.lastActivityStartedMs <= atMs
+      ? state.lastActivityStartedMs
+      : atMs;
+  }
+  return Math.max(0, atMs - state.activeThoughtStartedMs);
+}
+
 function isTerminalToolStatus(status: unknown) {
   return status === "completed" || status === "success" || status === "failed" || status === "error";
 }
@@ -142,6 +186,7 @@ function finalizeOpenMessages(state: MessageState, evt: TaskEvent) {
   const endedAtMs = taskEventTimeMs(evt) || Date.now();
   const endedAt = new Date(endedAtMs).toISOString();
   const status = terminalStatusForEvent(evt.event_type);
+  markActivityBoundary(state, endedAtMs);
 
   state.messages = state.messages.map((message) => {
     if (message.kind === "thought") {
@@ -176,7 +221,7 @@ function finalizeOpenMessages(state: MessageState, evt: TaskEvent) {
   rebuildMessageIndex(state);
 
   const startedAtMs = state.runStartedAtMs;
-  if (startedAtMs > 0 && endedAtMs >= startedAtMs) {
+  if (startedAtMs > 0 && endedAtMs >= startedAtMs && !state.runStartedFromImportedPrompt) {
     appendMessage(state, {
       id: evt.event_id,
       seq: Number(evt.sequence),
@@ -187,11 +232,14 @@ function finalizeOpenMessages(state: MessageState, evt: TaskEvent) {
     });
   }
   state.runStartedAtMs = 0;
+  state.runStartedFromImportedPrompt = false;
 }
 
 function applyUserPrompt(state: MessageState, evt: TaskEvent, dataPayload: EventRecord | undefined) {
   const prompt = String(dataPayload?.prompt || "");
   if (!prompt) return;
+  const eventTimeMs = taskEventTimeMs(evt);
+  markActivityBoundary(state, eventTimeMs);
   const turnID = userPromptTurnID(evt, dataPayload);
   const attachments = userPromptAttachments(dataPayload);
   const message: ChatMessage = {
@@ -225,9 +273,9 @@ function applyUserPrompt(state: MessageState, evt: TaskEvent, dataPayload: Event
   } else {
     appendMessage(state, message);
   }
-  state.lastActivityStartedMs = taskEventTimeMs(evt);
   if (state.runStartedAtMs <= 0) {
-    state.runStartedAtMs = taskEventTimeMs(evt);
+    state.runStartedAtMs = eventTimeMs;
+    state.runStartedFromImportedPrompt = dataPayload?.imported_history === true;
   }
   state.assistantStreams.clear();
   state.thoughtStreams.clear();
@@ -241,6 +289,7 @@ function applyAssistantMessage(state: MessageState, evt: TaskEvent, dataPayload:
   const seq = Number(evt.sequence);
   const createdAt = new Date(taskEventTimeMs(evt)).toISOString();
   const streamId = typeof dataPayload?.stream_id === "string" ? dataPayload.stream_id : "";
+  if (hasVisibleText) markActivityBoundary(state, taskEventTimeMs(evt));
 
   if (streamId) {
     const existingId = state.assistantStreams.get(streamId);
@@ -276,7 +325,7 @@ function applyThought(state: MessageState, evt: TaskEvent, dataPayload: EventRec
   const seq = Number(evt.sequence);
   const createdAt = new Date(taskEventTimeMs(evt)).toISOString();
   const streamId = typeof dataPayload?.stream_id === "string" ? dataPayload.stream_id : "";
-  const durationMs = taskEventTimeMs(evt) - state.lastActivityStartedMs;
+  const eventTimeMs = taskEventTimeMs(evt);
 
   if (streamId) {
     const existingId = state.thoughtStreams.get(streamId);
@@ -284,10 +333,12 @@ function applyThought(state: MessageState, evt: TaskEvent, dataPayload: EventRec
       const index = state.byId.get(existingId);
       const previous = index === undefined ? undefined : state.messages[index];
       const content = dataPayload?.append === true ? (previous?.content || "") + text : text;
+      const durationMs = durationForThought(state, existingId, eventTimeMs);
       setMessageContent(state, existingId, content, durationMs);
       return;
     }
     const id = evt.event_id;
+    const durationMs = durationForThought(state, id, eventTimeMs);
     state.thoughtStreams.set(streamId, id);
     appendMessage(state, { id, seq, kind: "thought", content: text, createdAt, durationMs, streamId });
     return;
@@ -298,9 +349,11 @@ function applyThought(state: MessageState, evt: TaskEvent, dataPayload: EventRec
   state.thoughtSignatures.add(signature);
   const last = state.messages[state.messages.length - 1];
   if (last?.kind === "thought" && text.startsWith(last.content)) {
+    const durationMs = durationForThought(state, last.id, eventTimeMs);
     setMessageContent(state, last.id, text, durationMs);
     return;
   }
+  const durationMs = durationForThought(state, evt.event_id, eventTimeMs);
   appendMessage(state, {
     id: evt.event_id,
     seq,
@@ -309,7 +362,6 @@ function applyThought(state: MessageState, evt: TaskEvent, dataPayload: EventRec
     createdAt,
     durationMs,
   });
-  state.lastActivityStartedMs = taskEventTimeMs(evt);
 }
 
 function applyToolEvent(
@@ -318,6 +370,7 @@ function applyToolEvent(
   dataPayload: EventRecord | undefined,
   rawMetadata: EventRecord | undefined
 ) {
+  markActivityBoundary(state, taskEventTimeMs(evt));
   const metadata = normalizeToolEventMetadata(evt.event_type, dataPayload, rawMetadata, evt.event_id);
   const toolId = getToolEventId(dataPayload, metadata, evt.event_id);
   state.pendingToolEvents.push({
@@ -368,8 +421,9 @@ function applyMessageEvent(state: MessageState, evt: TaskEvent) {
       finalizeOpenMessages(state, evt);
       return;
     case "task.started":
-      state.lastActivityStartedMs = taskEventTimeMs(evt);
+      markActivityBoundary(state, taskEventTimeMs(evt));
       state.runStartedAtMs = taskEventTimeMs(evt);
+      state.runStartedFromImportedPrompt = false;
       return;
     case "user.prompt":
       applyUserPrompt(state, evt, dataPayload);

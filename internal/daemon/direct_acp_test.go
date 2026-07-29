@@ -145,6 +145,114 @@ func TestEmitOpenCodeExportHistoryImportsUserAndAssistantText(t *testing.T) {
 	}
 }
 
+func TestImportOpenCodeSessionHistoryReportsEmptyExport(t *testing.T) {
+	bin := t.TempDir()
+	opencodePath := filepath.Join(bin, "opencode")
+	script := `#!/bin/sh
+if [ "$*" != "export --pure ses_missing" ]; then
+  echo "unexpected arguments: $*" >&2
+  exit 2
+fi
+printf '\033[91mError:\033[0m Session not found: ses_missing\n' >&2
+exit 0
+`
+	if err := os.WriteFile(opencodePath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake opencode: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := importOpenCodeSessionHistory(context.Background(), nil, "ses_missing", t.TempDir())
+	if err == nil {
+		t.Fatal("importOpenCodeSessionHistory() error = nil, want empty export error")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "opencode export returned no JSON") || !strings.Contains(message, "Session not found: ses_missing") {
+		t.Fatalf("import error = %q, want exporter stderr", message)
+	}
+	if strings.Contains(message, "unexpected end of JSON input") {
+		t.Fatalf("import error = %q, must not report a misleading JSON EOF", message)
+	}
+	if strings.Contains(message, "\x1b") {
+		t.Fatalf("import error = %q, must not contain ANSI control sequences", message)
+	}
+}
+
+func TestOpenCodeHistoryImportFailureDoesNotBlockSessionRestore(t *testing.T) {
+	dir := t.TempDir()
+	bin := t.TempDir()
+	opencodePath := filepath.Join(bin, "opencode")
+	exportScript := `#!/bin/sh
+echo "Session not found: ses_missing" >&2
+exit 0
+`
+	if err := os.WriteFile(opencodePath, []byte(exportScript), 0o755); err != nil {
+		t.Fatalf("write fake opencode exporter: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	acpPath := filepath.Join(dir, "fake-opencode-acp")
+	acpScript := `#!/bin/sh
+node -e '
+const readline = require("readline");
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === "initialize") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {
+      protocolVersion: 1,
+      agentCapabilities: { loadSession: true }
+    } }));
+  } else if (msg.method === "session/load") {
+    console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { sessionId: msg.params.sessionId } }));
+  }
+});
+'
+`
+	if err := os.WriteFile(acpPath, []byte(acpScript), 0o755); err != nil {
+		t.Fatalf("write fake OpenCode ACP: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.DirectACP.Enabled = true
+	cfg.DirectACP.Agents = map[string]DirectACPAgentConfig{
+		"opencode": {Command: acpPath},
+	}
+	d := New(cfg)
+	task := protocol.TaskDispatch{
+		TaskID:          "task-history-warning",
+		WorkspacePath:   dir,
+		Agent:           "opencode",
+		AgentRuntime:    "direct_acp",
+		SessionName:     "task-history-warning",
+		ResumeSessionID: "ses_missing",
+		ImportHistory:   true,
+	}
+	if err := d.createDirectACPSession(context.Background(), task, dir, task.TaskID); err != nil {
+		t.Fatalf("createDirectACPSession() error = %v, want recovered session", err)
+	}
+	defer d.deleteDirectACPSession(task.TaskID)
+
+	warnings := taskEventsOfType(d.history[task.TaskID].Events, "session.history.warning")
+	if len(warnings) != 1 {
+		t.Fatalf("history warning events = %#v, want one", warnings)
+	}
+	warning := taskEventData(t, warnings[0])
+	warningMessage, _ := warning["message"].(string)
+	if warning["session_id"] != "ses_missing" || !strings.Contains(warningMessage, "Session not found") {
+		t.Fatalf("history warning = %#v", warning)
+	}
+	if failed := taskEventsOfType(d.history[task.TaskID].Events, "task.failed"); len(failed) != 0 {
+		t.Fatalf("history import failure terminated session: %#v", failed)
+	}
+
+	d.mu.Lock()
+	session := d.directACP[task.TaskID]
+	d.mu.Unlock()
+	if session == nil || !session.persisted || session.client.session != "ses_missing" {
+		t.Fatalf("recovered session = %#v, want persisted ses_missing", session)
+	}
+}
+
 func TestDirectACPReaderSuppressesSplitPiStartupInfoAndKeepsSuffix(t *testing.T) {
 	d := New(Config{})
 	const taskID = "direct-startup-info"
@@ -402,6 +510,9 @@ func TestDirectACPHistoryPersistsAndLoadsInterrupted(t *testing.T) {
 	if interruptedData["reason"] != "interrupted" {
 		t.Fatalf("restart terminal data = %#v, want interrupted reason", interruptedData)
 	}
+	if record.Events[1].Timestamp != 123 {
+		t.Fatalf("restart terminal timestamp = %d, want last observed event timestamp 123", record.Events[1].Timestamp)
+	}
 
 	raw, err := os.ReadFile(daemonDirectACPSessionsPath())
 	if err != nil {
@@ -559,6 +670,24 @@ func TestRestoreInterruptedDirectACPUsesPromptTurnWithoutToolIndex(t *testing.T)
 	}
 	if _, ok := data["acpx_event_key"]; ok {
 		t.Fatalf("Direct restore inherited ACPX key: %#v", data)
+	}
+}
+
+func TestRestoreInterruptedDirectACPIgnoresImportedHistoryWithoutLiveTurn(t *testing.T) {
+	record := protocol.TaskRecord{
+		TaskID: "task-imported", AgentRuntime: "direct_acp", Status: "running",
+		Events: []protocol.TaskEvent{
+			{EventType: "user.prompt", Sequence: 1, Data: json.RawMessage(`{"prompt":"old","imported_history":true}`)},
+			{EventType: "assistant.message", Sequence: 2, Data: json.RawMessage(`{"text":"old reply","imported_history":true}`)},
+		},
+	}
+
+	restored, changed := restoreInterruptedTaskRecord(record)
+	if !changed || restored.Status != "created" {
+		t.Fatalf("restore imported history = %#v, changed=%v; want created", restored, changed)
+	}
+	if len(restored.Events) != len(record.Events) {
+		t.Fatalf("restore imported history appended interruption: %#v", restored.Events)
 	}
 }
 

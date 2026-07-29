@@ -726,6 +726,10 @@ func restoreInterruptedTaskRecord(record protocol.TaskRecord) (protocol.TaskReco
 	if status != "running" && status != "stopping" && status != "interrupted" {
 		return record, false
 	}
+	if status == "running" && hasImportedHistoryWithoutLiveTurn(record.Events) {
+		record.Status = "created"
+		return record, true
+	}
 	changed := status != "interrupted"
 	record.Status = "interrupted"
 	for index := len(record.Events) - 1; index >= 0; index-- {
@@ -738,7 +742,7 @@ func restoreInterruptedTaskRecord(record protocol.TaskRecord) (protocol.TaskReco
 		}
 	}
 
-	now := protocolNow()
+	interruptedAt := lastObservedTaskTimestamp(record)
 	data := map[string]any{
 		"error":  "task interrupted by daemon restart",
 		"reason": "interrupted",
@@ -753,11 +757,40 @@ func restoreInterruptedTaskRecord(record protocol.TaskRecord) (protocol.TaskReco
 		EventType: "task.failed",
 		Source:    "daemon",
 		Sequence:  nextHistoryEventSequence(record.Events),
-		Timestamp: now,
+		Timestamp: interruptedAt,
 		Data:      raw,
 	})
-	record.UpdatedAt = now
+	record.UpdatedAt = interruptedAt
 	return record, true
+}
+
+func hasImportedHistoryWithoutLiveTurn(events []protocol.TaskEvent) bool {
+	hasImportedPrompt := false
+	for _, event := range events {
+		switch event.EventType {
+		case "task.started":
+			return false
+		case "user.prompt":
+			if taskEventDataMap(event)["imported_history"] != true {
+				return false
+			}
+			hasImportedPrompt = true
+		}
+	}
+	return hasImportedPrompt
+}
+
+func lastObservedTaskTimestamp(record protocol.TaskRecord) int64 {
+	timestamp := record.UpdatedAt
+	for _, event := range record.Events {
+		if event.Timestamp > timestamp {
+			timestamp = event.Timestamp
+		}
+	}
+	if timestamp <= 0 {
+		return protocolNow()
+	}
+	return timestamp
 }
 
 func isTerminalTaskEventType(eventType string) bool {
@@ -1455,6 +1488,10 @@ func (e *taskEmitter) emit(eventType string, data any, raw json.RawMessage) {
 	e.daemon.emitTaskEventWithNextSequence(e.taskID, eventType, data, raw)
 }
 
+func (e *taskEmitter) emitAt(eventType string, data any, raw json.RawMessage, providerTimestampMS int64) {
+	e.daemon.emitTaskEventWithNextSequenceAt(e.taskID, eventType, data, raw, providerTimestampMS)
+}
+
 func (e *taskEmitter) markEndTurn() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -2105,6 +2142,15 @@ func (a *agentOutputAdapter) emitRawToolUpdate(update map[string]any, raw json.R
 		data["output"] = webSearchOutput
 		a.toolUpdates[id] = state
 		a.emitToolUpdateEvent("tool.output", id, data, raw)
+		return
+	}
+	if updateType == "tool_call" {
+		state.callEmitted = true
+		a.toolUpdates[id] = state
+		a.emitToolUpdateEvent("tool.call", id, data, raw)
+		if hasOutput || statusIndicatesError(state.status) {
+			a.emitToolUpdateEvent("tool.output", id, data, raw)
+		}
 		return
 	}
 	eventType := "tool.call"
@@ -3361,6 +3407,10 @@ func requestIDFromEnvelope(env protocol.Envelope) string {
 }
 
 func (d *Daemon) emitTaskEventWithNextSequence(taskID, eventType string, data any, raw json.RawMessage) {
+	d.emitTaskEventWithNextSequenceAt(taskID, eventType, data, raw, 0)
+}
+
+func (d *Daemon) emitTaskEventWithNextSequenceAt(taskID, eventType string, data any, raw json.RawMessage, providerTimestampMS int64) {
 	d.mu.Lock()
 	record := d.history[taskID]
 	seq := nextHistoryEventSequence(record.Events)
@@ -3371,14 +3421,15 @@ func (d *Daemon) emitTaskEventWithNextSequence(taskID, eventType string, data an
 		dataRaw, _ = json.Marshal(data)
 	}
 	event := protocol.TaskEvent{
-		TaskID:    taskID,
-		EventID:   protocol.NewID("evt"),
-		EventType: eventType,
-		Source:    "claude_code",
-		Sequence:  seq,
-		Timestamp: time.Now().Unix(),
-		Data:      dataRaw,
-		Raw:       raw,
+		TaskID:              taskID,
+		EventID:             protocol.NewID("evt"),
+		EventType:           eventType,
+		Source:              "claude_code",
+		Sequence:            seq,
+		Timestamp:           time.Now().Unix(),
+		ProviderTimestampMS: providerTimestampMS,
+		Data:                dataRaw,
+		Raw:                 raw,
 	}
 
 	record.Status = statusFromEvent(event.EventType, record.Status)
@@ -4044,7 +4095,7 @@ func statusFromEvent(eventType, fallback string) string {
 		return "killed"
 	default:
 		if fallback == "" {
-			return "running"
+			return "created"
 		}
 		return fallback
 	}

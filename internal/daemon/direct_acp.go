@@ -295,10 +295,19 @@ func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskD
 
 func (d *Daemon) openDirectACPSession(ctx context.Context, client *directACPClient, task protocol.TaskDispatch, workspacePath string, capabilities directACPCapabilities) (json.RawMessage, bool, error) {
 	sessionID := d.directACPResumeSessionID(task)
+	agentName := normalizeAgentName(task.Agent)
 	var restoreErrors []string
 	if sessionID != "" && task.ImportHistory && capabilities.Load {
 		loadRequest := client.importHistoryRequest
-		if normalizeAgentName(task.Agent) == "opencode" {
+		var piHistory []piImportedHistoryEvent
+		if agentName == "pi" {
+			if history, historyErr := loadPiImportedHistory(sessionID); historyErr == nil {
+				piHistory = history
+			} else {
+				log.Printf("load native Pi history %q: %v; using ACP replay", sessionID, historyErr)
+			}
+		}
+		if agentName == "opencode" || len(piHistory) > 0 {
 			loadRequest = client.restoreRequest
 		}
 		raw, err := loadRequest(ctx, "session/load", map[string]any{
@@ -307,10 +316,19 @@ func (d *Daemon) openDirectACPSession(ctx context.Context, client *directACPClie
 			"mcpServers": []any{},
 		})
 		if err == nil {
-			if normalizeAgentName(task.Agent) == "opencode" {
+			if agentName == "opencode" {
 				if err := importOpenCodeSessionHistory(ctx, client.emitter, sessionID, workspacePath); err != nil {
-					return nil, false, err
+					log.Printf("restore OpenCode session %q without imported history: %v", sessionID, err)
+					if client.emitter != nil {
+						client.emitter.emit("session.history.warning", map[string]any{
+							"agent":      "opencode",
+							"session_id": sessionID,
+							"message":    err.Error(),
+						}, nil)
+					}
 				}
+			} else if len(piHistory) > 0 {
+				emitPiImportedHistory(client.emitter, piHistory)
 			}
 			return raw, true, nil
 		}
@@ -359,14 +377,63 @@ func importOpenCodeSessionHistory(ctx context.Context, emitter *taskEmitter, ses
 	if err != nil {
 		return fmt.Errorf("import OpenCode history: opencode command not found")
 	}
-	cmd := exec.CommandContext(ctx, command, "export", sessionID)
+	cmd := exec.CommandContext(ctx, command, "export", "--pure", sessionID)
 	cmd.Dir = workspacePath
-	cmd.Env = append(os.Environ(), "NO_COLOR=1", "FORCE_COLOR=0")
+	cmd.Env = mergeEnv(os.Environ(), map[string]string{"NO_COLOR": "1", "FORCE_COLOR": "0"})
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	raw, err := cmd.Output()
+	detail := openCodeExportDiagnostic(stderr.Bytes())
 	if err != nil {
+		if detail != "" {
+			return fmt.Errorf("import OpenCode history: %w: %s", err, detail)
+		}
 		return fmt.Errorf("import OpenCode history: %w", err)
 	}
-	return emitOpenCodeExportHistory(emitter, raw)
+	if len(bytes.TrimSpace(raw)) == 0 {
+		if detail != "" {
+			return fmt.Errorf("import OpenCode history: opencode export returned no JSON: %s", detail)
+		}
+		return fmt.Errorf("import OpenCode history: opencode export returned no JSON")
+	}
+	if err := emitOpenCodeExportHistory(emitter, raw); err != nil {
+		if detail != "" {
+			return fmt.Errorf("%w; opencode: %s", err, detail)
+		}
+		return err
+	}
+	return nil
+}
+
+func openCodeExportDiagnostic(raw []byte) string {
+	detail := strings.Join(strings.Fields(stripANSIControlSequences(string(raw))), " ")
+	const maxRunes = 1024
+	runes := []rune(detail)
+	if len(runes) > maxRunes {
+		detail = string(runes[:maxRunes]) + "..."
+	}
+	return detail
+}
+
+func stripANSIControlSequences(value string) string {
+	var clean strings.Builder
+	clean.Grow(len(value))
+	for index := 0; index < len(value); {
+		if value[index] == 0x1b && index+1 < len(value) && value[index+1] == '[' {
+			index += 2
+			for index < len(value) {
+				last := value[index]
+				index++
+				if last >= 0x40 && last <= 0x7e {
+					break
+				}
+			}
+			continue
+		}
+		clean.WriteByte(value[index])
+		index++
+	}
+	return clean.String()
 }
 
 func emitOpenCodeExportHistory(emitter *taskEmitter, raw []byte) error {

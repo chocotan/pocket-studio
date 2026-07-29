@@ -28,6 +28,13 @@ export function isTerminalTaskEvent(evt: TaskEvent, _agentRuntime?: string): boo
   );
 }
 
+export function shouldUpdateTransientErrorFromTaskEvent(
+  historyCollecting: boolean,
+  awaitingResumedHistory: boolean,
+): boolean {
+  return !historyCollecting && !awaitingResumedHistory;
+}
+
 export function getTaskRunTiming(events: TaskEvent[], agentRuntime: string) {
   const turnIdByIndex = new Map<number, string>();
   for (const event of events) {

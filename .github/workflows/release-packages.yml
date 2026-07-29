@@ -1,14 +1,50 @@
 name: Release Packages
 
 on:
+  push:
+    tags:
+      - "*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag (defaults to the selected ref)
+        required: false
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-packages-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+
 jobs:
+  prepare-release:
+    name: Prepare GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release when needed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+          fi
+
   package:
     name: Build ${{ matrix.label }} release artifacts
+    needs: prepare-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,32 +55,32 @@ jobs:
             platform: linux
             artifact-os: linux
             artifact-arch: x86_64
-            binary-ext: ''
+            binary-ext: ""
           - label: macOS
             os: macos-latest
             platform: mac
             artifact-os: macos
             artifact-arch: arm64
-            binary-ext: ''
+            binary-ext: ""
           - label: Windows
             os: windows-latest
             platform: win
             artifact-os: windows
             artifact-arch: x86_64
-            binary-ext: '.exe'
+            binary-ext: ".exe"
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -81,25 +117,25 @@ jobs:
       - name: Rename release artifacts
         shell: bash
         env:
-          TAG_NAME: ${{ github.event.release.tag_name || github.ref_name }}
           PLATFORM: ${{ matrix.platform }}
           ARTIFACT_OS: ${{ matrix.artifact-os }}
           ARTIFACT_ARCH: ${{ matrix.artifact-arch }}
           BINARY_EXT: ${{ matrix.binary-ext }}
         run: |
+          artifact_version="$(printf '%s' "$RELEASE_TAG" | sed 's/[^A-Za-z0-9._-]/-/g')"
           mkdir -p dist/release
-          cp "dist/pocket-studio-server-bin${BINARY_EXT}" "dist/release/pocket-studio-server-${ARTIFACT_OS}-${ARTIFACT_ARCH}-${TAG_NAME}${BINARY_EXT}"
-          cp "dist/pocket-studio-daemon-bin${BINARY_EXT}" "dist/release/pocket-studio-daemon-${ARTIFACT_OS}-${ARTIFACT_ARCH}-${TAG_NAME}${BINARY_EXT}"
+          cp "dist/pocket-studio-server-bin${BINARY_EXT}" "dist/release/pocket-studio-server-${ARTIFACT_OS}-${ARTIFACT_ARCH}-${artifact_version}${BINARY_EXT}"
+          cp "dist/pocket-studio-daemon-bin${BINARY_EXT}" "dist/release/pocket-studio-daemon-${ARTIFACT_OS}-${ARTIFACT_ARCH}-${artifact_version}${BINARY_EXT}"
 
           case "$PLATFORM" in
             linux)
-              cp dist/electron/*.AppImage "dist/release/pocket-studio-all-linux-${ARTIFACT_ARCH}-${TAG_NAME}.AppImage"
+              cp dist/electron/*.AppImage "dist/release/pocket-studio-all-linux-${ARTIFACT_ARCH}-${artifact_version}.AppImage"
               ;;
             mac)
-              cp dist/electron/*.dmg "dist/release/pocket-studio-all-macos-${ARTIFACT_ARCH}-${TAG_NAME}.dmg"
+              cp dist/electron/*.dmg "dist/release/pocket-studio-all-macos-${ARTIFACT_ARCH}-${artifact_version}.dmg"
               ;;
             win)
-              cp dist/electron/*-setup.exe "dist/release/pocket-studio-all-windows-${ARTIFACT_ARCH}-${TAG_NAME}-setup.exe"
+              cp dist/electron/*-setup.exe "dist/release/pocket-studio-all-windows-${ARTIFACT_ARCH}-${artifact_version}-setup.exe"
               ;;
             *)
               echo "unsupported platform: $PLATFORM" >&2
@@ -108,28 +144,104 @@ jobs:
           esac
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.artifact-os }}-${{ matrix.artifact-arch }}
-          path: dist/release/*
-          if-no-files-found: error
-          retention-days: 3
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" dist/release/* --clobber --repo "$GITHUB_REPOSITORY"
 
-  publish:
-    name: Upload artifacts to GitHub Release
+  android:
+    name: Build Android release artifacts
+    needs: prepare-release
     runs-on: ubuntu-latest
-    needs: package
     steps:
-      - name: Download release artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist/release
-          pattern: release-*
-          merge-multiple: true
+      - name: Checkout
+        uses: actions/checkout@v7
 
-      - name: Upload artifacts to GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
         with:
-          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
-          overwrite_files: true
-          files: dist/release/*
+          distribution: temurin
+          java-version: "17"
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v6
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+          cache-read-only: false
+
+      - name: Set up Android SDK 35
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0
+
+      - name: Configure optional release signing
+        id: signing
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" && -z "$KEYSTORE_PASSWORD" && -z "$KEY_ALIAS" && -z "$KEY_PASSWORD" ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Android signing secrets are not configured; publishing the installable debug APK only"
+            exit 0
+          fi
+          if [[ -z "$KEYSTORE_BASE64" || -z "$KEYSTORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
+            echo "::error::Android signing is partially configured; set all four ANDROID_KEYSTORE_* secrets"
+            exit 1
+          fi
+
+          keystore_path="$RUNNER_TEMP/pocket-studio-release.keystore"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          chmod 600 "$keystore_path"
+          echo "ANDROID_KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Test, lint, and build debug APK
+        working-directory: android-app
+        env:
+          ANDROID_VERSION_NAME: ${{ env.RELEASE_TAG }}
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+
+      - name: Build signed release APK and AAB
+        if: steps.signing.outputs.enabled == 'true'
+        working-directory: android-app
+        env:
+          ANDROID_VERSION_NAME: ${{ env.RELEASE_TAG }}
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon :app:assembleRelease :app:bundleRelease
+
+      - name: Verify and rename Android artifacts
+        shell: bash
+        env:
+          SIGNED_RELEASE: ${{ steps.signing.outputs.enabled }}
+        run: |
+          artifact_version="$(printf '%s' "$RELEASE_TAG" | sed 's/[^A-Za-z0-9._-]/-/g')"
+          debug_apk="android-app/app/build/outputs/apk/debug/app-debug.apk"
+          mkdir -p dist/release
+          "$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner" verify --verbose "$debug_apk"
+          cp "$debug_apk" "dist/release/pocket-studio-android-universal-${artifact_version}-debug.apk"
+
+          if [[ "$SIGNED_RELEASE" == "true" ]]; then
+            release_apk="android-app/app/build/outputs/apk/release/app-release.apk"
+            release_aab="android-app/app/build/outputs/bundle/release/app-release.aab"
+            "$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner" verify --verbose "$release_apk"
+            jarsigner -verify "$release_aab"
+            cp "$release_apk" "dist/release/pocket-studio-android-universal-${artifact_version}.apk"
+            cp "$release_aab" "dist/release/pocket-studio-android-universal-${artifact_version}.aab"
+          fi
+
+      - name: Upload Android release artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" dist/release/* --clobber --repo "$GITHUB_REPOSITORY"

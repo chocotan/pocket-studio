@@ -4,6 +4,25 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+val ciVersionCode = providers.environmentVariable("ANDROID_VERSION_CODE")
+    .orNull
+    ?.toIntOrNull()
+    ?.takeIf { it > 0 }
+val ciVersionName = providers.environmentVariable("ANDROID_VERSION_NAME")
+    .orNull
+    ?.trim()
+    ?.takeIf { it.isNotEmpty() }
+val releaseStorePath = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
+val releaseStorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
+val hasReleaseSigning = listOf(
+    releaseStorePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "dev.pocketstudio.mobile"
     compileSdk = 35
@@ -12,8 +31,23 @@ android {
         applicationId = "dev.pocketstudio.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = ciVersionCode ?: 1
+        versionName = ciVersionName ?: "0.1.0"
+    }
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseStorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.findByName("release")
+        }
     }
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }

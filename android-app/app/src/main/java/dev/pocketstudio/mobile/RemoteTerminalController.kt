@@ -33,6 +33,7 @@ class RemoteTerminalController(
     val view = TerminalView(context, null).apply {
         setBackgroundColor(TerminalLightPalette.backgroundArgb)
     }
+    internal val viewport = TerminalViewport(context, view)
     private var socket: WebSocket? = null
     private val resizePolicy = TerminalResizePolicy()
     private val scrollPolicy = TerminalScrollPolicy()
@@ -55,7 +56,10 @@ class RemoteTerminalController(
     }
 
     private val sessionClient = object : TerminalSessionClient {
-        override fun onTextChanged(session: TerminalSession) = view.onScreenUpdated()
+        override fun onTextChanged(session: TerminalSession) {
+            view.onScreenUpdated()
+            viewport.onScreenUpdated()
+        }
         override fun onTitleChanged(session: TerminalSession) = Unit
         override fun onSessionFinished(session: TerminalSession) = Unit
         override fun onCopyTextToClipboard(session: TerminalSession, text: String) = Unit
@@ -148,6 +152,7 @@ class RemoteTerminalController(
                     val historyRows = emulator.screen.activeTranscriptRows
                     view.topRow = (view.topRow + rows).coerceIn(-historyRows, 0)
                     view.invalidate()
+                    viewport.onTranscriptScrolled()
                 }
                 TerminalScrollMode.MouseWheel -> {
                     val cell = view.getColumnAndRow(e2, false)
@@ -209,6 +214,7 @@ class RemoteTerminalController(
     private fun append(bytes: ByteArray) = view.post {
         session.emulator?.append(bytes, bytes.size)
         view.onScreenUpdated()
+        viewport.onScreenUpdated()
     }
 
     fun send(value: String) { socket?.send(ByteString.of(*value.toByteArray(StandardCharsets.UTF_8))) }
@@ -223,13 +229,14 @@ class RemoteTerminalController(
         session.reset()
         session.emulator?.let(TerminalLightPalette::applyTo)
         view.onScreenUpdated()
+        viewport.onScreenUpdated()
     }
     fun close() { socket?.close(1000, "leave terminal"); socket = null; session.finishIfRunning() }
 
     private fun sendResizeIfChanged() {
         if (socket == null) return
         val emulator = session.emulator ?: return
-        val size = resizePolicy.next(emulator.mColumns, emulator.mRows) ?: return
+        val size = resizePolicy.next(emulator.mColumns, emulator.mRows, freezeRows = viewport.isImeVisible) ?: return
         socket?.send("{\"type\":\"resize\",\"cols\":${size.columns},\"rows\":${size.rows}}")
     }
 }
