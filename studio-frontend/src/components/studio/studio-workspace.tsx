@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Palette, Check, Cable, Layers, PanelLeft, FolderTree, FileText, Plus, Lock, Unlock, Monitor, Folder } from "lucide-react";
 import type { Device } from "@/lib/types";
-import { type StudioTheme, terminalType, terminalTypeFromCommand, terminalKindFromAgentKind, cleanTerminalTitle, type TerminalTitleState } from "./terminal-types";
+import { type StudioTheme, STUDIO_THEMES, isStudioTheme, isDarkStudioTheme, terminalType, terminalTypeFromCommand, terminalKindFromAgentKind, cleanTerminalTitle, type TerminalTitleState } from "./terminal-types";
 import type { Project } from "./studio-dashboard";
 import { EmptyWorkspace } from "./empty-workspace";
 import { ProjectNavMenu, ProjectSwitcher, deviceDisplayName } from "./project-switcher";
@@ -92,12 +92,12 @@ export function StudioWorkspace({
     if (typeof window !== "undefined") {
       const params = new URLSearchParams(window.location.search);
       const urlTheme = params.get("theme");
-      if (urlTheme === "light" || urlTheme === "claude" || urlTheme === "sandalwood" || urlTheme === "dark" || urlTheme === "synthwave" || urlTheme === "onedark" || urlTheme === "charcoal") {
-        return urlTheme as StudioTheme;
+      if (isStudioTheme(urlTheme)) {
+        return urlTheme;
       }
       const saved = localStorage.getItem("pocket-studio-theme");
-      if (saved === "light" || saved === "claude" || saved === "sandalwood" || saved === "dark" || saved === "synthwave" || saved === "onedark" || saved === "charcoal") {
-        return saved as StudioTheme;
+      if (isStudioTheme(saved)) {
+        return saved;
       }
     }
     return "light";
@@ -505,7 +505,7 @@ export function StudioWorkspace({
         setAddMenuPanelId(null);
         setThemeMenuOpen(false);
       }}
-      className={`studio-square bg-background text-foreground select-none flex flex-col overflow-hidden theme-${theme} ${theme === "dark" || theme === "synthwave" || theme === "onedark" || theme === "charcoal" ? "dark" : ""}`}
+      className={`studio-square bg-background text-foreground select-none flex flex-col overflow-hidden theme-${theme} ${isDarkStudioTheme(theme) ? "dark" : ""}`}
       style={{
         width: "100dvw",
         height: "100dvh",
@@ -651,19 +651,11 @@ export function StudioWorkspace({
               {themeMenuOpen && (
                 <>
                   <div className="fixed inset-0 z-40 cursor-default" onClick={() => setThemeMenuOpen(false)} />
-                  <div className="absolute right-0 mt-2 w-40 rounded-lg border border-border bg-card text-card-foreground p-1.5 shadow-lg z-50 animate-scale-in">
+                  <div className="absolute right-0 mt-2 w-40 max-h-[70dvh] overflow-y-auto rounded-lg border border-border bg-card text-card-foreground p-1.5 shadow-lg z-50 animate-scale-in">
                     <div className="px-2.5 py-1.5 text-[9px] font-bold text-muted-foreground uppercase tracking-widest border-b border-border mb-1">
                       选择主题
                     </div>
-                    {[
-                      { id: "light" as const, name: "雾白瓷", preview: "bg-[#f7f8fc] border-[#4f46e5]" },
-                      { id: "claude" as const, name: "纸暖", preview: "bg-[#f4ecdf] border-[#b35f2a]" },
-                      { id: "sandalwood" as const, name: "檀香", preview: "bg-[#f5f0e7] border-[#c86446]" },
-                      { id: "dark" as const, name: "墨渊", preview: "bg-[#171c28] border-[#a5b4fc]" },
-                      { id: "synthwave" as const, name: "夜霓", preview: "bg-[#1b1029] border-[#e879f9]" },
-                      { id: "onedark" as const, name: "代码墨", preview: "bg-[#282c34] border-[#61afef]" },
-                      { id: "charcoal" as const, name: "柔烟", preview: "bg-[#3b414c] border-[#8bb7cc]" },
-                    ].map((t) => (
+                    {STUDIO_THEMES.map((t) => (
                       <button
                         key={t.id}
                         type="button"
@@ -824,7 +816,7 @@ export function StudioWorkspace({
               <div 
                 className="relative w-full h-full overflow-hidden"
                 style={{
-                  backgroundImage: theme === "dark" || theme === "synthwave" || theme === "onedark" || theme === "charcoal"
+                  backgroundImage: isDarkStudioTheme(theme)
                     ? "radial-gradient(rgba(255,255,255,0.06) 1px, transparent 0)"
                     : "radial-gradient(rgba(0,0,0,0.06) 1px, transparent 0)",
                   backgroundSize: "24px 24px"

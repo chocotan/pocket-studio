@@ -174,6 +174,114 @@ export function getXtermTheme(theme: StudioTheme) {
     };
   }
 
+  if (theme === "sky") {
+    return {
+      background:          "#f4f8ff",
+      foreground:          "#16273f",
+      cursor:              "#2563eb",
+      cursorAccent:        "#f4f8ff",
+      selectionBackground: "rgba(37, 99, 235, 0.16)",
+      selectionForeground: "#16273f",
+      black:               "#16273f",
+      red:                 "#dc2626",
+      green:               "#15803d",
+      yellow:              "#b45309",
+      blue:                "#1d4ed8",
+      magenta:             "#7c3aed",
+      cyan:                "#0e7490",
+      white:               "#e6edf7",
+      brightBlack:         "#5b6b82",
+      brightRed:           "#ef4444",
+      brightGreen:         "#16a34a",
+      brightYellow:        "#d97706",
+      brightBlue:          "#3b82f6",
+      brightMagenta:       "#8b5cf6",
+      brightCyan:          "#0891b2",
+      brightWhite:         "#ffffff",
+    };
+  }
+
+  if (theme === "jade") {
+    return {
+      background:          "#f3faf5",
+      foreground:          "#182a20",
+      cursor:              "#059669",
+      cursorAccent:        "#f3faf5",
+      selectionBackground: "rgba(5, 150, 105, 0.16)",
+      selectionForeground: "#182a20",
+      black:               "#182a20",
+      red:                 "#b91c1c",
+      green:               "#047857",
+      yellow:              "#a16207",
+      blue:                "#1e40af",
+      magenta:             "#86198f",
+      cyan:                "#0f766e",
+      white:               "#e2efe6",
+      brightBlack:         "#587264",
+      brightRed:           "#dc2626",
+      brightGreen:         "#059669",
+      brightYellow:        "#ca8a04",
+      brightBlue:          "#2563eb",
+      brightMagenta:       "#a21caf",
+      brightCyan:          "#0d9488",
+      brightWhite:         "#ffffff",
+    };
+  }
+
+  if (theme === "sakura") {
+    return {
+      background:          "#fff7f9",
+      foreground:          "#33202a",
+      cursor:              "#e11d48",
+      cursorAccent:        "#fff7f9",
+      selectionBackground: "rgba(225, 29, 72, 0.15)",
+      selectionForeground: "#33202a",
+      black:               "#33202a",
+      red:                 "#be123c",
+      green:               "#15803d",
+      yellow:              "#b45309",
+      blue:                "#1d4ed8",
+      magenta:             "#a21caf",
+      cyan:                "#0e7490",
+      white:               "#f7e6ec",
+      brightBlack:         "#7d5f6d",
+      brightRed:           "#e11d48",
+      brightGreen:         "#16a34a",
+      brightYellow:        "#d97706",
+      brightBlue:          "#3b82f6",
+      brightMagenta:       "#c026d3",
+      brightCyan:          "#0891b2",
+      brightWhite:         "#ffffff",
+    };
+  }
+
+  if (theme === "xuan") {
+    return {
+      background:          "#f7f1e3",
+      foreground:          "#2b241c",
+      cursor:              "#b53a2b",
+      cursorAccent:        "#f7f1e3",
+      selectionBackground: "rgba(192, 61, 46, 0.16)",
+      selectionForeground: "#2b241c",
+      black:               "#2b241c",
+      red:                 "#b03527",
+      green:               "#3f6b4f",
+      yellow:              "#9a6a1f",
+      blue:                "#2f557f",
+      magenta:             "#7d4a68",
+      cyan:                "#35736b",
+      white:               "#e9dfc9",
+      brightBlack:         "#7a6f60",
+      brightRed:           "#c03d2e",
+      brightGreen:         "#528a68",
+      brightYellow:        "#b9852f",
+      brightBlue:          "#3f6f9f",
+      brightMagenta:       "#96607f",
+      brightCyan:          "#4a8f86",
+      brightWhite:         "#fdf9ef",
+    };
+  }
+
   // light / default — mist porcelain
   return {
     background:          "#fbfcfe",

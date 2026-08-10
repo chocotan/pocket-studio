@@ -18,7 +18,37 @@ export type TerminalKind = "bash" | "claude" | "codex" | "opencode" | "kilo" | "
 export type SplitDirection = "left" | "right" | "top" | "bottom";
 export type TerminalAccent = "indigo" | "violet" | "emerald" | "amber" | "cyan" | "rose" | "lime" | "sky" | "slate";
 export type TerminalTitleSource = "initial" | "tmux";
-export type StudioTheme = "light" | "claude" | "sandalwood" | "dark" | "synthwave" | "onedark" | "charcoal";
+export type StudioTheme = "light" | "claude" | "sandalwood" | "sky" | "jade" | "sakura" | "xuan" | "dark" | "synthwave" | "onedark" | "charcoal";
+
+export interface StudioThemeDefinition {
+  id: StudioTheme;
+  name: string;
+  /** Swatch preview classes for the theme picker. */
+  preview: string;
+  dark: boolean;
+}
+
+export const STUDIO_THEMES: StudioThemeDefinition[] = [
+  { id: "light",      name: "雾白瓷", preview: "bg-[#f7f8fc] border-[#4f46e5]", dark: false },
+  { id: "claude",     name: "纸暖",   preview: "bg-[#f4ecdf] border-[#b35f2a]", dark: false },
+  { id: "sandalwood", name: "檀香",   preview: "bg-[#f5f0e7] border-[#c86446]", dark: false },
+  { id: "sky",        name: "霁蓝",   preview: "bg-[#f2f7ff] border-[#2563eb]", dark: false },
+  { id: "jade",       name: "竹青",   preview: "bg-[#eff8f2] border-[#059669]", dark: false },
+  { id: "sakura",     name: "樱粉",   preview: "bg-[#fff2f5] border-[#e11d48]", dark: false },
+  { id: "xuan",       name: "宣纸",   preview: "bg-[#f6efdf] border-[#c03d2e]", dark: false },
+  { id: "dark",       name: "墨渊",   preview: "bg-[#171c28] border-[#a5b4fc]", dark: true },
+  { id: "synthwave",  name: "夜霓",   preview: "bg-[#1b1029] border-[#e879f9]", dark: true },
+  { id: "onedark",    name: "代码墨", preview: "bg-[#282c34] border-[#61afef]", dark: true },
+  { id: "charcoal",   name: "柔烟",   preview: "bg-[#3b414c] border-[#8bb7cc]", dark: true },
+];
+
+export function isStudioTheme(value: unknown): value is StudioTheme {
+  return typeof value === "string" && STUDIO_THEMES.some((item) => item.id === value);
+}
+
+export function isDarkStudioTheme(theme: StudioTheme | undefined): boolean {
+  return STUDIO_THEMES.some((item) => item.id === theme && item.dark);
+}
 
 export interface TerminalTitleState {
   title: string;

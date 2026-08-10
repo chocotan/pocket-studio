@@ -189,6 +189,194 @@
   --theme-glow: color-mix(in oklch, var(--primary) 12%, transparent);
 }
 
+/* Sky — Azure Porcelain (霁蓝) */
+.theme-sky {
+  --background:        oklch(0.979 0.008 240);
+  --foreground:        oklch(0.215 0.028 252);
+
+  --card:              oklch(0.993 0.004 240);
+  --card-foreground:   oklch(0.215 0.028 252);
+  --popover:           oklch(1 0 0);
+  --popover-foreground:oklch(0.215 0.028 252);
+
+  /* clear azure — crisp, not electric */
+  --primary:           oklch(0.525 0.165 248);
+  --primary-foreground:oklch(0.985 0.005 240);
+
+  --secondary:         oklch(0.952 0.012 242);
+  --secondary-foreground:oklch(0.265 0.030 250);
+
+  --muted:             oklch(0.948 0.010 242);
+  --muted-foreground:  oklch(0.505 0.025 248);
+
+  --accent:            oklch(0.938 0.038 242);
+  --accent-foreground: oklch(0.405 0.120 250);
+
+  --destructive:       oklch(0.555 0.210 25);
+
+  --border:            oklch(0.898 0.014 242);
+  --input:             oklch(0.898 0.014 242);
+  --ring:              oklch(0.525 0.165 248);
+
+  --success:           oklch(0.560 0.130 155);
+  --warning:           oklch(0.720 0.140 75);
+
+  --indigo-50:   #eff6ff;
+  --indigo-100:  #dbeafe;
+  --indigo-200:  #bfdbfe;
+  --indigo-500:  #3b82f6;
+  --indigo-600:  #2563eb;
+  --indigo-700:  #1d4ed8;
+
+  --studio-tabbar-background: color-mix(in oklch, var(--muted) 78%, var(--background));
+  --studio-panel-shadow: 0 1px 2px rgb(15 40 90 / 0.04), 0 0 0 1px rgb(15 40 90 / 0.02);
+  --studio-alert-bg-rest: color-mix(in oklch, var(--primary) 10%, var(--card));
+  --studio-alert-bg-peak: color-mix(in oklch, var(--primary) 22%, var(--card));
+  --studio-alert-text: color-mix(in oklch, var(--foreground) 78%, var(--primary));
+  --theme-glow: color-mix(in oklch, var(--primary) 12%, transparent);
+}
+
+/* Jade — Bamboo Green (竹青) */
+.theme-jade {
+  --background:        oklch(0.974 0.012 152);
+  --foreground:        oklch(0.220 0.028 162);
+
+  --card:              oklch(0.990 0.006 152);
+  --card-foreground:   oklch(0.220 0.028 162);
+  --popover:           oklch(0.997 0.003 152);
+  --popover-foreground:oklch(0.220 0.028 162);
+
+  /* deep bamboo green — calm, botanical */
+  --primary:           oklch(0.505 0.108 158);
+  --primary-foreground:oklch(0.982 0.008 152);
+
+  --secondary:         oklch(0.945 0.016 150);
+  --secondary-foreground:oklch(0.275 0.032 160);
+
+  --muted:             oklch(0.940 0.014 150);
+  --muted-foreground:  oklch(0.498 0.026 158);
+
+  --accent:            oklch(0.928 0.040 148);
+  --accent-foreground: oklch(0.390 0.085 158);
+
+  --destructive:       oklch(0.555 0.200 25);
+
+  --border:            oklch(0.885 0.018 150);
+  --input:             oklch(0.885 0.018 150);
+  --ring:              oklch(0.505 0.108 158);
+
+  --success:           oklch(0.560 0.130 155);
+  --warning:           oklch(0.710 0.135 78);
+
+  --indigo-50:   #ecfdf5;
+  --indigo-100:  #d1fae5;
+  --indigo-200:  #a7f3d0;
+  --indigo-500:  #10b981;
+  --indigo-600:  #059669;
+  --indigo-700:  #047857;
+
+  --studio-tabbar-background: color-mix(in oklch, var(--muted) 76%, var(--background));
+  --studio-panel-shadow: 0 1px 2px rgb(14 58 38 / 0.05), 0 0 0 1px rgb(14 58 38 / 0.03);
+  --studio-alert-bg-rest: color-mix(in oklch, var(--primary) 11%, var(--card));
+  --studio-alert-bg-peak: color-mix(in oklch, var(--primary) 23%, var(--card));
+  --studio-alert-text: color-mix(in oklch, var(--foreground) 76%, var(--primary));
+  --theme-glow: color-mix(in oklch, var(--primary) 12%, transparent);
+}
+
+/* Sakura — Petal Pink (樱粉) */
+.theme-sakura {
+  --background:        oklch(0.976 0.009 350);
+  --foreground:        oklch(0.245 0.028 345);
+
+  --card:              oklch(0.991 0.005 350);
+  --card-foreground:   oklch(0.245 0.028 345);
+  --popover:           oklch(1 0 0);
+  --popover-foreground:oklch(0.245 0.028 345);
+
+  /* muted rose — petal soft, not candy */
+  --primary:           oklch(0.555 0.155 352);
+  --primary-foreground:oklch(0.985 0.006 350);
+
+  --secondary:         oklch(0.950 0.012 350);
+  --secondary-foreground:oklch(0.290 0.032 345);
+
+  --muted:             oklch(0.946 0.011 350);
+  --muted-foreground:  oklch(0.510 0.030 348);
+
+  --accent:            oklch(0.935 0.034 350);
+  --accent-foreground: oklch(0.425 0.115 350);
+
+  --destructive:       oklch(0.545 0.215 22);
+
+  --border:            oklch(0.898 0.015 350);
+  --input:             oklch(0.898 0.015 350);
+  --ring:              oklch(0.555 0.155 352);
+
+  --success:           oklch(0.560 0.125 155);
+  --warning:           oklch(0.720 0.135 78);
+
+  --indigo-50:   #fff1f2;
+  --indigo-100:  #ffe4e6;
+  --indigo-200:  #fecdd3;
+  --indigo-500:  #f43f5e;
+  --indigo-600:  #e11d48;
+  --indigo-700:  #be123c;
+
+  --studio-tabbar-background: color-mix(in oklch, var(--muted) 76%, var(--background));
+  --studio-panel-shadow: 0 1px 2px rgb(90 22 45 / 0.04), 0 0 0 1px rgb(90 22 45 / 0.02);
+  --studio-alert-bg-rest: color-mix(in oklch, var(--primary) 10%, var(--card));
+  --studio-alert-bg-peak: color-mix(in oklch, var(--primary) 22%, var(--card));
+  --studio-alert-text: color-mix(in oklch, var(--foreground) 78%, var(--primary));
+  --theme-glow: color-mix(in oklch, var(--primary) 12%, transparent);
+}
+
+/* Xuan — Rice Paper & Cinnabar (宣纸·中国风) */
+.theme-xuan {
+  --background:        oklch(0.948 0.024 92);
+  --foreground:        oklch(0.270 0.022 58);
+
+  --card:              oklch(0.965 0.018 92);
+  --card-foreground:   oklch(0.270 0.022 58);
+  --popover:           oklch(0.978 0.015 92);
+  --popover-foreground:oklch(0.270 0.022 58);
+
+  /* 朱砂 cinnabar — seal red on rice paper */
+  --primary:           oklch(0.505 0.180 30);
+  --primary-foreground:oklch(0.970 0.015 92);
+
+  --secondary:         oklch(0.912 0.026 90);
+  --secondary-foreground:oklch(0.315 0.028 58);
+
+  --muted:             oklch(0.902 0.024 90);
+  --muted-foreground:  oklch(0.505 0.026 62);
+
+  --accent:            oklch(0.888 0.045 68);
+  --accent-foreground: oklch(0.415 0.105 30);
+
+  --destructive:       oklch(0.520 0.205 27);
+
+  --border:            oklch(0.828 0.030 85);
+  --input:             oklch(0.828 0.030 85);
+  --ring:              oklch(0.505 0.180 30);
+
+  --success:           oklch(0.520 0.100 150);
+  --warning:           oklch(0.680 0.125 72);
+
+  --indigo-50:   #faf3e6;
+  --indigo-100:  #f4e6cf;
+  --indigo-200:  #e8cfa8;
+  --indigo-500:  #c03d2e;
+  --indigo-600:  #a83226;
+  --indigo-700:  #87281f;
+
+  --studio-tabbar-background: color-mix(in oklch, var(--muted) 72%, var(--background));
+  --studio-panel-shadow: 0 1px 2px rgb(78 48 22 / 0.06), 0 0 0 1px rgb(78 48 22 / 0.03);
+  --studio-alert-bg-rest: color-mix(in oklch, var(--primary) 12%, var(--card));
+  --studio-alert-bg-peak: color-mix(in oklch, var(--primary) 24%, var(--card));
+  --studio-alert-text: color-mix(in oklch, var(--foreground) 72%, var(--primary));
+  --theme-glow: color-mix(in oklch, var(--primary) 14%, transparent);
+}
+
 /* Dark — Ink Abyss */
 .theme-dark {
   --background:        oklch(0.145 0.018 262);

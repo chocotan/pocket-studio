@@ -14,7 +14,7 @@ interface FileReadResult {
   error?: string;
 }
 
-import { type StudioTheme } from "./terminal-types";
+import { type StudioTheme, isDarkStudioTheme } from "./terminal-types";
 
 interface FileViewerTabProps {
   projectId: string;
@@ -169,7 +169,7 @@ export function FileViewerTab({ projectId, path, active, dragSuspended, theme = 
                 height="100%"
                 language={language}
                 value={content}
-                theme={theme === "light" || theme === "claude" || theme === "sandalwood" ? "vs" : "vs-dark"}
+                theme={isDarkStudioTheme(theme) ? "vs-dark" : "vs"}
                 options={{
                   minimap: { enabled: false },
                   fontSize: 12,
