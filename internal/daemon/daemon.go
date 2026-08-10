@@ -4309,20 +4309,15 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 			d.send <- protocol.NewEnvelope(protocol.TypeTerminalStreamExit, "daemon", exitPayload)
 		}()
 
-		buf := make([]byte, 1024)
-		for {
-			n, err := ptyFile.Read(buf)
-			if err != nil {
-				break
-			}
+		_ = streamTerminalOutput(ptyFile, terminalOutputBatchDelay, terminalOutputMaxBatch, func(data []byte) {
 			dataPayload := protocol.TerminalStreamData{
 				ProjectID:  req.ProjectID,
 				TerminalID: req.TerminalID,
 				ClientID:   req.ClientID,
-				Data:       buf[:n],
+				Data:       data,
 			}
 			d.sendTerminalStreamData(dataPayload)
-		}
+		})
 	}()
 }
 
