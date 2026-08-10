@@ -2774,7 +2774,25 @@ func (d *Daemon) writeWorkspaceFile(request protocol.WorkspaceWriteRequest) {
 		d.sendWorkspaceError(request.RequestID, err.Error())
 		return
 	}
+	var temporaryDir string
+	if request.Temporary {
+		filename := filepath.Base(strings.TrimSpace(request.Path))
+		if filename == "" || filename == "." || filename == string(filepath.Separator) {
+			d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Error: "temporary filename is required"})
+			return
+		}
+		temporaryDir, err = os.MkdirTemp("", "pocket-studio-paste-")
+		if err != nil {
+			d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Error: err.Error()})
+			return
+		}
+		target = filepath.Join(temporaryDir, filename)
+		relative = filepath.ToSlash(target)
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if temporaryDir != "" {
+			_ = os.RemoveAll(temporaryDir)
+		}
 		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: err.Error()})
 		return
 	}
@@ -2804,6 +2822,9 @@ func (d *Daemon) writeWorkspaceFile(request protocol.WorkspaceWriteRequest) {
 	}
 
 	if err := os.WriteFile(target, data, 0o644); err != nil {
+		if temporaryDir != "" {
+			_ = os.RemoveAll(temporaryDir)
+		}
 		d.sendWorkspaceResult(protocol.WorkspaceResult{RequestID: request.RequestID, WorkspaceID: workspace.ID, WorkspacePath: workspace.Path, Path: relative, Error: err.Error()})
 		return
 	}

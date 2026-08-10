@@ -9,6 +9,9 @@
     "build": "tsc -b && vite build",
     "test:clipboard-images": "node scripts/test-clipboard-images.mjs",
     "test:event-model": "node scripts/test-agent-event-model.mjs",
+    "test:terminal-image-paste": "node scripts/test-terminal-image-paste.mjs",
+    "test:terminal-ime": "node scripts/test-terminal-ime-input.mjs",
+    "test:terminal-keyboard": "node scripts/test-terminal-keyboard-input.mjs",
     "test:workspace-state-cache": "node scripts/test-workspace-state-cache.mjs",
     "test:online-terminal": "node scripts/check-online-terminal.mjs",
     "build:electron:linux": "npm run build && npm run package:electron:linux",
@@ -103,13 +106,13 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "electron": "^42.3.0",
-    "electron-builder": "^26.8.1",
+    "electron-builder": "^26.15.3",
     "eslint": "^10.3.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
     "lucide-react": "^1.17.0",
-    "monaco-editor": "^0.55.1",
+    "monaco-editor": "^0.56.0",
     "react": "^19.2.6",
     "react-arborist": "^3.8.0",
     "react-dom": "^19.2.6",
@@ -120,6 +123,9 @@
     "tw-animate-css": "^1.4.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",
-    "vite": "^8.0.12"
+    "vite": "^8.2.1"
+  },
+  "overrides": {
+    "dompurify": "3.4.13"
   }
 }

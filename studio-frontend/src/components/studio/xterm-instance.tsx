@@ -6,6 +6,9 @@ import type { StudioTheme } from "./terminal-types";
 import { directWebsocketURL, getJSON, postJSON, websocketURL } from "@/lib/api";
 import { pocketElectronAPI } from "@/lib/electron-api";
 import { projectDirectMode } from "@/lib/direct-mode";
+import { createTerminalImeCompositionGuard } from "./terminal-ime-input";
+import { terminalImagePasteText } from "./terminal-image-paste";
+import { handleRemoteControlV } from "./terminal-keyboard-input";
 
 export function getXtermTheme(theme: StudioTheme) {
   // Keep terminal surfaces aligned with CSS theme tokens.
@@ -517,6 +520,7 @@ export function XtermInstance({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+    const imeCompositionGuard = createTerminalImeCompositionGuard();
 
     let term: XTerminal | null = null;
     let fitAddon: FitAddon | null = null;
@@ -526,6 +530,7 @@ export function XtermInstance({
     let cancelCopyPasteShortcut: (() => void) | null = null;
     let cancelPasteHandler: (() => void) | null = null;
     let cancelFocusHandler: (() => void) | null = null;
+    let cancelImeCompositionTracking: (() => void) | null = null;
     let osc52Disposable: { dispose: () => void } | null = null;
     let dataDisposable: { dispose: () => void } | null = null;
     const handleTerminalKeyDownCapture = (event: KeyboardEvent) => {
@@ -587,6 +592,14 @@ export function XtermInstance({
       container.addEventListener("keydown", handleTerminalKeyDownCapture, true);
 
       term.attachCustomKeyEventHandler((event) => {
+        // Let compositionend deliver the final Unicode text. Some CJK IMEs expose
+        // punctuation as a composing ASCII keydown (for example "." before "。").
+        if (imeCompositionGuard.shouldBypassXtermKeyEvent(event)) return false;
+        if (event.type === "keydown" && handleRemoteControlV(event, (data) => term?.input(data))) {
+          // Ctrl+V is a terminal control key. Prevent the host from also turning it
+          // into a clipboard paste; Ctrl+Shift+V owns system clipboard paste.
+          return false;
+        }
         if (
           event.type === "keydown" &&
           !event.altKey &&
@@ -624,13 +637,20 @@ export function XtermInstance({
       };
       /* Mount terminal into the container div */
       term.open(container);
+      const textarea = term.textarea;
+      if (textarea) {
+        textarea.addEventListener("compositionstart", imeCompositionGuard.start);
+        textarea.addEventListener("compositionend", imeCompositionGuard.end);
+        textarea.addEventListener("blur", imeCompositionGuard.end);
+        cancelImeCompositionTracking = () => {
+          textarea.removeEventListener("compositionstart", imeCompositionGuard.start);
+          textarea.removeEventListener("compositionend", imeCompositionGuard.end);
+          textarea.removeEventListener("blur", imeCompositionGuard.end);
+        };
+      }
 
-      const getPasteTextForFilename = (filename: string): string => {
-        const cmd = (currentCommandRef.current || "").toLowerCase();
-        if (cmd.includes("claude") || cmd.includes("agy") || cmd.includes("kilo")) {
-          return `/image ./${filename}`;
-        }
-        return `./${filename}`;
+      const getPasteTextForPath = (path: string): string => {
+        return terminalImagePasteText(currentCommandRef.current || "", path);
       };
 
       const pasteIntoTerminal = (text: string) => {
@@ -663,16 +683,19 @@ export function XtermInstance({
                   reader.onload = (e) => {
                     const dataUrl = e.target?.result as string;
                     if (dataUrl) {
-                      postJSON<{ error?: string }>("/api/project/file/write", {
+                      postJSON<{ path?: string; error?: string }>("/api/project/file/write", {
                         project_id: projectId,
                         path: filename,
                         content: dataUrl,
+                        temporary: true,
                       })
                         .then((result) => {
                           if (result.error) {
-                            alert(`Failed to save image to workspace: ${result.error}`);
+                            alert(`Failed to save image to temporary directory: ${result.error}`);
+                          } else if (!result.path) {
+                            alert("Failed to save image to temporary directory: missing path");
                           } else {
-                            term?.paste(getPasteTextForFilename(filename));
+                            term?.paste(getPasteTextForPath(result.path));
                           }
                         })
                         .catch((err) => {
@@ -770,21 +793,24 @@ export function XtermInstance({
                   if (dataUrl) {
                     const ext = file.type === "image/jpeg" ? "jpg" : "png";
                     const filename = `pasted_image_${Date.now()}.${ext}`;
-                    postJSON<{ error?: string }>("/api/project/file/write", {
+                    postJSON<{ path?: string; error?: string }>("/api/project/file/write", {
                       project_id: projectId,
                       path: filename,
                       content: dataUrl,
-                        })
-                          .then((result) => {
-                            if (result.error) {
-                              alert(`Failed to save image to workspace: ${result.error}`);
-                            } else {
-                              term?.paste(getPasteTextForFilename(filename));
-                            }
-                          })
-                          .catch((err) => {
-                            alert(`Failed to upload image: ${err instanceof Error ? err.message : String(err)}`);
-                          });
+                      temporary: true,
+                    })
+                      .then((result) => {
+                        if (result.error) {
+                          alert(`Failed to save image to temporary directory: ${result.error}`);
+                        } else if (!result.path) {
+                          alert("Failed to save image to temporary directory: missing path");
+                        } else {
+                          term?.paste(getPasteTextForPath(result.path));
+                        }
+                      })
+                      .catch((err) => {
+                        alert(`Failed to upload image: ${err instanceof Error ? err.message : String(err)}`);
+                      });
                   }
                 };
                 reader.readAsDataURL(file);
@@ -1033,6 +1059,7 @@ export function XtermInstance({
       if (cancelCopyPasteShortcut) cancelCopyPasteShortcut();
       if (cancelPasteHandler) cancelPasteHandler();
       if (cancelFocusHandler) cancelFocusHandler();
+      if (cancelImeCompositionTracking) cancelImeCompositionTracking();
       if (cancelInitialFit) cancelInitialFit();
       if (cancelFontFit) cancelFontFit();
       window.removeEventListener("resize", handleWinResize);

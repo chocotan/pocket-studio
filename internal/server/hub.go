@@ -1182,6 +1182,7 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 			ProjectID string `json:"project_id"`
 			Path      string `json:"path"`
 			Content   string `json:"content"`
+			Temporary bool   `json:"temporary,omitempty"`
 		}
 		if !decodeJSON(w, r, &req) {
 			return
@@ -1197,6 +1198,7 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 			WorkspacePath: project.WorkspacePath,
 			Path:          req.Path,
 			Content:       req.Content,
+			Temporary:     req.Temporary,
 		})
 		writeProjectFileReadEnvelope(w, req.Path, env, err)
 		return

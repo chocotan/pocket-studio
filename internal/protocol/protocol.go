@@ -295,6 +295,7 @@ type WorkspaceWriteRequest struct {
 	WorkspacePath string `json:"workspace_path"`
 	Path          string `json:"path"`
 	Content       string `json:"content"`
+	Temporary     bool   `json:"temporary,omitempty"`
 }
 
 type WorkspaceResult struct {

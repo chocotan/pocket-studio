@@ -51,6 +51,7 @@ func TestDirectEndpointIgnoresConfiguredContainerBridgeHost(t *testing.T) {
 func TestDirectTerminalSubscribersReceiveDataTitleAndExit(t *testing.T) {
 	cfg := DefaultConfig()
 	d := New(cfg)
+	registered := make(chan struct{}, 1)
 	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := directWebUpgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -58,6 +59,7 @@ func TestDirectTerminalSubscribersReceiveDataTitleAndExit(t *testing.T) {
 			return
 		}
 		d.addDirectTerminalSubscriber("project::term", &directTerminalSubscriber{conn: conn})
+		registered <- struct{}{}
 	})}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -72,6 +74,7 @@ func TestDirectTerminalSubscribersReceiveDataTitleAndExit(t *testing.T) {
 	}
 	defer ws.Close()
 	ws.SetReadDeadline(time.Now().Add(2 * time.Second))
+	<-registered
 
 	d.broadcastDirectTerminalData(protocol.TerminalStreamData{ProjectID: "project", TerminalID: "term", Data: []byte("hello")})
 	msgType, data, err := ws.ReadMessage()
@@ -338,6 +341,7 @@ func TestDirectAgentChatWebSocketAllowsProjectWithoutDirectModeFlag(t *testing.T
 func TestDirectTerminalSubscribersReceiveSameTerminalOutput(t *testing.T) {
 	cfg := DefaultConfig()
 	d := New(cfg)
+	registered := make(chan struct{}, 2)
 	server := http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := directWebUpgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -345,6 +349,7 @@ func TestDirectTerminalSubscribersReceiveSameTerminalOutput(t *testing.T) {
 			return
 		}
 		d.addDirectTerminalSubscriber("project::term", &directTerminalSubscriber{conn: conn})
+		registered <- struct{}{}
 	})}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -366,6 +371,8 @@ func TestDirectTerminalSubscribersReceiveSameTerminalOutput(t *testing.T) {
 	}
 	defer second.Close()
 	second.SetReadDeadline(time.Now().Add(2 * time.Second))
+	<-registered
+	<-registered
 
 	d.broadcastDirectTerminalData(protocol.TerminalStreamData{ProjectID: "project", TerminalID: "term", Data: []byte("shared")})
 	_, firstData, err := first.ReadMessage()
