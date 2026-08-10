@@ -48,6 +48,9 @@ interface StudioWorkspaceProps {
   onNotificationCenterOpenChange?: (open: boolean) => void;
   onSelectNotification?: (notification: TerminalNotification) => void;
   onMarkAllNotificationsRead?: () => void;
+  webNotificationsSupported?: boolean;
+  webNotificationsEnabled?: boolean;
+  onToggleWebNotifications?: () => void;
   onBackToDashboard: () => void;
   onProjectUpdated?: (project: Project) => void;
 }
@@ -79,6 +82,9 @@ export function StudioWorkspace({
   onNotificationCenterOpenChange = () => {},
   onSelectNotification = () => {},
   onMarkAllNotificationsRead = () => {},
+  webNotificationsSupported = false,
+  webNotificationsEnabled = false,
+  onToggleWebNotifications,
   onBackToDashboard,
   onProjectUpdated = () => {},
 }: StudioWorkspaceProps) {
@@ -567,6 +573,9 @@ export function StudioWorkspace({
               onOpenChange={onNotificationCenterOpenChange}
               onSelect={onSelectNotification}
               onMarkAllRead={onMarkAllNotificationsRead}
+              webNotificationsSupported={webNotificationsSupported}
+              webNotificationsEnabled={webNotificationsEnabled}
+              onToggleWebNotifications={onToggleWebNotifications}
             />
             <ZoomSelect value={pageZoom} onChange={onPageZoomChange} compact />
 

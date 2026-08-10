@@ -8,6 +8,14 @@ import { pocketElectronAPI } from "./lib/electron-api";
 import { loadZoom, saveZoom, type PageZoom } from "./lib/zoom";
 import { applyDirectModePreferences, saveDirectModePreference } from "./lib/direct-mode";
 import { isTerminalKind, terminalType, type TerminalKind } from "./components/studio/terminal-types";
+import {
+  ensureWebNotificationPermission,
+  isWebNotificationSupported,
+  loadWebNotificationPreference,
+  saveWebNotificationPreference,
+  showWebNotification,
+  webNotificationPermission,
+} from "./lib/web-notifications";
 import { createStudioWebTransport, type StudioWebTransport, type StudioEnvelope } from "./components/studio/web-transport";
 
 const FAVORITES_KEY = "pocket-studio-favorites";
@@ -28,7 +36,12 @@ export default function App() {
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
   const [notificationJumpTarget, setNotificationJumpTarget] = useState<NotificationJumpTarget | null>(null);
   const [clientConfigLoaded, setClientConfigLoaded] = useState(false);
+  const [webNotificationsEnabled, setWebNotificationsEnabled] = useState(() => loadWebNotificationPreference());
+  const webNotificationsSupported = useMemo(() => isWebNotificationSupported(), []);
   const notificationDedupRef = useRef<Map<string, number>>(new Map());
+  const webNotificationsEnabledRef = useRef(webNotificationsEnabled);
+  const viewRef = useRef(view);
+  const selectedProjectIdRef = useRef(selectedProjectId);
   const notificationTargetsRef = useRef<Map<string, NotificationHostTarget[]>>(new Map());
   const devicesRef = useRef<Device[]>([]);
   const projectsRef = useRef<Project[]>([]);
@@ -49,6 +62,24 @@ export default function App() {
     () => new Set(terminalNotifications.filter((item) => !item.read && (item.hostProjectId || item.projectId) === selectedProjectId).map((item) => item.tabId)),
     [selectedProjectId, terminalNotifications]
   );
+  // Workspace view only surfaces notifications that belong to the current project;
+  // the dashboard keeps the global list across all projects.
+  const workspaceNotifications = useMemo(
+    () => terminalNotifications.filter((item) => (item.hostProjectId || item.projectId) === selectedProjectId),
+    [selectedProjectId, terminalNotifications]
+  );
+
+  useEffect(() => {
+    webNotificationsEnabledRef.current = webNotificationsEnabled;
+  }, [webNotificationsEnabled]);
+
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+
+  useEffect(() => {
+    selectedProjectIdRef.current = selectedProjectId;
+  }, [selectedProjectId]);
 
   useEffect(() => {
     saveZoom(pageZoom);
@@ -221,23 +252,59 @@ export default function App() {
     for (const [key, value] of notificationDedupRef.current) {
       if (now - value > 10_000) notificationDedupRef.current.delete(key);
     }
-    setTerminalNotifications((current) => [
-      {
-        id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
-        projectId: event.projectId,
-        hostProjectId,
-        projectName: project?.name || event.projectId,
-        deviceName: displayDeviceName(device?.name || project?.device_id || ""),
-        panelId: event.panelId,
-        tabId: event.tabId,
-        terminalTitle: event.title || "Terminal",
-        message: (event.message || "").trim(),
-        reason: event.reason,
-        createdAt: now,
-        read: false,
-      },
-      ...current,
-    ].slice(0, MAX_TERMINAL_NOTIFICATIONS));
+    const notification: TerminalNotification = {
+      id: `${now}-${Math.random().toString(36).slice(2, 8)}`,
+      projectId: event.projectId,
+      hostProjectId,
+      projectName: project?.name || event.projectId,
+      deviceName: displayDeviceName(device?.name || project?.device_id || ""),
+      panelId: event.panelId,
+      tabId: event.tabId,
+      terminalTitle: event.title || "Terminal",
+      message: (event.message || "").trim(),
+      reason: event.reason,
+      createdAt: now,
+      read: false,
+    };
+    setTerminalNotifications((current) => [notification, ...current].slice(0, MAX_TERMINAL_NOTIFICATIONS));
+    maybeNotifyWeb(notification);
+  }
+
+  // Web-level notification: only fires when the window is not focused and the
+  // alert matches the current scope (current project in workspace view, any
+  // project on the dashboard). Uses refs because the websocket envelope handler
+  // is registered once and would otherwise capture stale state.
+  function maybeNotifyWeb(notification: TerminalNotification) {
+    if (!webNotificationsEnabledRef.current) return;
+    if (typeof document !== "undefined" && document.hasFocus()) return;
+    if (viewRef.current === "studio_workspace") {
+      const currentProjectId = selectedProjectIdRef.current;
+      const hostId = notification.hostProjectId || notification.projectId;
+      if (hostId !== currentProjectId && notification.projectId !== currentProjectId) return;
+    }
+    showWebNotification({
+      title: `Pocket Studio · ${notification.projectName}`,
+      body: `${notification.terminalTitle} · ${notification.message || webNotificationReasonText(notification.reason)}`,
+      tag: notification.id,
+      onClick: () => handleSelectNotification(notification),
+    });
+  }
+
+  async function handleToggleWebNotifications() {
+    if (webNotificationsEnabled) {
+      setWebNotificationsEnabled(false);
+      saveWebNotificationPreference(false);
+      return;
+    }
+    const granted = await ensureWebNotificationPermission();
+    if (!granted) {
+      if (webNotificationPermission() === "denied") {
+        alert("浏览器已拒绝本站的通知权限，请在浏览器设置中允许通知后再开启。");
+      }
+      return;
+    }
+    setWebNotificationsEnabled(true);
+    saveWebNotificationPreference(true);
   }
 
   function handleSelectNotification(notification: TerminalNotification) {
@@ -299,6 +366,15 @@ export default function App() {
     setTerminalNotifications((current) => current.map((item) => item.read ? item : { ...item, read: true, readAt: now }));
   }
 
+  function handleMarkWorkspaceNotificationsRead() {
+    const now = Date.now();
+    setTerminalNotifications((current) => current.map((item) => (
+      item.read || (item.hostProjectId || item.projectId) !== selectedProjectId
+        ? item
+        : { ...item, read: true, readAt: now }
+    )));
+  }
+
   function handleToggleFavorite(projectId: string) {
     setFavorites((current) => {
       const next = current.includes(projectId)
@@ -358,6 +434,9 @@ export default function App() {
           onNotificationCenterOpenChange={setNotificationCenterOpen}
           onSelectNotification={handleSelectNotification}
           onMarkAllNotificationsRead={handleMarkAllNotificationsRead}
+          webNotificationsSupported={webNotificationsSupported}
+          webNotificationsEnabled={webNotificationsEnabled}
+          onToggleWebNotifications={handleToggleWebNotifications}
           selectedDeviceId={selectedDeviceId}
           onSelectDevice={setSelectedDeviceId}
         />
@@ -381,11 +460,14 @@ export default function App() {
             onNotificationTargetsChange={handleNotificationTargetsChange}
             alertProjectIds={unreadProjectIds}
             alertTerminalIds={unreadTerminalIds}
-            notifications={terminalNotifications}
+            notifications={workspaceNotifications}
             notificationCenterOpen={notificationCenterOpen}
             onNotificationCenterOpenChange={setNotificationCenterOpen}
             onSelectNotification={handleSelectNotification}
-            onMarkAllNotificationsRead={handleMarkAllNotificationsRead}
+            onMarkAllNotificationsRead={handleMarkWorkspaceNotificationsRead}
+            webNotificationsSupported={webNotificationsSupported}
+            webNotificationsEnabled={webNotificationsEnabled}
+            onToggleWebNotifications={handleToggleWebNotifications}
             onProjectUpdated={handleProjectUpdated}
             onBackToDashboard={() => {
               refreshAll();
@@ -475,6 +557,13 @@ function displayDeviceName(value: string) {
   const withoutProtocol = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
   const host = withoutProtocol.split(/[/:?#]/, 1)[0] || withoutProtocol;
   return host.split(".")[0] || host || raw;
+}
+
+function webNotificationReasonText(reason?: string) {
+  if (reason === "agent_done") return "任务已完成";
+  if (reason === "notification") return "终端通知";
+  if (reason === "bell") return "终端响铃";
+  return "终端提醒";
 }
 
 function notificationTerminalTitle(title: unknown, agent: unknown) {

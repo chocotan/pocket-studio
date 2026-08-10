@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bell, Check, Inbox } from "lucide-react";
+import { Bell, BellOff, BellRing, Check, Inbox } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { TerminalNotification } from "./terminal-notifications";
 
@@ -9,6 +9,9 @@ interface NotificationCenterProps {
   onOpenChange: (open: boolean) => void;
   onSelect: (notification: TerminalNotification) => void;
   onMarkAllRead: () => void;
+  webNotificationsSupported?: boolean;
+  webNotificationsEnabled?: boolean;
+  onToggleWebNotifications?: () => void;
 }
 
 export function NotificationCenter({
@@ -17,6 +20,9 @@ export function NotificationCenter({
   onOpenChange,
   onSelect,
   onMarkAllRead,
+  webNotificationsSupported = false,
+  webNotificationsEnabled = false,
+  onToggleWebNotifications,
 }: NotificationCenterProps) {
   const unreadNotifications = notifications.filter((item) => !item.read);
   const unreadCount = unreadNotifications.length;
@@ -106,6 +112,25 @@ export function NotificationCenter({
           <div className="absolute right-0 top-8 z-50 w-[min(22rem,calc(100dvw-1rem))] overflow-hidden rounded-lg border border-border bg-card shadow-xl dark:border-border dark:bg-card">
             <div className="flex h-9 items-center justify-between border-b border-border/70 px-3 dark:border-border">
               <span className="text-xs font-bold text-foreground dark:text-foreground">消息</span>
+              <div className="flex items-center gap-1">
+                {webNotificationsSupported && onToggleWebNotifications && (
+                  <button
+                    type="button"
+                    onClick={onToggleWebNotifications}
+                    className={cn(
+                      "flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] font-semibold hover:bg-muted/50 dark:hover:bg-muted",
+                      webNotificationsEnabled
+                        ? "text-primary hover:text-primary/85"
+                        : "text-muted-foreground hover:text-foreground/85 dark:text-muted-foreground dark:hover:text-foreground"
+                    )}
+                    title={webNotificationsEnabled ? "网页通知已开启，点击关闭" : "开启网页通知（窗口失焦时推送系统通知）"}
+                    aria-label={webNotificationsEnabled ? "关闭网页通知" : "开启网页通知"}
+                    aria-pressed={webNotificationsEnabled}
+                  >
+                    {webNotificationsEnabled ? <BellRing className="h-3 w-3" /> : <BellOff className="h-3 w-3" />}
+                    网页通知
+                  </button>
+                )}
               <button
                 type="button"
                 onClick={onMarkAllRead}
@@ -115,6 +140,7 @@ export function NotificationCenter({
                 <Check className="h-3 w-3" />
                 全部已读
               </button>
+              </div>
             </div>
 
             {notifications.length === 0 ? (

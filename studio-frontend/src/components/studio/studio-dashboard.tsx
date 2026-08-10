@@ -66,6 +66,9 @@ interface StudioDashboardProps {
   onNotificationCenterOpenChange?: (open: boolean) => void;
   onSelectNotification?: (notification: TerminalNotification) => void;
   onMarkAllNotificationsRead?: () => void;
+  webNotificationsSupported?: boolean;
+  webNotificationsEnabled?: boolean;
+  onToggleWebNotifications?: () => void;
   onDeleteProject?: (projectId: string) => void;
   selectedDeviceId?: string;
   onSelectDevice?: (deviceId: string) => void;
@@ -89,6 +92,9 @@ export function StudioDashboard({
   onNotificationCenterOpenChange = () => {},
   onSelectNotification = () => {},
   onMarkAllNotificationsRead = () => {},
+  webNotificationsSupported = false,
+  webNotificationsEnabled = false,
+  onToggleWebNotifications,
   onDeleteProject,
   selectedDeviceId: propSelectedDeviceId,
   onSelectDevice,
@@ -312,6 +318,9 @@ export function StudioDashboard({
             onOpenChange={onNotificationCenterOpenChange}
             onSelect={onSelectNotification}
             onMarkAllRead={onMarkAllNotificationsRead}
+            webNotificationsSupported={webNotificationsSupported}
+            webNotificationsEnabled={webNotificationsEnabled}
+            onToggleWebNotifications={onToggleWebNotifications}
           />
           <ProjectSwitcher
             projects={projects}
