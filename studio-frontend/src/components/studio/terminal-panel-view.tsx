@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal, Minus, Minimize2, Maximize2, FilePlus2, FolderPlus, LoaderCircle } from "lucide-react";
 import { ClaudeCode, Codex, Cursor, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
 import {
@@ -854,6 +854,7 @@ export function TerminalTypeMenu({
 }) {
   const [submenu, setSubmenu] = useState<"terminal" | "acp" | "acp-sessions" | "custom-agents" | null>(null);
   const [useTmux, setUseTmux] = useState(true);
+  const [selectedProjId, setSelectedProjId] = useState(projectId);
   const [customAgents, setCustomAgents] = useState<CustomAgent[]>([]);
   const [customAgentsState, setCustomAgentsState] = useState<"idle" | "loading" | "error">("idle");
   const [customAgentsError, setCustomAgentsError] = useState<string>("");
@@ -863,8 +864,29 @@ export function TerminalTypeMenu({
   const [sessionsError, setSessionsError] = useState("");
   const sessionListSocketsRef = useRef<Set<WebSocket>>(new Set());
 
-  const selectedProject = projects.find((p) => p.id === projectId);
+  useEffect(() => setSelectedProjId(projectId), [projectId]);
+  const selectedProject = projects.find((p) => p.id === selectedProjId) || projects.find((p) => p.id === projectId);
   const selectedDevice = devices.find((d) => d.id === selectedProject?.device_id);
+
+  const groupedProjects = useMemo(() => {
+    const groups: Array<{ deviceName: string; list: Project[] }> = [];
+    const deviceMap = new Map<string, Project[]>();
+    for (const p of projects) {
+      const devId = p.device_id || "unknown";
+      let list = deviceMap.get(devId);
+      if (!list) {
+        list = [];
+        deviceMap.set(devId, list);
+      }
+      list.push(p);
+    }
+    deviceMap.forEach((list, devId) => {
+      const dev = devices.find((d) => d.id === devId);
+      const deviceName = deviceDisplayName(dev, devId);
+      groups.push({ deviceName, list });
+    });
+    return groups;
+  }, [projects, devices]);
 
   const terminalMenuItems = availableTerminalTypes(selectedDevice)
     .map((item) => ({
@@ -988,6 +1010,26 @@ export function TerminalTypeMenu({
       style={style}
       onClick={(event) => event.stopPropagation()}
     >
+      {projects.length > 1 && (
+        <div className="flex items-center justify-between gap-1 border-b border-slate-100 bg-slate-50 px-2.5 py-1.5 text-[10px] text-slate-500">
+          <span className="shrink-0 font-semibold">运行项目:</span>
+          <select
+            value={selectedProjId}
+            onChange={(e) => setSelectedProjId(e.target.value)}
+            className="w-[110px] cursor-pointer truncate rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px] text-slate-700 outline-none hover:border-indigo-300"
+          >
+            {groupedProjects.map((group) => (
+              <optgroup key={group.deviceName} label={group.deviceName}>
+                {group.list.map((p: Project) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+        </div>
+      )}
       {!submenu ? (
         <>
           {dirPath && onNewFile && onNewFolder && (
@@ -1025,7 +1067,7 @@ export function TerminalTypeMenu({
           <div className="border-t border-slate-100 my-1" />
           <button
             type="button"
-            onClick={() => onFileExplorer(projectId)}
+            onClick={() => onFileExplorer(selectedProjId)}
             className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
           >
             <span className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-100 text-sky-750">
@@ -1057,7 +1099,7 @@ export function TerminalTypeMenu({
               label={item.menuLabel}
               icon={item.logo}
               tone={item.accent}
-              onClick={() => onSelect(item.value, projectId, useTmux)}
+              onClick={() => onSelect(item.value, selectedProjId, useTmux)}
             />
           ))}
         </>
@@ -1079,7 +1121,7 @@ export function TerminalTypeMenu({
               label={item.label}
               icon={item.icon}
               tone={item.tone}
-              onClick={() => onAddAgentChat(item.agent, "direct_acp", projectId)}
+              onClick={() => onAddAgentChat(item.agent, "direct_acp", selectedProjId)}
             />
           ))}
         </>
@@ -1119,7 +1161,7 @@ export function TerminalTypeMenu({
                 key={agent.id}
                 type="button"
                 data-testid={`menu-custom-agent-${agent.id}`}
-                onClick={() => onAddCustomAgentTab?.(agent, projectId, useTmux)}
+                onClick={() => onAddCustomAgentTab?.(agent, selectedProjId, useTmux)}
                 className="flex w-full flex-col gap-0.5 px-3 py-2 text-left hover:bg-slate-50 cursor-pointer"
               >
                 <span className="flex w-full items-center gap-1.5">
@@ -1152,7 +1194,7 @@ export function TerminalTypeMenu({
               key={session.session_id}
               type="button"
               title={session.session_id}
-              onClick={() => onAddAgentChat(session.agent, "direct_acp", projectId, session.session_id, session.title || undefined)}
+              onClick={() => onAddAgentChat(session.agent, "direct_acp", selectedProjId, session.session_id, session.title || undefined)}
               className="flex w-full flex-col gap-0.5 px-3 py-2 text-left hover:bg-slate-50"
             >
               <span className="w-full truncate text-xs font-medium text-slate-700">{session.title || session.session_id}</span>

@@ -134,6 +134,11 @@ export function StudioWorkspace({
   });
   const [projectListOpen, setProjectListOpen] = useState(false);
   const [compactSidebarOpen, setCompactSidebarOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    if (typeof window === "undefined") return 240;
+    const saved = Number(window.localStorage.getItem("pocket-studio-sidebar-width"));
+    return Number.isFinite(saved) && saved >= 180 && saved <= 560 ? saved : 240;
+  });
   const panelScale = pageZoom / 100;
 
   const {
@@ -756,7 +761,10 @@ export function StudioWorkspace({
                     onClick={() => setCompactSidebarOpen(false)}
                   />
                 )}
-                <aside className={`${compactSidebarOpen ? "flex" : "hidden"} absolute inset-y-0 left-0 z-40 w-[min(82vw,280px)] shrink-0 flex-col border-r border-border bg-card shadow-xl md:relative md:z-auto md:flex md:w-[240px] md:shadow-none`}>
+                <aside
+                  className={`${compactSidebarOpen ? "flex" : "hidden"} absolute inset-y-0 left-0 z-40 shrink-0 flex-col border-r border-border bg-card shadow-xl md:relative md:z-auto md:flex md:shadow-none`}
+                  style={{ width: `min(82vw, ${sidebarWidth}px)` }}
+                >
                   <div className="min-h-0 flex-1 overflow-y-auto py-1">
                     {sidebarProjectGroups.map(({ machineName, project: tabProject, windows }) => (
                       <section key={`${tabProject.device_id}:${tabProject.id}`} className="pb-2">
@@ -819,6 +827,34 @@ export function StudioWorkspace({
                         })}
                       </section>
                     ))}
+                  </div>
+                  {/* Drag handle: resize sidebar (desktop) */}
+                  <div
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="调整侧边栏宽度"
+                    title="拖动调整宽度"
+                    className="absolute right-0 top-0 hidden h-full w-1.5 cursor-col-resize items-center justify-center bg-transparent transition-colors hover:bg-indigo-500/30 md:flex"
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      const startX = event.clientX;
+                      const startWidth = sidebarWidth;
+                      let latestWidth = startWidth;
+                      document.body.style.userSelect = "none";
+                      const onMove = (moveEvent: PointerEvent) => {
+                        latestWidth = Math.min(560, Math.max(180, startWidth + (moveEvent.clientX - startX)));
+                        setSidebarWidth(latestWidth);
+                      };
+                      const onUp = () => {
+                        document.body.style.userSelect = "";
+                        window.removeEventListener("pointermove", onMove);
+                        window.localStorage.setItem("pocket-studio-sidebar-width", String(latestWidth));
+                      };
+                      window.addEventListener("pointermove", onMove);
+                      window.addEventListener("pointerup", onUp, { once: true });
+                    }}
+                  >
+                    <span className="h-8 w-0.5 rounded-full bg-border/70" />
                   </div>
                 </aside>
                 <div className="relative min-w-0 flex-1 overflow-hidden">
