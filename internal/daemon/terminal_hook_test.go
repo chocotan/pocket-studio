@@ -570,7 +570,7 @@ func TestTmuxProcessEnvKeepsCaseMarkerWithoutDaemonOwner(t *testing.T) {
 func TestPocketStudioTmuxConfigDoesNotRewriteHomeEnd(t *testing.T) {
 	config := pocketStudioTmuxConfig("/bin/zsh")
 	for _, want := range []string{
-		`set-option -g default-terminal "tmux-256color"`,
+		`set-option -g default-terminal "xterm-256color"`,
 		"set-option -g xterm-keys on",
 		"set-option -g window-size latest",
 		"unbind-key -n Home",

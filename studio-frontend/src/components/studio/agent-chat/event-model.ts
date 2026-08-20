@@ -162,6 +162,42 @@ export function configOptionsFromTaskEvents(events: TaskEvent[]) {
   return extractAgentConfigOptionsFromEvents(events.map(toAgentEvent));
 }
 
+export type SlashCommand = {
+  name: string;
+  description: string;
+  hint?: string;
+};
+
+// available_commands_update arrives via the daemon's commands.updated event;
+// the raw JSON-RPC session update lives under raw.params.update.availableCommands.
+export function slashCommandsFromTaskEvents(events: TaskEvent[]): SlashCommand[] {
+  const merged = new Map<string, SlashCommand>();
+  for (const evt of events) {
+    if (evt.event_type !== "commands.updated") continue;
+    for (const source of [getMetadata(evt.raw), getMetadata(evt.data)]) {
+      const update = (source as { params?: { update?: Record<string, unknown> } } | undefined)?.params?.update;
+      const commands = Array.isArray(update?.availableCommands)
+        ? update.availableCommands
+        : Array.isArray(source?.availableCommands)
+          ? source.availableCommands
+          : [];
+      for (const entry of commands) {
+        if (!entry || typeof entry !== "object") continue;
+        const record = entry as Record<string, unknown>;
+        const name = typeof record.name === "string" ? record.name.trim() : "";
+        if (!name) continue;
+        const description = typeof record.description === "string" ? record.description.trim() : "";
+        const inputHint = (record.input && typeof record.input === "object"
+          ? (record.input as Record<string, unknown>).hint
+          : undefined) as unknown;
+        const hint = typeof inputHint === "string" && inputHint.trim() ? inputHint.trim() : undefined;
+        merged.set(name, { name, description, ...(hint ? { hint } : {}) });
+      }
+    }
+  }
+  return Array.from(merged.values()).sort((left, right) => left.name.localeCompare(right.name));
+}
+
 export function eventDisplayRank(eventType: string) {
   switch (eventType) {
     case "user.prompt":

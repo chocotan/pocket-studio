@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useMemo } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, FileText, FolderTree, Image as ImageIcon, Plus, X, Cpu, Terminal, Minus, Minimize2, Maximize2, FilePlus2, FolderPlus, LoaderCircle } from "lucide-react";
 import { ClaudeCode, Codex, Cursor, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
 import {
@@ -13,7 +13,9 @@ import { SplitBottomIcon, SplitLeftIcon, SplitRightIcon, SplitTopIcon } from "./
 import type { TerminalPanel, StudioTab } from "./studio-layout";
 import { AgentChatTab } from "./agent-chat/agent-chat-tab";
 import type { Project } from "./studio-dashboard";
-import type { Device } from "@/lib/types";
+import type { CustomAgent, Device } from "@/lib/types";
+import { fetchCustomAgents, customAgentBaseLabel } from "@/lib/skill-api";
+import { Bot } from "lucide-react";
 import { deviceDisplayName } from "./project-switcher";
 import { agentChatWebSocketURL } from "./agent-chat/direct-websocket";
 import {
@@ -23,7 +25,6 @@ import {
   terminalKindFromAgentKind,
   agentNameForRuntime,
   makeId,
-  agentAvailable,
   agentCapabilityAvailable,
   availableTerminalTypes,
   type SplitDirection,
@@ -47,9 +48,10 @@ interface TerminalPanelViewProps {
   onFocus: (id: string) => void;
   onAddMenu: (id: string) => void;
   onSplitSelect: (id: string, dir: SplitDirection, kind: TerminalKind) => void;
-  onAddTab: (id: string, kind: TerminalKind, tabProjectId?: string, filePath?: string) => void;
+  onAddTab: (id: string, kind: TerminalKind, tabProjectId?: string, filePath?: string, useTmux?: boolean) => void;
   onAddFileExplorer: (id: string, tabProjectId?: string, filePath?: string) => void;
   onAddAgentChat: (panelId: string, agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string, filePath?: string, resumeSessionId?: string, title?: string) => void;
+  onAddCustomAgentTab?: (panelId: string, agent: { id: string; name: string; base_agent: string }, tabProjectId?: string, useTmux?: boolean) => void;
   onUpdateTabProperties: (tabId: string, props: Partial<StudioTab>) => void;
   onOpenFile: (panelId: string, path: string, tabProjectId?: string) => void;
   onActiveTab: (panelId: string, tabId: string) => void;
@@ -96,6 +98,7 @@ function TerminalPanelViewComponent({
   onAddTab,
   onAddFileExplorer,
   onAddAgentChat,
+  onAddCustomAgentTab,
   onUpdateTabProperties,
   onOpenFile,
   onActiveTab,
@@ -160,6 +163,7 @@ function TerminalPanelViewComponent({
     lime: "bg-lime-100 text-lime-700 ring-1 ring-lime-200/70 dark:bg-lime-400/16 dark:text-lime-200 dark:ring-lime-300/20",
     sky: "bg-sky-100 text-sky-700 ring-1 ring-sky-200/70 dark:bg-sky-400/16 dark:text-sky-200 dark:ring-sky-300/20",
     slate: "bg-slate-100 text-slate-600 ring-1 ring-slate-200/70 dark:bg-slate-400/16 dark:text-slate-200 dark:ring-slate-300/20",
+    blue: "bg-blue-100 text-blue-600 ring-1 ring-blue-200/70 dark:bg-blue-400/16 dark:text-blue-200 dark:ring-blue-300/20",
   };
   const panelAlert = panel.tabs.some((tab) => tabHasAlert(tab, alertTerminalIds));
   const activeProject = projects.find((p) => p.id === projectId) || project;
@@ -207,6 +211,7 @@ function TerminalPanelViewComponent({
     if (tab.kind === "file_explorer") return "文件";
     if (tab.kind === "file_viewer") return tab.title;
     if (tab.kind === "agent_chat") return tab.title;
+    if (tab.kind === "terminal" && tab.customAgentName) return tab.customAgentName;
     const liveTitle = terminalTitles[tab.id];
     return cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType);
   }
@@ -215,6 +220,7 @@ function TerminalPanelViewComponent({
     if (tab.kind === "file_explorer") return "文件";
     if (tab.kind === "file_viewer") return tab.title;
     if (tab.kind === "agent_chat") return tab.title;
+    if (tab.kind === "terminal" && tab.customAgentName) return `${tab.customAgentName} · 自定义智能体`;
     const liveTitle = terminalTitles[tab.id];
     const rawTitle = (liveTitle?.fullTitle || liveTitle?.title || tab.title || "").trim();
     return rawTitle || terminalType(tab.termType).title;
@@ -428,18 +434,33 @@ function TerminalPanelViewComponent({
                         }`}
                       >
                         <span className={`relative z-10 flex h-4 w-4 shrink-0 items-center justify-center rounded-md ${
-                          isFileExplorer
+                          tab.kind === "terminal" && tab.customAgentName
+                            ? active
+                              ? "bg-violet-100 text-violet-700 ring-1 ring-violet-200/70 dark:bg-violet-400/16 dark:text-violet-200 dark:ring-violet-300/20"
+                              : "bg-violet-50 text-violet-500 dark:bg-violet-400/10 dark:text-violet-300/70"
+                            : isFileExplorer
                             ? active ? "bg-sky-100 text-sky-700 ring-1 ring-sky-200/70 dark:bg-sky-400/16 dark:text-sky-200 dark:ring-sky-300/20" : "text-slate-400 dark:text-slate-600"
                             : isFileViewer
                               ? active ? "bg-emerald-100 text-emerald-700 ring-1 ring-emerald-200/70 dark:bg-emerald-400/16 dark:text-emerald-200 dark:ring-emerald-300/20" : "text-slate-400 dark:text-slate-600"
                               : active ? accentClasses[displayType.accent] : "text-slate-400 dark:text-slate-600"
                         }`}>
-                          {isFileExplorer
+                          {tab.kind === "terminal" && tab.customAgentName
+                            ? <Bot className="h-3.5 w-3.5" />
+                            : isFileExplorer
                             ? <FolderTree className="h-3.5 w-3.5" />
                             : isFileViewer
                               ? tab.fileKind === "image" ? <ImageIcon className="h-3.5 w-3.5" /> : <FileText className="h-3.5 w-3.5" />
                               : displayType.logo}
                         </span>
+                        {tab.kind === "terminal" && tab.customAgentName && (
+                          <span
+                            className="relative z-10 flex shrink-0 items-center gap-0.5 rounded border border-violet-100/60 bg-violet-50/80 px-1 py-0.5 text-[9px] font-bold text-violet-700 dark:border-violet-900/50 dark:bg-violet-950/40 dark:text-violet-300"
+                            title={`自定义智能体 · ${displayType.title}`}
+                          >
+                            <Bot className="h-2.5 w-2.5" />
+                            <span>智能体</span>
+                          </span>
+                        )}
                         {isCrossProject && tabProject && (() => {
                           const tabDevice = devices.find((d) => d.id === tabProject.device_id);
                           const devName = deviceDisplayName(tabDevice, tabProject.device_id);
@@ -487,6 +508,11 @@ function TerminalPanelViewComponent({
                   <TooltipContent side="bottom" className="max-w-[420px] whitespace-normal break-words text-[10px] font-medium leading-relaxed">
                     <div className="flex flex-col gap-0.5">
                       <div>{fullTitle}</div>
+                      {tab.kind === "terminal" && tab.customAgentName && (
+                        <div className="text-[9px] font-semibold text-violet-500 dark:text-violet-300">
+                          🤖 自定义智能体: {tab.customAgentName} · {displayType.title}
+                        </div>
+                      )}
                       {tabProject && (() => {
                         const tabDevice = devices.find((d) => d.id === tabProject.device_id);
                         const devName = deviceDisplayName(tabDevice, tabProject.device_id);
@@ -550,9 +576,10 @@ function TerminalPanelViewComponent({
             projects={projects}
             devices={devices}
             projectId={projectId}
-            onSelect={(kind, tabProjectId) => onAddTab(panel.id, kind, tabProjectId)}
+            onSelect={(kind, tabProjectId, useTmux) => onAddTab(panel.id, kind, tabProjectId, undefined, useTmux)}
             onFileExplorer={(tabProjectId) => onAddFileExplorer(panel.id, tabProjectId)}
             onAddAgentChat={(agentKind, agentRuntime, tabProjectId, resumeSessionId, title) => onAddAgentChat(panel.id, agentKind, agentRuntime, tabProjectId, undefined, resumeSessionId, title)}
+            onAddCustomAgentTab={onAddCustomAgentTab ? (agent, tabProjectId, useTmux) => onAddCustomAgentTab(panel.id, agent, tabProjectId, useTmux) : undefined}
             occupiedAgentSessionIds={occupiedAgentSessionIds}
           />
         )}
@@ -655,40 +682,41 @@ function TerminalPanelViewComponent({
 
       <div className="studio-terminal-surface relative min-h-0 flex-1 bg-card text-card-foreground border-t border-border">
         {panel.tabs.length === 0 ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-slate-400 bg-slate-50/50 dark:bg-slate-900/10">
-            <div className="h-10 w-10 rounded-full bg-slate-100/80 border border-slate-200/50 flex items-center justify-center mb-3 dark:bg-slate-800 dark:border-slate-700">
-              <Plus className="h-5 w-5 text-slate-400 dark:text-slate-500" />
+          <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-slate-400 bg-slate-50/50 dark:bg-slate-900/10 overflow-y-auto">
+            <div className="h-10 w-10 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center mb-2.5 text-primary">
+              <Plus className="h-5 w-5" />
             </div>
-            <h3 className="text-xs font-bold text-slate-700 dark:text-slate-350">此面板为空</h3>
-            <p className="text-[10px] text-slate-400 mt-1 max-w-[220px] leading-relaxed dark:text-slate-500">
-              您可以点击上方标签栏的 “+” 按钮，或者使用下方快捷方式创建终端或资源管理器。
+            <h3 className="text-xs font-bold text-slate-700 dark:text-slate-200">此面板为空</h3>
+            <p className="text-[10px] text-slate-400 mt-0.5 max-w-[240px] leading-relaxed dark:text-slate-400">
+              点击上方 “+” 按钮，或快速选择下方 Agent 开始会话：
             </p>
-            <div className="mt-4 flex flex-col gap-1.5 w-full max-w-[180px]">
+            <div className="mt-3.5 flex flex-wrap gap-1.5 justify-center max-w-sm">
+              {directACPMenuItems(activeDevice).map((item) => (
+                <button
+                  key={item.agent}
+                  type="button"
+                  onClick={() => onAddAgentChat(panel.id, item.agent, "direct_acp")}
+                  className="h-7 px-2.5 text-[10px] font-semibold bg-white border border-slate-200 text-slate-700 rounded-lg hover:border-primary/40 hover:bg-primary/5 hover:text-primary transition-all flex items-center gap-1.5 cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200"
+                >
+                  <span className="flex size-3.5 items-center justify-center">{item.icon}</span>
+                  <span>{item.label}</span>
+                </button>
+              ))}
               <button
                 type="button"
                 onClick={() => onAddTab(panel.id, "bash")}
-                className="w-full h-8 px-3 text-[10px] font-bold bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-indigo-600 transition-all flex items-center gap-2 justify-center cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-indigo-400"
+                className="h-7 px-2.5 text-[10px] font-semibold bg-white border border-slate-200 text-slate-700 rounded-lg hover:border-primary/40 hover:bg-primary/5 hover:text-primary transition-all flex items-center gap-1.5 cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200"
               >
                 <Terminal className="h-3.5 w-3.5 text-slate-500 shrink-0 dark:text-slate-400" />
-                打开 Bash 终端
+                <span>Bash 终端</span>
               </button>
-              {agentAvailable(activeDevice, "claude") && (
-                <button
-                  type="button"
-                  onClick={() => onAddTab(panel.id, "claude")}
-                  className="w-full h-8 px-3 text-[10px] font-bold bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-indigo-600 transition-all flex items-center gap-2 justify-center cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-indigo-400"
-                >
-                  <Cpu className="h-3 w-3 text-indigo-500 shrink-0" />
-                  打开 Claude Code
-                </button>
-              )}
               <button
                 type="button"
                 onClick={() => onAddFileExplorer(panel.id)}
-                className="w-full h-8 px-3 text-[10px] font-bold bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 hover:text-indigo-600 transition-all flex items-center gap-2 justify-center cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-700 dark:hover:text-indigo-400"
+                className="h-7 px-2.5 text-[10px] font-semibold bg-white border border-slate-200 text-slate-700 rounded-lg hover:border-primary/40 hover:bg-primary/5 hover:text-primary transition-all flex items-center gap-1.5 cursor-pointer shadow-sm dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200"
               >
-                <FolderTree className="h-3 w-3 text-sky-500 shrink-0" />
-                打开文件管理器
+                <FolderTree className="h-3.5 w-3.5 text-sky-500 shrink-0" />
+                <span>文件管理器</span>
               </button>
             </div>
           </div>
@@ -771,6 +799,8 @@ function TerminalPanelViewComponent({
                     onTitleChange={(title, command, fullTitle) => onTitleChange(tab.id, title, command, fullTitle)}
                     onActiveFocus={() => onTerminalFocus(panel.id, tab.id)}
                     filePath={tab.filePath}
+                    useTmux={tab.useTmux}
+                    customAgentId={tab.customAgentId}
                   />
                 )}
               </div>
@@ -802,6 +832,7 @@ export function TerminalTypeMenu({
   onSelect,
   onFileExplorer,
   onAddAgentChat,
+  onAddCustomAgentTab,
   occupiedAgentSessionIds = new Set<string>(),
   dirPath,
   onNewFile,
@@ -812,44 +843,27 @@ export function TerminalTypeMenu({
   projects: Project[];
   devices: Device[];
   projectId: string;
-  onSelect: (kind: TerminalKind, tabProjectId?: string) => void;
+  onSelect: (kind: TerminalKind, tabProjectId?: string, useTmux?: boolean) => void;
   onFileExplorer: (tabProjectId?: string) => void;
   onAddAgentChat: (agentKind: string, agentRuntime?: StudioTab["agentRuntime"], tabProjectId?: string, resumeSessionId?: string, title?: string) => void;
+  onAddCustomAgentTab?: (agent: { id: string; name: string; base_agent: string }, tabProjectId?: string, useTmux?: boolean) => void;
   occupiedAgentSessionIds?: Set<string>;
   dirPath?: string;
   onNewFile?: (dirPath: string) => void;
   onNewFolder?: (dirPath: string) => void;
 }) {
-  const [submenu, setSubmenu] = useState<"terminal" | "acp" | "acp-sessions" | null>(null);
+  const [submenu, setSubmenu] = useState<"terminal" | "acp" | "acp-sessions" | "custom-agents" | null>(null);
+  const [useTmux, setUseTmux] = useState(true);
+  const [customAgents, setCustomAgents] = useState<CustomAgent[]>([]);
+  const [customAgentsState, setCustomAgentsState] = useState<"idle" | "loading" | "error">("idle");
+  const [customAgentsError, setCustomAgentsError] = useState<string>("");
   const [providerSessions, setProviderSessions] = useState<Array<{ session_id: string; agent: string; cwd?: string; title?: string; updated_at?: string }>>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsSupported, setSessionsSupported] = useState<boolean | null>(null);
   const [sessionsError, setSessionsError] = useState("");
   const sessionListSocketsRef = useRef<Set<WebSocket>>(new Set());
 
-  const groupedProjects = useMemo(() => {
-    const groups: Array<{ deviceName: string; list: Project[] }> = [];
-    const deviceMap = new Map<string, Project[]>();
-    for (const p of projects) {
-      const devId = p.device_id || "unknown";
-      let list = deviceMap.get(devId);
-      if (!list) {
-        list = [];
-        deviceMap.set(devId, list);
-      }
-      list.push(p);
-    }
-    deviceMap.forEach((list, devId) => {
-      const dev = devices.find((d) => d.id === devId);
-      const deviceName = deviceDisplayName(dev, devId);
-      groups.push({ deviceName, list });
-    });
-    return groups;
-  }, [projects, devices]);
-
-  const [selectedProjId, setSelectedProjId] = useState(projectId);
-  useEffect(() => setSelectedProjId(projectId), [projectId]);
-  const selectedProject = projects.find((p) => p.id === selectedProjId) || projects.find((p) => p.id === projectId);
+  const selectedProject = projects.find((p) => p.id === projectId);
   const selectedDevice = devices.find((d) => d.id === selectedProject?.device_id);
 
   const terminalMenuItems = availableTerminalTypes(selectedDevice)
@@ -865,6 +879,29 @@ export function TerminalTypeMenu({
     sessionListSocketsRef.current.forEach((socket) => socket.close());
     sessionListSocketsRef.current.clear();
   }, []);
+
+  const loadCustomAgents = (deviceId: string) => {
+    if (!deviceId || !onAddCustomAgentTab) return;
+    setCustomAgentsState("loading");
+    setCustomAgentsError("");
+    fetchCustomAgents(deviceId)
+      .then((result) => {
+        setCustomAgents(Array.isArray(result?.agents) ? result.agents : []);
+        setCustomAgentsState("idle");
+      })
+      .catch((error) => {
+        setCustomAgents([]);
+        setCustomAgentsState("error");
+        setCustomAgentsError(error instanceof Error ? error.message : String(error));
+      });
+  };
+
+  useEffect(() => {
+    if (submenu === "custom-agents") {
+      loadCustomAgents(selectedDevice?.id || "");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submenu]);
 
   const fetchProviderSessions = (agent: string, targetProject: Project) => new Promise<{
     agent: string;
@@ -925,7 +962,7 @@ export function TerminalTypeMenu({
   });
 
   const listAllProviderSessions = async () => {
-    const targetProject = projects.find((project) => project.id === selectedProjId) || selectedProject;
+    const targetProject = selectedProject;
     if (!targetProject) return;
     setSubmenu("acp-sessions");
     setProviderSessions([]);
@@ -947,31 +984,10 @@ export function TerminalTypeMenu({
   return (
     <div
       data-testid="panel-add-menu"
-      className={`absolute top-6 z-50 ${submenu === "acp-sessions" ? "w-72" : "w-48"} overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
+      className={`absolute top-6 z-50 ${submenu === "acp-sessions" || submenu === "custom-agents" ? "w-72" : "w-48"} overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg ${align === "right" ? "right-0" : "left-0"}`}
       style={style}
       onClick={(event) => event.stopPropagation()}
     >
-      {projects.length > 1 && (
-        <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-100 flex items-center justify-between gap-1 text-[10px] text-slate-500">
-          <span className="font-semibold shrink-0">运行项目:</span>
-          <select
-            value={selectedProjId}
-            onChange={(e) => setSelectedProjId(e.target.value)}
-            className="w-[110px] truncate bg-white border border-slate-200 rounded px-1 py-0.5 text-[10px] text-slate-700 outline-none cursor-pointer hover:border-indigo-300"
-          >
-            {groupedProjects.map((group) => (
-              <optgroup key={group.deviceName} label={group.deviceName}>
-                {group.list.map((p: Project) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-        </div>
-      )}
-
       {!submenu ? (
         <>
           {dirPath && onNewFile && onNewFolder && (
@@ -981,32 +997,35 @@ export function TerminalTypeMenu({
                 onClick={() => onNewFile(dirPath)}
                 className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
               >
-                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-indigo-50 text-indigo-650 dark:bg-indigo-900/40 dark:text-indigo-400">
+                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-indigo-50 text-indigo-600">
                   <FilePlus2 className="h-3.5 w-3.5" />
                 </span>
-                <span>新建文件</span>
+                <span className="truncate">新建文件...</span>
               </button>
               <button
                 type="button"
                 onClick={() => onNewFolder(dirPath)}
                 className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
               >
-                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-amber-50 text-amber-600 dark:bg-amber-900/40 dark:text-amber-400">
+                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-indigo-50 text-indigo-600">
                   <FolderPlus className="h-3.5 w-3.5" />
                 </span>
-                <span>新建目录</span>
+                <span className="truncate">新建文件夹...</span>
               </button>
-              <div className="border-t border-slate-100 dark:border-slate-800 my-1" />
+              <div className="border-t border-slate-100 my-1" />
             </>
           )}
           <MenuBranch label="终端类型" icon={<Terminal className="h-3.5 w-3.5" />} tone="slate" onClick={() => setSubmenu("terminal")} />
+          {onAddCustomAgentTab && selectedDevice && (
+            <MenuBranch testId="menu-custom-agents" label="自定义智能体" icon={<Bot className="h-3.5 w-3.5" />} tone="violet" onClick={() => setSubmenu("custom-agents")} />
+          )}
           {directACPItems.length > 0 && (
             <MenuBranch testId="menu-runtime-direct_acp" label="ACP会话" icon={<Cpu className="h-3.5 w-3.5" />} tone="emerald" onClick={() => setSubmenu("acp")} />
           )}
           <div className="border-t border-slate-100 my-1" />
           <button
             type="button"
-            onClick={() => onFileExplorer(selectedProjId)}
+            onClick={() => onFileExplorer(projectId)}
             className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
           >
             <span className="flex h-5 w-5 items-center justify-center rounded-md bg-sky-100 text-sky-750">
@@ -1018,13 +1037,27 @@ export function TerminalTypeMenu({
       ) : submenu === "terminal" ? (
         <>
           <MenuHeader label="终端类型" onBack={() => setSubmenu(null)} />
+          <label
+            className="flex cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left text-[11px] font-medium text-slate-600 hover:bg-slate-50"
+            title="勾选后通过 tmux 保持会话（断线恢复）；取消勾选则直连 PTY，可显示内联图片（如 pi 的 read 结果），但关闭标签后进程结束"
+          >
+            <input
+              type="checkbox"
+              checked={useTmux}
+              onChange={(event) => setUseTmux(event.target.checked)}
+              className="h-3 w-3 cursor-pointer accent-indigo-600"
+            />
+            <span>使用 tmux</span>
+            {!useTmux && <span className="text-[10px] text-emerald-600">支持内联图片</span>}
+          </label>
+          <div className="my-1 border-t border-slate-100" />
           {terminalMenuItems.map((item) => (
             <MenuItem
               key={item.value}
               label={item.menuLabel}
               icon={item.logo}
               tone={item.accent}
-              onClick={() => onSelect(item.value, selectedProjId)}
+              onClick={() => onSelect(item.value, projectId, useTmux)}
             />
           ))}
         </>
@@ -1046,9 +1079,61 @@ export function TerminalTypeMenu({
               label={item.label}
               icon={item.icon}
               tone={item.tone}
-              onClick={() => onAddAgentChat(item.agent, "direct_acp", selectedProjId)}
+              onClick={() => onAddAgentChat(item.agent, "direct_acp", projectId)}
             />
           ))}
+        </>
+      ) : submenu === "custom-agents" ? (
+        <>
+          <MenuHeader label="自定义智能体" onBack={() => setSubmenu(null)} />
+          <label
+            className="flex cursor-pointer items-center gap-2 px-2.5 py-1.5 text-left text-[11px] font-medium text-slate-600 hover:bg-slate-50"
+            title="勾选后通过 tmux 保持会话；取消勾选则直连 PTY，可显示内联图片，但关闭标签后进程结束"
+          >
+            <input
+              type="checkbox"
+              checked={useTmux}
+              onChange={(event) => setUseTmux(event.target.checked)}
+              className="h-3 w-3 cursor-pointer accent-indigo-600"
+            />
+            <span>使用 tmux</span>
+            {!useTmux && <span className="text-[10px] text-emerald-600">支持内联图片</span>}
+          </label>
+          <div className="my-1 border-t border-slate-100" />
+          {customAgentsState === "loading" && (
+            <div className="flex items-center gap-2 px-3 py-3 text-xs text-slate-500">
+              <LoaderCircle className="h-3.5 w-3.5 animate-spin" />正在加载智能体...
+            </div>
+          )}
+          {customAgentsState === "error" && (
+            <div className="px-3 py-2 text-xs leading-5 text-red-600">{customAgentsError || "加载失败"}</div>
+          )}
+          {customAgentsState === "idle" && customAgents.length === 0 && (
+            <div className="px-3 py-2 text-xs leading-5 text-slate-500">
+              暂无自定义智能体，可在设备卡片 🤖 中创建
+            </div>
+          )}
+          <div className="max-h-[min(60vh,20rem)] overflow-y-auto overscroll-contain">
+            {customAgents.map((agent) => (
+              <button
+                key={agent.id}
+                type="button"
+                data-testid={`menu-custom-agent-${agent.id}`}
+                onClick={() => onAddCustomAgentTab?.(agent, projectId, useTmux)}
+                className="flex w-full flex-col gap-0.5 px-3 py-2 text-left hover:bg-slate-50 cursor-pointer"
+              >
+                <span className="flex w-full items-center gap-1.5">
+                  <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-violet-100 text-violet-700">
+                    <Bot className="h-3 w-3" />
+                  </span>
+                  <span className="truncate text-xs font-medium text-slate-700">{agent.name}</span>
+                </span>
+                <span className="pl-5 text-[10px] text-slate-400 truncate">
+                  {customAgentBaseLabel(agent.base_agent)} · {agent.skills?.length || 0} 技能
+                </span>
+              </button>
+            ))}
+          </div>
         </>
       ) : (
         <>
@@ -1067,7 +1152,7 @@ export function TerminalTypeMenu({
               key={session.session_id}
               type="button"
               title={session.session_id}
-              onClick={() => onAddAgentChat(session.agent, "direct_acp", selectedProjId, session.session_id, session.title || undefined)}
+              onClick={() => onAddAgentChat(session.agent, "direct_acp", projectId, session.session_id, session.title || undefined)}
               className="flex w-full flex-col gap-0.5 px-3 py-2 text-left hover:bg-slate-50"
             >
               <span className="w-full truncate text-xs font-medium text-slate-700">{session.title || session.session_id}</span>

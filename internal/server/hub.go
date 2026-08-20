@@ -32,7 +32,7 @@ var (
 )
 
 const (
-	terminalRelayWriteTimeout = 2 * time.Second
+	terminalRelayWriteTimeout = 10 * time.Second
 	webSocketWriteTimeout     = 10 * time.Second
 	daemonSocketPongTimeout   = 45 * time.Second
 	daemonSocketPingInterval  = 15 * time.Second
@@ -1273,7 +1273,129 @@ func (h *Hub) ServeAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"success": true})
 		return
 	}
+	if skillAPIRequest, ok := h.matchSkillAPI(w, r); ok {
+		env, err := h.requestDaemonForDevice(r, skillAPIRequest.deviceID, skillAPIRequest.messageType, "", skillAPIRequest.requestID, skillAPIRequest.payload)
+		writeAPIEnvelope(w, env, err)
+		return
+	}
 	http.NotFound(w, r)
+}
+
+type skillAPIRoute struct {
+	deviceID    string
+	messageType string
+	requestID   string
+	payload     any
+}
+
+// matchSkillAPI routes /api/skill/* to daemon skill messages. device_id query
+// param selects the machine (required so skills are always device-scoped).
+// Decode failures are written to w directly; ok=false means not a skill route.
+func (h *Hub) matchSkillAPI(w http.ResponseWriter, r *http.Request) (skillAPIRoute, bool) {
+	if r.Method != http.MethodPost {
+		return skillAPIRoute{}, false
+	}
+	var route skillAPIRoute
+	switch r.URL.Path {
+	case "/api/skill/catalog":
+		var req protocol.SkillCatalogListRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillCatalogList, requestID: req.RequestID, payload: req}
+	case "/api/agent/list":
+		var req protocol.CustomAgentListRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeCustomAgentList, requestID: req.RequestID, payload: req}
+	case "/api/agent/save":
+		var req protocol.CustomAgentSaveRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeCustomAgentSave, requestID: req.RequestID, payload: req}
+	case "/api/agent/delete":
+		var req protocol.CustomAgentDeleteRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeCustomAgentDelete, requestID: req.RequestID, payload: req}
+	case "/api/skill/store/install":
+		var req protocol.SkillStoreInstallRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillStoreInstall, requestID: req.RequestID, payload: req}
+	case "/api/skill/store/remove":
+		var req protocol.SkillStoreRemoveRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillStoreRemove, requestID: req.RequestID, payload: req}
+	case "/api/skill/store/upgrade":
+		var req protocol.SkillStoreUpgradeRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillStoreUpgrade, requestID: req.RequestID, payload: req}
+	case "/api/skill/create":
+		var req protocol.SkillCreateRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillCreate, requestID: req.RequestID, payload: req}
+	case "/api/skill/file/tree":
+		var req protocol.SkillFileTreeRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillFileTree, requestID: req.RequestID, payload: req}
+	case "/api/skill/file/read":
+		var req protocol.SkillFileReadRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillFileRead, requestID: req.RequestID, payload: req}
+	case "/api/skill/file/write":
+		var req protocol.SkillFileWriteRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillFileWrite, requestID: req.RequestID, payload: req}
+	case "/api/skill/file/create":
+		var req protocol.SkillFileCreateRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillFileCreate, requestID: req.RequestID, payload: req}
+	case "/api/skill/file/rename":
+		var req protocol.SkillFileRenameRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillFileRename, requestID: req.RequestID, payload: req}
+	case "/api/skill/file/delete":
+		var req protocol.SkillFileDeleteRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillFileDelete, requestID: req.RequestID, payload: req}
+	case "/api/skill/validate":
+		var req protocol.SkillValidateRequest
+		if !decodeJSON(w, r, &req) {
+			return skillAPIRoute{}, true
+		}
+		route = skillAPIRoute{messageType: protocol.TypeSkillValidate, requestID: req.RequestID, payload: req}
+	default:
+		return skillAPIRoute{}, false
+	}
+	route.deviceID = r.URL.Query().Get("device_id")
+	if route.deviceID == "" {
+		writeJSON(w, http.StatusBadRequest, protocol.ServerError{Code: "bad_request", Message: "device_id query parameter is required for skill APIs"})
+		return skillAPIRoute{}, true
+	}
+	return route, true
 }
 
 func (h *Hub) forwardAgentChatCommand(userID string, env protocol.Envelope) (protocol.Envelope, bool) {
@@ -2154,7 +2276,8 @@ func (h *Hub) handleDaemonMessage(dc *daemonConn, env protocol.Envelope) {
 				_ = wc.conn.Close()
 			}
 		}
-	case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult, protocol.TypeProjectResult, protocol.TypeDeviceAliasSet:
+	case protocol.TypeWorkspaceResult, protocol.TypeTerminalResult, protocol.TypeProjectResult, protocol.TypeDeviceAliasSet,
+		protocol.TypeSkillCatalogDone, protocol.TypeCustomAgentResult, protocol.TypeSkillStoreDone, protocol.TypeSkillFileDone:
 		if h.resolvePending(dc.userID, env) {
 			return
 		}
@@ -2721,6 +2844,51 @@ func (h *Hub) requestDaemonForDevice(r *http.Request, deviceID string, messageTy
 			typed.RequestID = requestID
 			payload = typed
 		case protocol.TerminalRunRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillCatalogListRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.CustomAgentListRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.CustomAgentSaveRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.CustomAgentDeleteRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillStoreInstallRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillStoreRemoveRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillStoreUpgradeRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillCreateRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillFileTreeRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillFileReadRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillFileWriteRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillFileCreateRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillFileRenameRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillFileDeleteRequest:
+			typed.RequestID = requestID
+			payload = typed
+		case protocol.SkillValidateRequest:
 			typed.RequestID = requestID
 			payload = typed
 		}
@@ -3878,6 +4046,17 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 	command := r.URL.Query().Get("command")
 	initialCols := parseTerminalDimension(r.URL.Query().Get("cols"))
 	initialRows := parseTerminalDimension(r.URL.Query().Get("rows"))
+	// use_tmux=0 opts the terminal out of the tmux backend (plain PTY, needed
+	// for inline images). Absent means the daemon default (tmux enabled).
+	var useTmux *bool
+	if raw := strings.TrimSpace(r.URL.Query().Get("use_tmux")); raw != "" {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			useTmux = &parsed
+		}
+	}
+	// custom_agent_id launches a daemon-managed custom agent definition
+	// (base CLI + skills + prompt). Empty keeps stock behavior.
+	customAgentID := strings.TrimSpace(r.URL.Query().Get("custom_agent_id"))
 
 	proj, ok := h.projectByID(userID, projID)
 	if !ok {
@@ -3939,6 +4118,8 @@ func (h *Hub) ServeTerminalWebSocket(w http.ResponseWriter, r *http.Request) {
 		InitialTitle:  initialTerminalTitle(command),
 		Cols:          initialCols,
 		Rows:          initialRows,
+		UseTmux:       useTmux,
+		CustomAgentID:   customAgentID,
 	}
 	startEnv := protocol.NewEnvelope(protocol.TypeTerminalStreamStart, "server", startPayload)
 	if !dc.writeEnvelopeDirect(startEnv) {

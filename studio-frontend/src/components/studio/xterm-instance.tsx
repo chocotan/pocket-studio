@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Terminal as XTerminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { ImageAddon } from "@xterm/addon-image";
 import "@xterm/xterm/css/xterm.css";
 import type { StudioTheme } from "./terminal-types";
 import { directWebsocketURL, getJSON, postJSON, websocketURL } from "@/lib/api";
@@ -405,9 +406,15 @@ interface XtermInstanceProps {
   scale?: number;
   directMode?: boolean;
   directEndpoint?: { terminal_ws_url: string; token?: string };
+  // Daemon-managed custom agent definition id: when set, the daemon replaces
+  // the launch command with the agent's base CLI + skill/prompt injection.
+  customAgentId?: string;
   onTitleChange?: (title: string, command?: string, fullTitle?: string) => void;
   onActiveFocus?: () => void;
   filePath?: string;
+  // Terminal backend: true (default) keeps the session via tmux; false runs a
+  // plain PTY so inline image protocols (OSC 1337 / Kitty) reach the renderer.
+  useTmux?: boolean;
 }
 
 const BASE_FONT_SIZE = 12;
@@ -452,6 +459,8 @@ export function XtermInstance({
   onTitleChange,
   onActiveFocus,
   filePath,
+  useTmux = true,
+  customAgentId,
 }: XtermInstanceProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const xtermRef    = useRef<XTerminal | null>(null);
@@ -727,6 +736,16 @@ export function XtermInstance({
       fitAddonRef.current = fitAddon;
       term.loadAddon(fitAddon);
 
+      // Inline images (iTerm2 OSC 1337 / Sixel / Kitty MVP) from agents like pi.
+      // Size reports stay enabled so emitters can query cell pixels for aspect ratio.
+      term.loadAddon(new ImageAddon({
+        enableSizeReports: true,
+        // Generous limits: agents downscale before emitting, but a big paste
+        // or screenshot can still be a multi-MB sequence.
+        iipSizeLimit: 32 * 1024 * 1024,
+        sixelSizeLimit: 32 * 1024 * 1024,
+      }));
+
       osc52Disposable = term.parser.registerOscHandler(52, (data) => {
         const text = osc52ClipboardText(data);
         if (!text) return true;
@@ -977,6 +996,12 @@ export function XtermInstance({
       if (filePath) {
         wsParams.set("path", filePath);
       }
+      if (customAgentId) {
+        wsParams.set("custom_agent_id", customAgentId);
+      }
+      if (useTmux === false) {
+        wsParams.set("use_tmux", "0");
+      }
       if (initialSize.cols > 0 && initialSize.rows > 0) {
         wsParams.set("cols", String(initialSize.cols));
         wsParams.set("rows", String(initialSize.rows));
@@ -1195,7 +1220,7 @@ export function XtermInstance({
       inputBuf.current = [];
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, terminalId, command, directMode, directEndpoint?.terminal_ws_url]);
+  }, [projectId, terminalId, command, directMode, directEndpoint?.terminal_ws_url, customAgentId]);
 
   /* Dynamic xterm theme switching */
   useEffect(() => {

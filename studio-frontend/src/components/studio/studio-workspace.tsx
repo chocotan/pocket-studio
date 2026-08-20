@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Palette, Check, Cable, Layers, PanelLeft, FolderTree, FileText, Plus, Lock, Unlock, Monitor, Folder } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronUp, LayoutGrid, Palette, Check, Cable, Layers, PanelLeft, FolderTree, FileText, Plus, Lock, Unlock, Monitor, Folder, Bot } from "lucide-react";
 import type { Device } from "@/lib/types";
-import { type StudioTheme, STUDIO_THEMES, isStudioTheme, isDarkStudioTheme, terminalType, terminalTypeFromCommand, terminalKindFromAgentKind, cleanTerminalTitle, type TerminalTitleState } from "./terminal-types";
+import { type StudioTheme, STUDIO_THEMES, isStudioTheme, isDarkStudioTheme, terminalType, terminalTypeFromCommand, terminalKindFromAgentKind, cleanTerminalTitle, type TerminalTitleState, type TerminalKind } from "./terminal-types";
 import type { Project } from "./studio-dashboard";
 import { EmptyWorkspace } from "./empty-workspace";
 import { ProjectNavMenu, ProjectSwitcher, deviceDisplayName } from "./project-switcher";
@@ -21,8 +21,9 @@ import { ZoomSelect } from "./zoom-select";
 import { NotificationCenter } from "./notification-center";
 import type { PageZoom } from "@/lib/zoom";
 import type { NotificationHostTarget, NotificationJumpTarget, TerminalNotification } from "./terminal-notifications";
-import { useWorkspaceLayout } from "./hooks/useWorkspaceLayout";
+import { useWorkspaceLayout, type InitialTabIntent } from "./hooks/useWorkspaceLayout";
 import { updateSplitSizes } from "./studio-layout-ops";
+import { NewSessionDialog, type CreateSessionSpec } from "./new-session-dialog";
 
 interface StudioWorkspaceProps {
   projectId: string;
@@ -53,6 +54,9 @@ interface StudioWorkspaceProps {
   onToggleWebNotifications?: () => void;
   onBackToDashboard: () => void;
   onProjectUpdated?: (project: Project) => void;
+  initialTabIntent?: InitialTabIntent | null;
+  onInitialTabIntentHandled?: () => void;
+  onCreateSession?: (spec: CreateSessionSpec) => Promise<void> | void;
 }
 
 const STUDIO_NAV_HIDDEN_KEY = "pocket-studio-nav-hidden";
@@ -87,6 +91,9 @@ export function StudioWorkspace({
   onToggleWebNotifications,
   onBackToDashboard,
   onProjectUpdated = () => {},
+  initialTabIntent,
+  onInitialTabIntentHandled,
+  onCreateSession,
 }: StudioWorkspaceProps) {
   const [theme, setTheme] = useState<StudioTheme>(() => {
     if (typeof window !== "undefined") {
@@ -104,6 +111,7 @@ export function StudioWorkspace({
   });
   const [themeMenuOpen, setThemeMenuOpen] = useState(false);
   const [dockMenuOpen, setDockMenuOpen] = useState(false);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [dockAutoHide, setDockAutoHide] = useState(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem(FLOATING_DOCK_AUTO_HIDE_KEY) === "true";
@@ -148,6 +156,7 @@ export function StudioWorkspace({
     handleSplit,
     handleClosePanel,
     handleAddTab,
+    handleAddCustomAgentTab,
     handleAddFileExplorer,
     handleAddAgentChat,
     handleUpdateTabProperties,
@@ -159,7 +168,9 @@ export function StudioWorkspace({
     handleTerminalTitle,
     handleTerminalFocus,
     handleCreateInitialPanel,
+    handleCreateInitialCustomAgent,
     handleCreateInitialFileExplorer,
+    handleCreateInitialAgentChat,
     handleCreateNewPanel,
     handleCreateNewFileExplorer,
     handleCreateNewAgentChat,
@@ -178,6 +189,8 @@ export function StudioWorkspace({
     notificationJumpTarget,
     onNotificationJumpHandled,
     onNotificationTargetsChange,
+    initialTabIntent,
+    onInitialTabIntentHandled,
   });
   const currentDevice = devices.find((device) => device.id === project.device_id);
   const occupiedAgentSessionIds = new Set(
@@ -284,6 +297,7 @@ export function StudioWorkspace({
           onAddTab={handleAddTab}
           onAddFileExplorer={handleAddFileExplorer}
           onAddAgentChat={handleAddAgentChat}
+          onAddCustomAgentTab={handleAddCustomAgentTab}
           onUpdateTabProperties={handleUpdateTabProperties}
           onOpenFile={handleOpenFile}
           onActiveTab={handleActiveTab}
@@ -550,10 +564,22 @@ export function StudioWorkspace({
               onSelectProject={onSelectProject}
               onToggleFavorite={onToggleFavorite}
               onDirectModeChange={onDirectModeChange}
+              hideTrigger
               open={projectListOpen}
               onOpenChange={setProjectListOpen}
-              triggerClassName="hidden md:flex"
             />
+
+            {onCreateSession && (
+              <button
+                type="button"
+                onClick={() => setNewSessionOpen(true)}
+                className="hidden sm:flex h-6 items-center gap-1 rounded-md border border-border bg-card px-2 text-[10px] font-semibold text-foreground hover:bg-accent hover:text-accent-foreground cursor-pointer shadow-sm"
+                title="新建会话"
+              >
+                <Plus className="h-3 w-3 text-primary" />
+                <span>新建会话</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -750,8 +776,11 @@ export function StudioWorkspace({
                               const label = tab.kind === "file_explorer"
                                 ? "文件"
                                 : tab.kind === "terminal"
-                                  ? cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType)
+                                  ? (tab.customAgentName
+                                      ? tab.customAgentName
+                                      : cleanTerminalTitle(liveTitle?.title || tab.title, terminalType(tab.termType).title, tab.termType))
                                   : tab.title;
+                              const isCustomAgentTab = tab.kind === "terminal" && Boolean(tab.customAgentName);
                               return (
                                 <button
                                   key={`${panel.id}:${tab.id}`}
@@ -768,13 +797,23 @@ export function StudioWorkspace({
                                   title={`${tabProject.name} / ${label}`}
                                 >
                                   <span className="flex size-4 shrink-0 items-center justify-center">
-                                    {tab.kind === "file_explorer"
+                                    {isCustomAgentTab
+                                      ? <Bot className="size-3.5 text-violet-500" />
+                                      : tab.kind === "file_explorer"
                                       ? <FolderTree className="size-3.5 text-sky-500" />
                                       : tab.kind === "file_viewer"
                                         ? <FileText className="size-3.5 text-emerald-500" />
                                         : displayType.logo}
                                   </span>
                                   <span className="min-w-0 flex-1 truncate text-[11px] font-semibold">{label}</span>
+                                  {isCustomAgentTab && (
+                                    <span
+                                      className="flex shrink-0 items-center rounded border border-violet-100/60 bg-violet-50/80 px-1 py-0.5 text-[9px] font-bold text-violet-700 dark:border-violet-900/50 dark:bg-violet-950/40 dark:text-violet-300"
+                                      title={`自定义智能体 · ${displayType.title}`}
+                                    >
+                                      智能体
+                                    </span>
+                                  )}
                                 </button>
                               );
                         })}
@@ -796,7 +835,9 @@ export function StudioWorkspace({
                     <EmptyWorkspace
                       device={currentDevice}
                       onCreate={handleCreateInitialPanel}
+                      onCreateAgentChat={handleCreateInitialAgentChat}
                       onCreateFileExplorer={handleCreateInitialFileExplorer}
+                      onCreateCustomAgent={handleCreateInitialCustomAgent}
                     />
                   )}
                 </div>
@@ -808,7 +849,9 @@ export function StudioWorkspace({
                 <EmptyWorkspace
                   device={currentDevice}
                   onCreate={handleCreateInitialPanel}
+                  onCreateAgentChat={handleCreateInitialAgentChat}
                   onCreateFileExplorer={handleCreateInitialFileExplorer}
+                  onCreateCustomAgent={handleCreateInitialCustomAgent}
                 />
               )
             ) : (
@@ -826,7 +869,9 @@ export function StudioWorkspace({
                   <EmptyWorkspace
                     device={currentDevice}
                     onCreate={handleCreateInitialPanel}
+                    onCreateAgentChat={handleCreateInitialAgentChat}
                     onCreateFileExplorer={handleCreateInitialFileExplorer}
+                    onCreateCustomAgent={handleCreateInitialCustomAgent}
                   />
                 ) : (
                   panels.map((p) => {
@@ -903,6 +948,7 @@ export function StudioWorkspace({
                             onAddTab={handleAddTab}
                             onAddFileExplorer={handleAddFileExplorer}
                             onAddAgentChat={handleAddAgentChat}
+                            onAddCustomAgentTab={handleAddCustomAgentTab}
                             onUpdateTabProperties={handleUpdateTabProperties}
                             onOpenFile={handleOpenFile}
                             onActiveTab={handleActiveTab}
@@ -1066,6 +1112,10 @@ export function StudioWorkspace({
                         handleCreateNewAgentChat(agentKind, agentRuntime, tabProjectId, undefined, resumeSessionId, title);
                         setDockMenuOpen(false);
                       }}
+                      onAddCustomAgentTab={(agent, tabProjectId, useTmux) => {
+                        handleCreateNewPanel(agent.base_agent as TerminalKind, tabProjectId, undefined, useTmux, { id: agent.id, name: agent.name });
+                        setDockMenuOpen(false);
+                      }}
                       occupiedAgentSessionIds={occupiedAgentSessionIds}
                     />
                   </>
@@ -1075,6 +1125,19 @@ export function StudioWorkspace({
           </>
         )}
       </main>
+
+      {onCreateSession && (
+        <NewSessionDialog
+          open={newSessionOpen}
+          onOpenChange={setNewSessionOpen}
+          devices={devices}
+          projects={projects}
+          initialDeviceId={project.device_id}
+          onSubmit={async (spec) => {
+            await onCreateSession(spec);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -1,0 +1,130 @@
+{
+  "runId": "6ac50258",
+  "agent": "researcher",
+  "task": "Research how terminal inline image display works, focused on implementing it in a web-based terminal (xterm.js). Deliver a structured brief covering:\n\n1. **Pi coding agent's image display**: pi (pi-coding-agent by badlogic) supports `terminal.showImages` and renders images inline in terminals. Which protocols does it emit (Kitty graphics protocol, iTerm2 inline images/OSC 1337)? How does it detect terminal support (env vars like TERM_PROGRAM, KITTY_WINDOW_ID, WEZTERM_EXECUTABLE, ITERM_SESSION_ID, or terminal queries)? Any config settings (terminal.showImages etc.)?\n\n2. **The protocols themselves** (concise): iTerm2 inline image protocol (OSC 1337;File=...base64), Kitty graphics protocol (APC G ...), Sixel. Which are most practical to support?\n\n3. **xterm.js image support**: status of @xterm/addon-image — which protocols it supports (sixel? iTerm2 IIP? Kitty?), maturity, known limitations, bundle size, license. Are there alternative libs for Kitty protocol over xterm.js?\n\n4. **How pi/agents decide to emit images**: what environment a shell needs to advertise (TERM, TERM_PROGRAM, etc.) so that CLI agents like pi will emit iTerm2/Kitty sequences. If a web terminal wants pi to emit iTerm2 protocol, what env should it fake (e.g., TERM_PROGRAM=iTerm.app)?\n\n5. **Reference implementations**: how do web-based terminals handle images — e.g., does VS Code's xterm.js support images, how do Tabby/Hyper/Wave terminal handle iTerm2/Kitty/sixel, any gotchas (large base64 payloads over websocket, chunking, binary vs text frames)?\n\nReturn a compressed brief with concrete facts, library names/versions, and links. Flag anything uncertain.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/choco/Downloads/remote-agent/.pi-subagents/artifacts/outputs/6ac50258/research.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "usage": {
+    "input": 26706,
+    "output": 6123,
+    "cacheRead": 37632,
+    "cacheWrite": 0,
+    "cost": 0,
+    "turns": 4
+  },
+  "model": "newapi/kimi-k3:high",
+  "attemptedModels": [
+    "newapi/kimi-k3:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "newapi/kimi-k3:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 26706,
+        "output": 6123,
+        "cacheRead": 37632,
+        "cacheWrite": 0,
+        "cost": 0,
+        "turns": 4
+      }
+    }
+  ],
+  "durationMs": 159088,
+  "toolCount": 5,
+  "launchContractDigest": "866f0241a228808abff9a3e2fa4d3ab92ac89542937d6e3a104c24e2daf20825",
+  "acceptance": {
+    "status": "attested",
+    "evidenceStatus": "attested",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Brief returns concrete findings with exact source file paths (packages/tui/src/terminal-image.ts, packages/coding-agent/src/core/settings-manager.ts), library names/versions (@xterm/addon-image 0.9.0, pi-coding-agent v0.21.0), env vars, escape-sequence formats, and links; uncertainty flagged for addon-image Kitty availability in npm 0.9.0 and bundle size."
+        }
+      ],
+      "changedFiles": [
+        ".pi-subagents/artifacts/outputs/6ac50258/research.md"
+      ],
+      "testsAddedOrUpdated": [],
+      "commandsRun": [
+        {
+          "command": "web_search (2 rounds, 7 queries)",
+          "result": "passed",
+          "summary": "Covered pi image detection, protocols, xterm.js addon-image, VS Code/Wave/Tabby reference implementations"
+        },
+        {
+          "command": "fetch_content raw.githubusercontent.com/badlogic/pi-mono/main/packages/tui/src/terminal-image.ts",
+          "result": "passed",
+          "summary": "Retrieved full primary source of pi's detection logic and Kitty/iTerm2 encoders"
+        }
+      ],
+      "validationOutput": [
+        "All key claims cited to primary sources: pi-mono source file, official iTerm2/Kitty specs, xterm.js repo README/issues/PRs, VS Code docs"
+      ],
+      "residualRisks": [
+        "npm @xterm/addon-image@0.9.0 may not include Kitty support (master README vs npm README discrepancy) — verify published typings before use",
+        "Exact CSI query pi uses for cell dimensions not confirmed (14 t vs 16 t)",
+        "addon-image bundle size unverified",
+        "Kitty support in xterm.js is weeks old and partial (t=d only)"
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "Added research.md brief on terminal inline image protocols, pi's detection/emission behavior, xterm.js addon-image capabilities, env spoofing guidance, and web-terminal transport gotchas",
+      "reviewFindings": [
+        "no blockers"
+      ],
+      "manualNotes": "Recommended path: fake TERM_PROGRAM=iTerm.app + ITERM_SESSION_ID and use @xterm/addon-image IIP support; avoid setting TMUX or Kitty-family vars simultaneously; ensure ws transport handles multi-MB base64 messages with backpressure."
+    }
+  },
+  "effects": {
+    "fileMutation": {
+      "status": "not-applicable",
+      "expected": false,
+      "attempted": true
+    }
+  },
+  "transcriptPath": "/home/choco/Downloads/remote-agent/.pi-subagents/artifacts/6ac50258_researcher_0_transcript.jsonl",
+  "timestamp": 1786497757368
+}

@@ -160,6 +160,11 @@ function compactMiddle(value: string, max = 96) {
   return `${value.slice(0, keep)}...${value.slice(-keep)}`;
 }
 
+function compactHead(value: string, max = 96) {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1)}…`;
+}
+
 function diffOutputRecord(output: unknown) {
   const record = getRecord(output);
   return record?.type === "diff" ? record : null;
@@ -217,7 +222,22 @@ function extractToolTarget(item: AgentToolCallItem) {
   const query = getStringField(input, ["query", "search_query", "searchQuery", "pattern", "search"]);
   const url = getStringField(input, ["url", "uri", "href"]);
   const target = inputPath || outputPath || (paths ? String(paths[0]) : "") || query || url || "";
-  return { changes, command: commandWithArgs || command, input, inputPath, outputDiff, outputPath, paths, query, url, target };
+  // Some ACP agents (pi's bash adapter) omit rawInput and carry the full
+  // command in the tool title with kind=execute; fall back to it so the
+  // card still shows the actual command instead of a generic label.
+  const effectiveCommand = commandWithArgs || command || resolveExecuteTitle(item);
+  return { changes, command: effectiveCommand, input, inputPath, outputDiff, outputPath, paths, query, url, target };
+}
+
+function resolveExecuteTitle(item: AgentToolCallItem) {
+  const kind = resolveAgentToolKind(item);
+  if (kind !== "bash" && kind !== "exec_command" && kind !== "execute") return "";
+  const title = (item.title || "").trim();
+  if (!title) return "";
+  const titleKind = normalizeAgentToolName(title);
+  // A bare tool name as title (e.g. "bash") carries no command.
+  if (titleKind === "bash" || titleKind === "exec_command" || titleKind === "execute") return "";
+  return title;
 }
 
 function describeToolCall(item: AgentToolCallItem) {
@@ -626,8 +646,10 @@ export function CollapsibleSection({ durationMs, children }: { durationMs?: numb
 
   const preview = useMemo(() => {
     if (!children) return "";
+    // Keep a stable head-only preview: while a thought streams in, a
+    // head+tail preview would keep changing its tail on every chunk.
     const singleLine = children.replace(/\s+/g, " ").trim();
-    return compactMiddle(singleLine, 80);
+    return compactHead(singleLine, 80);
   }, [children]);
 
   return (
@@ -657,6 +679,56 @@ export function CollapsibleSection({ durationMs, children }: { durationMs?: numb
   );
 }
 
+
+type SlashCommandOption = {
+  name: string;
+  description: string;
+  hint?: string;
+};
+
+export function SlashCommandMenu({
+  commands,
+  activeIndex,
+  onHover,
+  onSelect,
+}: {
+  commands: SlashCommandOption[];
+  activeIndex: number;
+  onHover: (index: number) => void;
+  onSelect: (command: SlashCommandOption) => void;
+}) {
+  if (commands.length === 0) {
+    return (
+      <div className="absolute bottom-full left-0 right-0 z-20 mb-1 rounded-lg border border-border bg-popover/95 backdrop-blur p-2 text-[10.5px] text-muted-foreground shadow-lg">
+        没有匹配的命令
+      </div>
+    );
+  }
+  return (
+    <div className="absolute bottom-full left-0 right-0 z-20 mb-1 max-h-56 overflow-y-auto rounded-lg border border-border bg-popover/95 backdrop-blur shadow-lg" data-testid="slash-command-menu">
+      {commands.map((command, index) => (
+        <button
+          key={command.name}
+          type="button"
+          data-testid="slash-command-option"
+          data-command-name={command.name}
+          onMouseEnter={() => onHover(index)}
+          onClick={() => onSelect(command)}
+          className={`flex w-full items-baseline gap-2 px-2.5 py-1.5 text-left cursor-pointer ${
+            index === activeIndex ? "bg-primary/10" : "hover:bg-muted/50"
+          }`}
+        >
+          <span className={`shrink-0 font-mono text-[11px] font-semibold ${index === activeIndex ? "text-primary" : "text-foreground/85"}`}>
+            /{command.name}
+          </span>
+          <span className="min-w-0 truncate text-[10px] text-muted-foreground/80">
+            {command.description || (command.hint ? `参数: ${command.hint}` : "")}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export function ToolCallCard({ item, nowMs }: { item: AgentToolCallItem; nowMs: number }) {
   const [open, setOpen] = useState(false);

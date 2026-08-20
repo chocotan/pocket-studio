@@ -1,0 +1,109 @@
+{
+  "runId": "d6608e26",
+  "agent": "scout",
+  "task": "侦察本地仓库 /home/choco/Downloads/remote-agent (Pocket Studio: Go 编写的 Server + Daemon, React 前端 studio-frontend)。它是远程 AI 编程工作台,通过 Daemon 在开发机上管理项目目录、终端会话和 AI Agent 进程。\n\n目标:搞清楚\"新增一个外部 CLI Agent(如 DeepSeek dsh)\"需要动哪些地方。已知它已支持 Claude Code, Codex, OpenCode, Kilo, Pi, antigravity, 以及 Direct ACP (stdin/stdout JSON-RPC)。请回答:\n\n1. Agent 集成点清单: 在哪里注册/枚举可用的 Agent 执行体?(cmd/daemon、internal/ 下找 agent 相关目录)列出需要改动的具体文件路径。\n2. Direct ACP 实现: internal 中 ACP 客户端实现在哪个文件?支持哪些 ACP agent(codex/opencode/kilo?),新增一个 ACP agent 的注册方式是什么(命令行模板?)?ACP 会话的生命周期管理(chat、工具调用渲染、取消、resume)在哪?\n3. 终端模式 Agent: 走终端PTY跑的 CLI agent(如 claude code)如何配置启动命令?在哪检测 agent 类型?\n4. Hook/通知: 终端 AI Hook(检测 tool call / 任务完成 → 通知 UI)在哪实现?对未知新 agent 的兜底行为是什么?\n5. 前端: studio-frontend 中 Agent 类型/图标的映射在哪?新增 agent 需要改前端吗?\n6. 协议: internal/protocol 中与 agent 相关的消息 envelope 有哪些关键类型?\n\n返回压缩结论 + 关键文件路径清单(精确到文件),不要贴大段代码。\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/choco/Downloads/remote-agent/.pi-subagents/artifacts/outputs/d6608e26/context.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 1,
+  "usage": {
+    "input": 58255,
+    "output": 3864,
+    "cacheRead": 1285312,
+    "cacheWrite": 0,
+    "cost": 0,
+    "turns": 56
+  },
+  "model": "newapi/minimax-m3:medium",
+  "attemptedModels": [
+    "newapi/minimax-m3:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "newapi/minimax-m3:medium",
+      "success": false,
+      "exitCode": 1,
+      "error": "当前服务集群负载较高，请稍后重试，感谢您的耐心等待。 (2064)",
+      "usage": {
+        "input": 58255,
+        "output": 3864,
+        "cacheRead": 1285312,
+        "cacheWrite": 0,
+        "cost": 0,
+        "turns": 56
+      }
+    }
+  ],
+  "durationMs": 101005,
+  "toolCount": 55,
+  "error": "当前服务集群负载较高，请稍后重试，感谢您的耐心等待。 (2064)",
+  "launchContractDigest": "c57d40dfb6de4e0265b4acd9de40501223faf84720effe6487d507a2dfd88da0",
+  "launchResolvedExtensions": {
+    "version": 1,
+    "source": "launch-resolved",
+    "disableAmbientExtensions": false,
+    "runtime": [
+      "sha256:3c7debb906f9cbc1"
+    ],
+    "configured": [],
+    "effective": [
+      "sha256:3c7debb906f9cbc1"
+    ],
+    "omitted": {
+      "runtime": 0,
+      "configured": 0,
+      "effective": 0
+    }
+  },
+  "acceptance": {
+    "status": "rejected",
+    "evidenceStatus": "rejected",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [
+      {
+        "id": "attestation",
+        "status": "failed",
+        "message": "Structured acceptance report not found."
+      }
+    ],
+    "verifyRuns": [],
+    "childReportParseError": "Structured acceptance report not found."
+  },
+  "transcriptPath": "/home/choco/Downloads/remote-agent/.pi-subagents/artifacts/d6608e26_scout_0_transcript.jsonl",
+  "timestamp": 1786930211424
+}

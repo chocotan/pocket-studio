@@ -46,11 +46,33 @@ const (
 	TypeTerminalStreamAlert  = "terminal.stream.alert"
 	TypeTerminalStreamResize = "terminal.stream.resize"
 	TypeTerminalStreamExit   = "terminal.stream.exit"
+
+	TypeSkillCatalogList = "skill.catalog.list"
+	TypeSkillCatalogDone = "skill.catalog.result"
+	TypeCustomAgentList   = "custom.agent.list"
+	TypeCustomAgentSave   = "custom.agent.save"
+	TypeCustomAgentDelete = "custom.agent.delete"
+	TypeCustomAgentResult = "custom.agent.result"
+	TypeSkillStoreInstall = "skill.store.install"
+	TypeSkillStoreRemove = "skill.store.remove"
+	TypeSkillStoreUpgrade = "skill.store.upgrade"
+	TypeSkillStoreDone = "skill.store.result"
+	TypeSkillCreate = "skill.create"
+	TypeSkillFileTree = "skill.file.tree"
+	TypeSkillFileRead = "skill.file.read"
+	TypeSkillFileWrite = "skill.file.write"
+	TypeSkillFileCreate = "skill.file.create"
+	TypeSkillFileRename = "skill.file.rename"
+	TypeSkillFileDelete = "skill.file.delete"
+	TypeSkillFileDone = "skill.file.result"
+	TypeSkillValidate = "skill.validate"
 )
 
 const (
 	FeatureTerminalBinaryV1 = "terminal.binary.v1"
 	FeatureDirectTerminalV1 = "terminal.direct.v1"
+	FeatureCustomAgentsV1   = "custom.agents.v1"
+	FeatureSkillEditorV1    = "skill.editor.v1"
 	DefaultTaskHistoryLimit = 200
 	MaxTaskHistoryLimit     = 500
 )
@@ -376,6 +398,176 @@ type FileEntry struct {
 	Modified int64  `json:"modified,omitempty"`
 }
 
+// SkillSummary describes one discovered skill (metadata only; the daemon
+// never loads full skill content into model context).
+type SkillSummary struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Path        string `json:"path"`               // authoritative absolute path
+	Source      string `json:"source"`              // "shared-global" | "store"
+	Managed     bool   `json:"managed"`             // store skills support install/upgrade
+	Writable    bool   `json:"writable"`            // actual daemon file permission
+	Revision    string `json:"revision"`            // SKILL.md content hash for optimistic locking
+	Valid       bool   `json:"valid"`               // frontmatter validated
+	Issue       string `json:"issue,omitempty"`     // validation issue, if any
+}
+
+type SkillRef struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// CustomAgent is a daemon-managed agent definition: a named launchable agent
+// binding a base CLI (pi/kimi/opencode/claude/codex/kilo) to a skill set.
+// Custom agents surface alongside built-in terminal types in the UI and are
+// launched by passing CustomAgentID in TerminalStreamStart.
+type CustomAgent struct {
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	Description  string              `json:"description,omitempty"`
+	BaseAgent    string              `json:"base_agent"` // pi | kimi | opencode | claude | codex | kilo
+	SystemPrompt string              `json:"system_prompt,omitempty"` // persona/instructions injected per-CLI
+	Skills       []SkillRef          `json:"skills"`
+	ExtraEnv     map[string]string   `json:"extra_env,omitempty"`
+	ExtraArgs    map[string][]string `json:"extra_args,omitempty"`
+}
+
+type SkillCatalogListRequest struct {
+	RequestID string `json:"request_id"`
+}
+
+type SkillCatalogResult struct {
+	RequestID string         `json:"request_id"`
+	Skills    []SkillSummary `json:"skills"`
+	Error     string         `json:"error,omitempty"`
+}
+
+type CustomAgentListRequest struct {
+	RequestID string `json:"request_id"`
+}
+
+type CustomAgentSaveRequest struct {
+	RequestID string      `json:"request_id"`
+	Agent     CustomAgent `json:"agent"`
+}
+
+type CustomAgentDeleteRequest struct {
+	RequestID string `json:"request_id"`
+	AgentID   string `json:"agent_id"`
+}
+
+type CustomAgentResult struct {
+	RequestID string        `json:"request_id"`
+	Agent     *CustomAgent  `json:"agent,omitempty"`
+	Agents    []CustomAgent `json:"agents,omitempty"`
+	Deleted   bool          `json:"deleted,omitempty"`
+	Error     string        `json:"error,omitempty"`
+}
+
+type SkillStoreInstallRequest struct {
+	RequestID string `json:"request_id"`
+	Source    string `json:"source"`    // "git" | "local"
+	Ref       string `json:"ref"`       // git URL or local directory path
+	Name      string `json:"name,omitempty"` // override skill directory name
+}
+
+type SkillStoreRemoveRequest struct {
+	RequestID string `json:"request_id"`
+	Name      string `json:"name"`
+}
+
+type SkillStoreUpgradeRequest struct {
+	RequestID string `json:"request_id"`
+	Name      string `json:"name"`
+	Force     bool   `json:"force,omitempty"` // discard local edits (git checkout)
+}
+
+type SkillStoreResult struct {
+	RequestID string       `json:"request_id"`
+	Skill     *SkillSummary `json:"skill,omitempty"`
+	Removed   bool         `json:"removed,omitempty"`
+	Error     string       `json:"error,omitempty"`
+}
+
+type SkillCreateRequest struct {
+	RequestID   string `json:"request_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Location    string `json:"location"` // "store" (default) | "shared"
+}
+
+type SkillFileTreeRequest struct {
+	RequestID string `json:"request_id"`
+	Name      string `json:"name"` // skill directory name under an allowed root
+}
+
+type SkillFileReadRequest struct {
+	RequestID string `json:"request_id"`
+	Name      string `json:"name"`
+	Path      string `json:"path"` // relative path inside the skill directory
+}
+
+type SkillFileWriteRequest struct {
+	RequestID       string `json:"request_id"`
+	Name            string `json:"name"`
+	Path            string `json:"path"`
+	Content         string `json:"content"`
+	ExpectedRevision string `json:"expected_revision,omitempty"` // empty = create without check
+}
+
+type SkillFileCreateRequest struct {
+	RequestID string `json:"request_id"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	IsDir     bool   `json:"is_dir,omitempty"`
+}
+
+type SkillFileRenameRequest struct {
+	RequestID string `json:"request_id"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	NewPath   string `json:"new_path"`
+}
+
+type SkillFileDeleteRequest struct {
+	RequestID string `json:"request_id"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+}
+
+type SkillFileTreeResult struct {
+	RequestID string     `json:"request_id"`
+	Name      string     `json:"name,omitempty"`
+	Root      string     `json:"root,omitempty"`
+	Entries   []FileEntry `json:"entries,omitempty"`
+	Error     string     `json:"error,omitempty"`
+}
+
+type SkillFileContent struct {
+	RequestID string `json:"request_id"`
+	Name      string `json:"name,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Content   string `json:"content,omitempty"`
+	Revision  string `json:"revision,omitempty"`
+	Binary    bool   `json:"binary,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type SkillFileOperationResult struct {
+	RequestID string `json:"request_id"`
+	Name      string `json:"name,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Revision  string `json:"revision,omitempty"` // new revision after write
+	Conflict  bool   `json:"conflict,omitempty"`  // revision mismatch on write
+	Error     string `json:"error,omitempty"`
+}
+
+type SkillValidateRequest struct {
+	RequestID string `json:"request_id"`
+	Name      string `json:"name"`
+}
+
 type TerminalRunRequest struct {
 	RequestID     string `json:"request_id"`
 	WorkspaceID   string `json:"workspace_id,omitempty"`
@@ -410,6 +602,17 @@ type TerminalStreamStart struct {
 	InitialTitle  string `json:"initial_title,omitempty"`
 	Cols          uint16 `json:"cols,omitempty"`
 	Rows          uint16 `json:"rows,omitempty"`
+	// CustomAgentID references a daemon-managed custom agent definition
+	// (base CLI + skill set + env). When set, the daemon resolves the
+	// definition, overrides the launch command with the definition's base
+	// CLI, and applies skill/env translation (pi --skill, kimi --skills-dir,
+	// opencode OPENCODE_CONFIG_CONTENT, ...). Empty keeps stock behavior.
+	CustomAgentID string `json:"custom_agent_id,omitempty"`
+	// UseTmux selects the terminal backend. nil means the default (tmux enabled,
+	// session persistence). false runs the shell directly on the PTY, which is
+	// required for inline image protocols (tmux filters OSC 1337 / Kitty APC)
+	// at the cost of losing session persistence.
+	UseTmux *bool `json:"use_tmux,omitempty"`
 }
 
 type TerminalStreamData struct {

@@ -15,6 +15,17 @@ import {
   type ShortcutAction,
 } from "./shortcut-settings";
 
+export function StudioSettingsContent({ deviceId }: { deviceId: string }) {
+  // 技能与 Agent 管理已升级为机器级独立页面（Dashboard 设备卡片 → 机器人图标），
+  // 设置弹窗仅保留快捷键。deviceId 保留以兼容旧调用方。
+  void deviceId;
+  return (
+    <div>
+      <ShortcutSettingsContent />
+    </div>
+  );
+}
+
 export function ShortcutSettingsContent() {
   const [shortcuts, setShortcuts] = useState(() => loadShortcutConfig());
   const [recordingAction, setRecordingAction] = useState<ShortcutAction | null>(null);

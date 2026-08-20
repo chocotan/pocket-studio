@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<script src="/node_modules/@xterm/xterm/lib/xterm.js"></script>
+<script src="/node_modules/@xterm/addon-image/lib/addon-image.js"></script>
+<link rel="stylesheet" href="/node_modules/@xterm/xterm/css/xterm.css">
+</head>
+<body>
+<div id="t" style="width:1000px;height:500px"></div>
+<script>
+const term = new Terminal({ allowProposedApi: true });
+term.open(document.getElementById('t'));
+const addon = new ImageAddon.ImageAddon({ enableSizeReports: true });
+term.loadAddon(addon);
+// emit test image via OSC 1337
+const b64 = document.location.hash.slice(1);
+const seq = '\x1b]1337;File=inline=1;size=6241:' + b64 + '\x07';
+term.write(seq);
+term.write('\r\nAFTER_IMAGE_MARKER\r\n');
+window.__done = true;
+</script>
+</body>
+</html>

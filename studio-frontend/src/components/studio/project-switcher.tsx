@@ -18,6 +18,9 @@ interface ProjectSwitcherProps {
   onDirectModeChange: (projectId: string, directMode: boolean) => void;
   triggerClassName?: string;
   triggerLabel?: string;
+  /** Hide the trigger button; only render the dialog (another entry point
+   *  such as the nav menu "+" opens it via the controlled open prop). */
+  hideTrigger?: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }
@@ -45,6 +48,7 @@ export function ProjectSwitcher({
   onDirectModeChange,
   triggerClassName,
   triggerLabel = "项目列表",
+  hideTrigger = false,
   open: controlledOpen,
   onOpenChange,
 }: ProjectSwitcherProps) {
@@ -169,40 +173,42 @@ export function ProjectSwitcher({
 
   return (
     <>
-      <button
-        type="button"
-        onClick={(event) => {
-          event.stopPropagation();
-          setOpen(true);
-        }}
-        className={cn(
-          "flex h-6 min-w-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/80 px-2 text-[10px] text-muted-foreground transition-colors hover:border-primary/25 hover:bg-accent/70 hover:text-foreground/85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring dark:border-border/60 dark:bg-muted/50 dark:text-muted-foreground dark:hover:border-primary/40 dark:hover:bg-muted",
-          triggerClassName
-        )}
-        aria-label={triggerLabel}
-        title={triggerLabel}
-      >
-        {currentProject ? (
-          <>
-            {currentDeviceName && (
-              <>
-                <span className="truncate max-w-[120px] font-semibold text-muted-foreground dark:text-muted-foreground" title={currentDeviceName}>
-                  {currentDeviceName}
-                </span>
-                <span className="text-muted-foreground/50 dark:text-muted-foreground/70">/</span>
-              </>
-            )}
-            <span className="truncate max-w-[220px] font-semibold text-primary dark:text-primary" title={currentProject.name}>
-              {currentProject.name}
-            </span>
-          </>
-        ) : (
-          <>
-            <Star className="h-3.5 w-3.5 text-amber-500" />
-            <span className="font-semibold text-muted-foreground dark:text-foreground/80">项目列表</span>
-          </>
-        )}
-      </button>
+      {!hideTrigger && (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            setOpen(true);
+          }}
+          className={cn(
+            "flex h-6 min-w-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/80 px-2 text-[10px] text-muted-foreground transition-colors hover:border-primary/25 hover:bg-accent/70 hover:text-foreground/85 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring dark:border-border/60 dark:bg-muted/50 dark:text-muted-foreground dark:hover:border-primary/40 dark:hover:bg-muted",
+            triggerClassName
+          )}
+          aria-label={triggerLabel}
+          title={triggerLabel}
+        >
+          {currentProject ? (
+            <>
+              {currentDeviceName && (
+                <>
+                  <span className="truncate max-w-[120px] font-semibold text-muted-foreground dark:text-muted-foreground" title={currentDeviceName}>
+                    {currentDeviceName}
+                  </span>
+                  <span className="text-muted-foreground/50 dark:text-muted-foreground/70">/</span>
+                </>
+              )}
+              <span className="truncate max-w-[220px] font-semibold text-primary dark:text-primary" title={currentProject.name}>
+                {currentProject.name}
+              </span>
+            </>
+          ) : (
+            <>
+              <Star className="h-3.5 w-3.5 text-amber-500" />
+              <span className="font-semibold text-muted-foreground dark:text-foreground/80">项目列表</span>
+            </>
+          )}
+        </button>
+      )}
 
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className={cn(

@@ -6,6 +6,7 @@ import {
   ClaudeCode,
   Codex,
   Cursor,
+  DeepSeek,
   GithubCopilot,
   KiloCode,
   Kimi,
@@ -14,9 +15,9 @@ import {
   Qwen,
 } from "@lobehub/icons/es/icons";
 
-export type TerminalKind = "bash" | "claude" | "codex" | "opencode" | "kilo" | "pi" | "agy" | "qwen" | "kimi" | "copilot" | "cursor" | "openclaw";
+export type TerminalKind = "bash" | "claude" | "codex" | "opencode" | "kilo" | "pi" | "agy" | "qwen" | "kimi" | "copilot" | "cursor" | "openclaw" | "dsh";
 export type SplitDirection = "left" | "right" | "top" | "bottom";
-export type TerminalAccent = "indigo" | "violet" | "emerald" | "amber" | "cyan" | "rose" | "lime" | "sky" | "slate";
+export type TerminalAccent = "indigo" | "violet" | "emerald" | "amber" | "cyan" | "rose" | "lime" | "sky" | "slate" | "blue";
 export type TerminalTitleSource = "initial" | "tmux";
 export type StudioTheme = "light" | "claude" | "sandalwood" | "sky" | "jade" | "sakura" | "xuan" | "dark" | "synthwave" | "onedark" | "charcoal";
 
@@ -79,6 +80,7 @@ export const TERMINAL_TYPES: TerminalTypeDefinition[] = [
   { value: "copilot", label: "GitHub Copilot", title: "GitHub Copilot", command: "copilot", accent: "emerald", logo: <GithubCopilot width={14} height={14} /> },
   { value: "cursor", label: "Cursor Agent", title: "Cursor Agent", command: "cursor-agent", accent: "slate", logo: <Cursor width={14} height={14} /> },
   { value: "openclaw", label: "OpenClaw", title: "OpenClaw", command: "openclaw", accent: "rose", logo: <OpenClaw width={14} height={14} /> },
+  { value: "dsh", label: "DeepSeek", title: "DeepSeek Harness", command: "dsh --profile tui", accent: "blue", logo: <DeepSeek size={14} /> },
 ];
 
 export function terminalType(value: TerminalKind) {
@@ -94,6 +96,7 @@ export function terminalKindFromAgentKind(agentKind: string | undefined): Termin
   if (normalized === "kilocode" || normalized === "kilo-code") return "kilo";
   if (normalized === "claude_code" || normalized === "claude-code") return "claude";
   if (normalized === "antigravity") return "agy";
+  if (normalized === "deepseek" || normalized === "deepseek-harness" || normalized === "dsh-tui") return "dsh";
   return isTerminalKind(normalized) ? normalized : "opencode";
 }
 
@@ -104,6 +107,38 @@ function normalizeAgentKind(agentKind: string | undefined) {
 
 export function availableTerminalTypes(device: Device | undefined) {
   return TERMINAL_TYPES.filter((item) => item.value === "bash" || agentAvailable(device, item.value));
+}
+
+export interface AgentMenuItem {
+  agent: string;
+  capability: string;
+  label: string;
+  icon: React.ReactNode;
+  tone: TerminalAccent;
+}
+
+export function agentMenuItems(device: Device | undefined): AgentMenuItem[] {
+  const items: AgentMenuItem[] = [
+    { agent: "opencode", capability: "opencode", label: "OpenCode", icon: <OpenCode width={14} height={14} />, tone: "amber" },
+    { agent: "claude", capability: "claude", label: "Claude Code", icon: <ClaudeCode width={14} height={14} />, tone: "violet" },
+    { agent: "codex", capability: "codex", label: "Codex", icon: <Codex width={14} height={14} />, tone: "emerald" },
+    { agent: "kilo", capability: "kilocode", label: "Kilo Code", icon: <KiloCode width={14} height={14} />, tone: "lime" },
+    { agent: "qwen", capability: "qwen", label: "Qwen Code", icon: <Qwen width={14} height={14} />, tone: "cyan" },
+    { agent: "kimi", capability: "kimi", label: "Kimi", icon: <Kimi width={14} height={14} />, tone: "sky" },
+    { agent: "copilot", capability: "copilot", label: "GitHub Copilot", icon: <GithubCopilot width={14} height={14} />, tone: "emerald" },
+    { agent: "cursor", capability: "cursor", label: "Cursor Agent", icon: <Cursor width={14} height={14} />, tone: "slate" },
+    { agent: "openclaw", capability: "openclaw", label: "OpenClaw", icon: <OpenClaw width={14} height={14} />, tone: "rose" },
+    { agent: "pi", capability: "pi", label: "Pi", icon: <span className="text-[10px] font-black leading-none">π</span>, tone: "cyan" },
+    { agent: "agy", capability: "antigravity", label: "Antigravity", icon: <Antigravity width={14} height={14} />, tone: "rose" },
+    { agent: "dsh", capability: "dsh", label: "DeepSeek", icon: <DeepSeek size={14} />, tone: "blue" },
+  ];
+  return items.filter((item) => agentCapabilityAvailable(device, item.capability));
+}
+
+export function directACPMenuItems(device: Device | undefined): AgentMenuItem[] {
+  // dsh (DeepSeek) is not ready for ACP conversations yet.
+  const supported = new Set(["opencode", "claude", "codex", "kilo", "qwen", "pi", "kimi", "agy"]);
+  return agentMenuItems(device).filter((item) => supported.has(item.agent));
 }
 
 export function agentAvailable(device: Device | undefined, kind: TerminalKind) {
@@ -126,6 +161,8 @@ export function agentCapabilityNameForTerminalKind(kind: TerminalKind) {
       return "kilocode";
     case "agy":
       return "antigravity";
+    case "dsh":
+      return "dsh";
     default:
       return kind;
   }
@@ -151,6 +188,10 @@ function normalizeAgentCapabilityName(value: string | undefined) {
       return "copilot";
     case "open-claw":
       return "openclaw";
+    case "deepseek":
+    case "deepseek-harness":
+    case "dsh-tui":
+      return "dsh";
     default:
       return normalized;
   }
@@ -170,6 +211,7 @@ export function terminalTypeFromCommand(command: string, fallback: TerminalKind)
   if (normalized.includes("kilo")) return "kilo";
   if (normalized === "pi" || normalized.startsWith("pi-")) return "pi";
   if (normalized.includes("agy") || normalized.includes("antigravity")) return "agy";
+  if (normalized.includes("dsh")) return "dsh";
   return fallback;
 }
 
@@ -224,11 +266,12 @@ function knownTerminalTitleForCommand(command: string) {
   if (normalized.includes("kilo")) return "Kilo Code";
   if (normalized === "pi" || normalized.startsWith("pi ")) return "Pi";
   if (normalized === "agy" || normalized.includes("antigravity")) return "Antigravity";
+  if (normalized.includes("dsh")) return "DeepSeek";
   return "";
 }
 
 function isDefaultTerminalTitle(title: string) {
-  return ["Shell", "Claude Code", "Codex", "OpenCode", "Kilo Code", "Pi", "Antigravity", "Qwen Code", "Kimi", "GitHub Copilot", "Cursor Agent", "OpenClaw", "ACP"].includes(title);
+  return ["Shell", "Claude Code", "Codex", "OpenCode", "Kilo Code", "Pi", "Antigravity", "Qwen Code", "Kimi", "GitHub Copilot", "Cursor Agent", "OpenClaw", "DeepSeek", "ACP"].includes(title);
 }
 
 function extractQuotedPocketTitle(title: string) {

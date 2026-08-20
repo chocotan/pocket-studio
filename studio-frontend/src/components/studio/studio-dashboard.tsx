@@ -1,14 +1,14 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import {
   Plus,
   FolderGit2,
-  FolderPlus,
   Server,
   HelpCircle,
   RefreshCw,
   Settings,
-  Keyboard,
+  Sparkles,
   Pencil,
+  Bot,
 } from "lucide-react";
 import type { Device } from "../../lib/types";
 import { clearClientConfig, loadClientConfig, postJSON, saveClientConfig, type ClientConfig } from "../../lib/api";
@@ -27,11 +27,13 @@ import {
 } from "@/components/ui/dialog";
 import { ZoomSelect } from "./zoom-select";
 import type { PageZoom } from "@/lib/zoom";
-import { ShortcutSettingsContent } from "./studio-settings";
+import { StudioSettingsContent } from "./studio-settings";
 import { ProjectSwitcher, deviceDisplayName } from "./project-switcher";
 import { NotificationCenter } from "./notification-center";
 import type { TerminalNotification } from "./terminal-notifications";
 import { ProjectCard } from "./project-card";
+
+import { NewSessionDialog, type CreateSessionSpec } from "./new-session-dialog";
 
 export interface DirectEndpoint {
   terminal_ws_url: string;
@@ -72,6 +74,8 @@ interface StudioDashboardProps {
   onDeleteProject?: (projectId: string) => void;
   selectedDeviceId?: string;
   onSelectDevice?: (deviceId: string) => void;
+  onCreateSession?: (spec: CreateSessionSpec) => Promise<void> | void;
+  onManageDeviceAgents?: (deviceId: string) => void;
 }
 
 
@@ -98,16 +102,13 @@ export function StudioDashboard({
   onDeleteProject,
   selectedDeviceId: propSelectedDeviceId,
   onSelectDevice,
+  onCreateSession,
+  onManageDeviceAgents,
 }: StudioDashboardProps) {
   const [localSelectedDeviceId, setLocalSelectedDeviceId] = useState<string>("");
   const selectedDeviceId = propSelectedDeviceId !== undefined ? propSelectedDeviceId : localSelectedDeviceId;
   const setSelectedDeviceId = onSelectDevice !== undefined ? onSelectDevice : setLocalSelectedDeviceId;
   const [createOpen, setCreateOpen] = useState(false);
-  const [newProjName, setNewProjName] = useState("");
-  const [newProjPath, setNewProjPath] = useState("");
-
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutSettingsOpen, setShortcutSettingsOpen] = useState(false);
   const [serverURL, setServerURL] = useState("");
@@ -122,8 +123,6 @@ export function StudioDashboard({
   const [aliasValue, setAliasValue] = useState("");
   const [savingAlias, setSavingAlias] = useState(false);
   const [aliasError, setAliasError] = useState("");
-
-  const [dialogDeviceId, setDialogDeviceId] = useState("");
 
   useEffect(() => {
     if (devices.length > 0 && !selectedDeviceId) {
@@ -143,72 +142,7 @@ export function StudioDashboard({
     (proj) => activeDevice && proj.device_id === activeDevice.id
   );
 
-  const lastOpenRef = useRef(false);
-  const lastDeviceIdRef = useRef("");
-
-  // Initialize and sync directory browsing path
-  useEffect(() => {
-    if (createOpen) {
-      if (!lastOpenRef.current) {
-        lastOpenRef.current = true;
-        const initialDevId = selectedDeviceId || (devices[0]?.id || "");
-        setDialogDeviceId(initialDevId);
-        setNewProjName("");
-        setError("");
-
-        const dev = devices.find((d) => d.id === initialDevId);
-        const initialPath = dev?.workspaces?.[0]?.path || "~";
-        setNewProjPath(initialPath);
-
-        lastDeviceIdRef.current = initialDevId;
-      } else if (dialogDeviceId && dialogDeviceId !== lastDeviceIdRef.current) {
-        lastDeviceIdRef.current = dialogDeviceId;
-        const dev = devices.find((d) => d.id === dialogDeviceId);
-        const initialPath = dev?.workspaces?.[0]?.path || "~";
-        setNewProjPath(initialPath);
-      }
-    } else {
-      lastOpenRef.current = false;
-      lastDeviceIdRef.current = "";
-    }
-  }, [createOpen, dialogDeviceId, devices, selectedDeviceId]);
-
-
-
-
-
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    const devId = dialogDeviceId || selectedDeviceId;
-    if (!newProjName.trim() || !devId || !newProjPath.trim()) {
-      setError("所有字段均为必填项");
-      return;
-    }
-    setSubmitting(true);
-    setError("");
-    try {
-      await postJSON<Project>("/api/project/create", {
-        name: newProjName.trim(),
-        device_id: devId,
-        workspace_path: newProjPath.trim(),
-      });
-      setNewProjName("");
-      setNewProjPath("");
-      setCreateOpen(false);
-      onRefreshProjects();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-
-
-
-
   function openCreateModal() {
-    setError("");
     setCreateOpen(true);
   }
 
@@ -333,6 +267,14 @@ export function StudioDashboard({
             triggerClassName="hidden sm:flex"
           />
           <ZoomSelect value={pageZoom} onChange={onPageZoomChange} />
+          <Button
+            size="sm"
+            onClick={openCreateModal}
+            className="h-6 rounded-md bg-primary px-2.5 text-[10px] font-semibold text-primary-foreground hover:bg-primary/90 shadow-sm shadow-primary/20 flex items-center gap-1 cursor-pointer"
+          >
+            <Plus className="h-3 w-3" />
+            <span>新建会话</span>
+          </Button>
           <button
             type="button"
             onClick={onRefreshProjects}
@@ -345,9 +287,9 @@ export function StudioDashboard({
             type="button"
             onClick={() => setShortcutSettingsOpen(true)}
             className="flex h-6 w-6 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground cursor-pointer"
-            title="快捷键设置"
+            title="设置（快捷键 · 技能与 Agent）"
           >
-            <Keyboard className="h-3.5 w-3.5" />
+            <Sparkles className="h-3.5 w-3.5" />
           </button>
           <button
             type="button"
@@ -427,6 +369,16 @@ export function StudioDashboard({
                           <span className="font-mono text-[9px] font-bold text-muted-foreground/80">{projectCount}</span>
                           <button
                             type="button"
+                            onClick={() => onManageDeviceAgents?.(device.id)}
+                            className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground/70 transition-opacity hover:bg-card hover:text-foreground group-hover:opacity-100 focus:opacity-100 cursor-pointer"
+                            style={{ opacity: 1 }}
+                            title="管理此设备的技能与智能体"
+                            aria-label="管理此设备的技能与智能体"
+                          >
+                            <Bot className="h-3 w-3" />
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => openAliasDialog(device)}
                             className="flex h-5 w-5 items-center justify-center rounded text-muted-foreground/70 opacity-0 transition-opacity hover:bg-card hover:text-foreground group-hover:opacity-100 focus:opacity-100"
                             title="编辑设备别名"
@@ -477,10 +429,10 @@ export function StudioDashboard({
                   size="sm"
                   onClick={openCreateModal}
                   disabled={!activeDevice}
-                  className="h-6 rounded-md bg-primary px-2 text-[10px] font-semibold text-primary-foreground hover:bg-primary/90 shadow-sm shadow-primary/15 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+                  className="h-6 rounded-md bg-primary px-2.5 text-[10px] font-semibold text-primary-foreground hover:bg-primary/90 shadow-sm shadow-primary/15 flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Plus className="h-3 w-3" />
-                  创建
+                  新建会话
                 </Button>
               </div>
             </div>
@@ -494,7 +446,7 @@ export function StudioDashboard({
                     </div>
                     <h3 className="text-sm font-bold text-foreground">暂无项目</h3>
                     <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
-                      该设备还没有关联项目目录。创建一个项目后可直接进入工作区。
+                      该设备还没有关联项目目录。创建一个会话后可直接进入工作区。
                     </p>
                     <Button
                       size="sm"
@@ -502,7 +454,7 @@ export function StudioDashboard({
                       className="mt-4 h-8 rounded-md bg-primary px-3 text-xs font-semibold text-primary-foreground hover:bg-primary/90 cursor-pointer"
                     >
                       <Plus className="mr-1.5 h-3.5 w-3.5" />
-                      创建项目
+                      新建会话
                     </Button>
                   </div>
                 ) : (
@@ -531,110 +483,43 @@ export function StudioDashboard({
         </div>
       </main>
 
-      {/* ── Create Project Dialog ── */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-        <DialogContent className="max-w-md p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
-          <DialogHeader className="px-6 py-4 bg-muted/50 border-b border-border/70 flex-shrink-0">
-            <DialogTitle className="text-sm font-bold text-foreground flex items-center gap-2">
-              <div className="h-6.5 w-6.5 rounded-lg bg-accent border border-primary/15 flex items-center justify-center">
-                <FolderPlus className="h-3.5 w-3.5 text-primary" />
-              </div>
-              创建项目
-            </DialogTitle>
-          </DialogHeader>
-
-          <form onSubmit={handleCreate} className="p-6 space-y-4">
-            {error && (
-              <div className="bg-destructive/10 text-destructive rounded-xl p-3.5 border border-destructive/20 text-xs font-semibold">
-                {error}
-              </div>
-            )}
-
-            {/* Field: Target Device */}
-            {devices.length > 1 && (
-              <div className="space-y-1.5">
-                <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/80">
-                  开发机 (目标设备)
-                </Label>
-                <select
-                  value={dialogDeviceId}
-                  onChange={(e) => setDialogDeviceId(e.target.value)}
-                  className="w-full text-xs rounded-xl border border-border focus:border-primary/50 focus:ring-primary/20 bg-muted/40 h-9 px-3 outline-none"
-                >
-                  {devices.map((device) => (
-                    <option key={device.id} value={device.id}>
-                      {deviceDisplayName(device, device.id)} {device.id === selectedDeviceId ? "(当前选中)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            {/* Field: Name (Display Name) */}
-            <div className="space-y-1.5">
-              <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/80">
-                项目名称 (显示名称)
-              </Label>
-              <Input
-                required
-                value={newProjName}
-                onChange={(e) => setNewProjName(e.target.value)}
-                placeholder="例如 my-pocket-studio"
-                className="text-xs rounded-xl border-border focus:border-primary/50 focus:ring-primary/20 bg-muted/40 h-9"
-              />
-            </div>
-
-            {/* Field: Path */}
-            <div className="space-y-1.5">
-              <Label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/80">
-                项目路径
-              </Label>
-              <Input
-                required
-                value={newProjPath}
-                onChange={(e) => setNewProjPath(e.target.value)}
-                placeholder="例如 /home/user/projects/my-project"
-                className="text-xs rounded-xl border-border focus:border-primary/50 focus:ring-primary/20 bg-muted/40 font-mono h-9"
-              />
-            </div>
-
-            {/* Footer Buttons */}
-            <DialogFooter className="pt-3 flex justify-end gap-2 border-t border-border/70 flex-shrink-0">
-              <DialogClose
-                type="button"
-                className="inline-flex items-center justify-center text-xs rounded-xl border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 px-4 h-9 font-semibold transition-colors cursor-pointer"
-              >
-                取消
-              </DialogClose>
-              <Button
-                type="submit"
-                size="sm"
-                disabled={submitting}
-                className="text-xs h-9 px-4 rounded-xl bg-primary hover:bg-accent0 text-primary-foreground shadow shadow-primary/20 font-semibold cursor-pointer"
-              >
-                {submitting ? "正在创建..." : "确认创建"}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      {/* ── New Session Dialog ── */}
+      <NewSessionDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        devices={devices}
+        projects={projects}
+        initialDeviceId={selectedDeviceId}
+        onSubmit={async (spec) => {
+          if (onCreateSession) {
+            await onCreateSession(spec);
+          } else {
+            await postJSON<Project>("/api/project/create", {
+              name: spec.projectName?.trim() || spec.workspacePath,
+              device_id: spec.deviceId,
+              workspace_path: spec.workspacePath,
+            });
+            onRefreshProjects();
+          }
+        }}
+      />
 
       <Dialog open={shortcutSettingsOpen} onOpenChange={setShortcutSettingsOpen}>
-        <DialogContent className="w-[min(52rem,calc(100dvw-2rem))] max-w-none p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
+        <DialogContent className="w-[calc(100dvw-2rem)] sm:max-w-3xl md:max-w-4xl p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
           <DialogHeader className="px-6 py-4 bg-muted/50 border-b border-border/70">
             <DialogTitle className="text-sm font-bold text-foreground flex items-center gap-2">
               <div className="h-6.5 w-6.5 rounded-lg bg-accent border border-primary/15 flex items-center justify-center">
-                <Keyboard className="h-3.5 w-3.5 text-primary" />
+                <Settings className="h-3.5 w-3.5 text-primary" />
               </div>
-              快捷键
+              设置
             </DialogTitle>
           </DialogHeader>
-          <ShortcutSettingsContent />
+          <StudioSettingsContent deviceId={selectedDeviceId || devices[0]?.id || ""} />
         </DialogContent>
       </Dialog>
 
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
-        <DialogContent className="max-w-md p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
+        <DialogContent className="w-[calc(100dvw-2rem)] sm:max-w-md p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
           <DialogHeader className="px-6 py-4 bg-muted/50 border-b border-border/70">
             <DialogTitle className="text-sm font-bold text-foreground flex items-center gap-2">
               <div className="h-6.5 w-6.5 rounded-lg bg-accent border border-primary/15 flex items-center justify-center">
@@ -748,7 +633,7 @@ export function StudioDashboard({
           setAliasError("");
         }
       }}>
-        <DialogContent className="max-w-sm p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
+        <DialogContent className="w-[calc(100dvw-2rem)] sm:max-w-sm p-0 overflow-hidden border-border/80 shadow-2xl rounded-2xl animate-scale-in">
           <DialogHeader className="px-6 py-4 bg-muted/50 border-b border-border/70">
             <DialogTitle className="text-sm font-bold text-foreground flex items-center gap-2">
               <div className="h-6.5 w-6.5 rounded-lg bg-accent border border-primary/15 flex items-center justify-center">

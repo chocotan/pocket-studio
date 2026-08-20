@@ -1,0 +1,142 @@
+{
+  "runId": "5b7fc443",
+  "agent": "scout",
+  "task": "Recon the pocket-studio repo at /home/choco/Downloads/remote-agent (Go daemon + Go server + React frontends using xterm.js). The goal is to understand what it takes to support inline terminal images (iTerm2 OSC 1337 protocol) end-to-end. Determine:\n\n1. **xterm.js setup** in studio-frontend/src/components/studio/xterm-instance.tsx: how the Terminal is constructed, which addons are registered, xterm version in package.json, whether @xterm/addon-image is already a dependency. Note where an addon would be registered.\n\n2. **Terminal output data path**: daemon (internal/daemon) reads PTY → websocket to server → server relays to web frontend → frontend writes to xterm. For each hop report: are frames text or binary? Is there JSON envelope wrapping? Any message size limits, chunking, base64, or escape-sequence sanitization that could corrupt a multi-MB OSC 1337 sequence (single very long line with base64)? Check websocket read/write limits in internal/server/hub.go and daemon code, and how the frontend receives terminal stream data (web-transport.ts or per-terminal ws).\n\n3. **Env vars for spawned shells**: what env does the daemon set when spawning terminal shells (search internal/daemon for TERM=, TERM_PROGRAM, COLORTERM, os.Environ)? Would a CLI agent in this terminal believe it supports inline images? Where would we add TERM_PROGRAM / ITERM_SESSION_ID?\n\n4. Anything else relevant: Electron main.cjs image-relevant config, existing image paste support (terminal-image-paste.ts — input side only?), flow control / backpressure handling.\n\nReturn exact file paths + line numbers + short snippets. Do not modify anything.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/choco/Downloads/remote-agent/.pi-subagents/artifacts/outputs/5b7fc443/context.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "usage": {
+    "input": 162337,
+    "output": 18556,
+    "cacheRead": 2962091,
+    "cacheWrite": 0,
+    "cost": 0,
+    "turns": 74
+  },
+  "model": "newapi/minimax-m3:medium",
+  "attemptedModels": [
+    "newapi/minimax-m3:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "newapi/minimax-m3:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 162337,
+        "output": 18556,
+        "cacheRead": 2962091,
+        "cacheWrite": 0,
+        "cost": 0,
+        "turns": 74
+      }
+    }
+  ],
+  "durationMs": 293966,
+  "toolCount": 73,
+  "launchContractDigest": "013dc05394b323aef38e2d6f496637ab660bffea52dfe83cba6cc588083aa6c7",
+  "acceptance": {
+    "status": "attested",
+    "evidenceStatus": "attested",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Findings written to .pi-subagents/artifacts/outputs/5b7fc443/context.md with exact file paths, line numbers, and code snippets covering: (1) xterm 6.0.0 + addon-fit 0.11.0; @xterm/addon-image not installed; registration point at xterm-instance.tsx:728; allowProposedApi:true already set at line 693. (2) Data path: end-to-end binary with no JSON envelope, no base64, no sanitization; PSTD magic binary frame at protocol.go:415-447; server forwardTerminalStreamData at hub.go:2641-2651; frontend socket.binaryType=arraybuffer at xterm-instance.tsx:937. Identified write deadline 2s in hub.go:35 and direct_web.go:36 as risk for multi-MB OSC 1337. (3) terminalEnv() at daemon.go:4758-4802 already sets TERM_PROGRAM=PocketStudio; ITERM_SESSION_ID is missing; tmux config at daemon.go:4724-4726 is missing iterm2/tc feature which will filter OSC 1337 — flagged as primary blocker. (4) Electron main.cjs has no image config; terminal-image-paste.ts is input-only; backpressure details provided."
+        }
+      ],
+      "changedFiles": [
+        ".pi-subagents/artifacts/outputs/5b7fc443/context.md"
+      ],
+      "testsAddedOrUpdated": [],
+      "commandsRun": [
+        {
+          "command": "ls studio-frontend/node_modules/@xterm/",
+          "result": "passed",
+          "summary": "Confirmed only addon-fit and xterm installed; addon-image absent"
+        },
+        {
+          "command": "grep -rn addon-image /home/choco/Downloads/remote-agent",
+          "result": "passed",
+          "summary": "Zero hits outside node_modules; addon-image not used anywhere in source"
+        },
+        {
+          "command": "grep ITERM_SESSION_ID internal/",
+          "result": "passed",
+          "summary": "No matches; env var not currently set"
+        },
+        {
+          "command": "grep SetReadLimit|MaxMessageSize in source",
+          "result": "passed",
+          "summary": "No read limits configured on any websocket (gorilla defaults apply)"
+        }
+      ],
+      "validationOutput": [
+        "Read scope: package.json, xterm-instance.tsx (full 47kB), terminal-image-paste.ts, web-transport.ts, terminal-ime-input.ts, terminal-keyboard-input.ts, electron/main.cjs (relevant lines), api.ts, vite.config.ts",
+        "Read scope (Go): terminal_output_batch.go, protocol.go (relevant sections), daemon.go lines 300-600, 1100-1250, 3020-3120, 4200-4360, 4650-4810, 4900-4920, 5650-5730, hub.go lines 30-40, 240-260, 820-920, 1250-1280, 1720-1790, 2120-2180, 2630-2680, 2840-2930, 3870-4030, direct_web.go (full)"
+      ],
+      "residualRisks": [
+        "BLOCKER: tmux config at internal/daemon/daemon.go:4724-4726 does not enable iterm2/tc in terminal-features; OSC 1337 will be filtered by tmux even after ImageAddon is added on the frontend",
+        "RISK: 2-second write deadline (hub.go:35, direct_web.go:36) may drop the web subscriber mid-frame for very large inline images (>~1MB)",
+        "RISK: Most CLI agents key on TERM_PROGRAM=iTerm.app; setting TERM_PROGRAM=PocketStudio is not enough on its own — ITERM_SESSION_ID should be set per-terminalID"
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "Wrote context.md (380 lines) with file paths, line ranges, code snippets, architecture diagram, and prioritized 'Start Here' section. No source files modified.",
+      "reviewFindings": [
+        "no blockers: scout-only task; context.md is the deliverable and contains concrete paths + line numbers for the four required areas",
+        "watchpoint: xterm 6.0.0 with allowProposedApi:true is compatible with @xterm/addon-image >= 0.7.0; verify chosen version supports PTY-mode multi-MB OSC 1337",
+        "watchpoint: when implementing, the tmux iterm2 feature flag is the highest-impact change — without it, frontend changes have zero visible effect"
+      ],
+      "manualNotes": "Primary scout deliverable is the context.md file. Three concrete next steps for the implementation agent: (a) add @xterm/addon-image dep + loadAddon in xterm-instance.tsx after line 728; (b) edit pocketStudioTmuxConfig at daemon.go:4724-4726 to add :iterm2 to terminal-features; (c) add ITERM_SESSION_ID=<terminalID> in terminalEnv() at daemon.go:4793-4799. The data path is already byte-preserving so no server/protocol changes are needed. No edits to internal/server/hub.go or internal/protocol/protocol.go required for this feature."
+    }
+  },
+  "effects": {
+    "fileMutation": {
+      "status": "not-applicable",
+      "expected": false,
+      "attempted": true
+    }
+  },
+  "transcriptPath": "/home/choco/Downloads/remote-agent/.pi-subagents/artifacts/5b7fc443_scout_0_transcript.jsonl",
+  "timestamp": 1786498066616
+}

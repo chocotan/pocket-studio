@@ -345,7 +345,7 @@ func TestDirectACPPromptContentIncludesWorkspaceImage(t *testing.T) {
 		Attachments: []protocol.TaskAttachment{{
 			Type: "image", Name: "pasted.png", Path: "pasted.png", MimeType: "image/png",
 		}},
-	})
+	}, directACPCapabilities{Image: true})
 	if err != nil {
 		t.Fatalf("directACPPromptContent() error = %v", err)
 	}
@@ -390,9 +390,38 @@ func TestDirectACPPromptContentRejectsImageSymlinkOutsideWorkspace(t *testing.T)
 	client := &directACPClient{workspace: dir}
 	_, err := directACPPromptContent(client, protocol.TaskDispatch{
 		Attachments: []protocol.TaskAttachment{{Type: "image", Path: "linked.png", MimeType: "image/png"}},
-	})
+	}, directACPCapabilities{Image: true})
 	if err == nil || !strings.Contains(err.Error(), "outside workspace") {
 		t.Fatalf("directACPPromptContent() error = %v, want outside workspace", err)
+	}
+}
+
+func TestDirectACPPromptContentDropsImagesWhenUnsupported(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pasted.png"), []byte("\x89PNG image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	client := &directACPClient{workspace: dir}
+	// dsh advertises promptCapabilities.image=false; the text turn must still go out.
+	prompt, err := directACPPromptContent(client, protocol.TaskDispatch{
+		Prompt: "describe this",
+		Attachments: []protocol.TaskAttachment{{
+			Type: "image", Name: "pasted.png", Path: "pasted.png", MimeType: "image/png",
+		}},
+	}, directACPCapabilities{Image: false})
+	if err != nil {
+		t.Fatalf("directACPPromptContent() error = %v", err)
+	}
+	if len(prompt) != 1 || prompt[0]["type"] != "text" {
+		t.Fatalf("prompt = %#v, want text-only", prompt)
+	}
+
+	// Image-only prompt against an image-incapable agent fails with a clear error.
+	_, err = directACPPromptContent(client, protocol.TaskDispatch{
+		Attachments: []protocol.TaskAttachment{{Type: "image", Path: "pasted.png", MimeType: "image/png"}},
+	}, directACPCapabilities{Image: false})
+	if err == nil || !strings.Contains(err.Error(), "image") {
+		t.Fatalf("image-only error = %v, want image unsupported message", err)
 	}
 }
 

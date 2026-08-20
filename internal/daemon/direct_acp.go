@@ -65,6 +65,7 @@ type directACPCapabilities struct {
 	List   bool
 	Load   bool
 	Resume bool
+	Image  bool // promptCapabilities.image from initialize; dsh (automation-only ACP) reports false
 }
 
 func (d *Daemon) listDirectACPSessions(parent context.Context, request protocol.SessionListRequest) {
@@ -244,6 +245,7 @@ func (d *Daemon) createDirectACPSession(ctx context.Context, task protocol.TaskD
 		modelConfigID: modelConfigID,
 		configIDs:     directACPConfigIDs(configOptions.ConfigOptions),
 		client:        client,
+		capabilities:  capabilities,
 		persisted:     recovered,
 	}
 	record := d.history[taskID]
@@ -358,9 +360,20 @@ func (d *Daemon) openDirectACPSession(ctx context.Context, client *directACPClie
 	}
 	if sessionID != "" {
 		if len(restoreErrors) == 0 {
-			return nil, false, fmt.Errorf("restore direct ACP session %q: agent does not support resume or load", sessionID)
+			// Automation-only agents (dsh) advertise neither load nor resume by
+			// design; fall through to a fresh session instead of hard-failing the
+			// turn, but surface the downgrade so the UI can explain the lost history.
+			if client.emitter != nil {
+				client.emitter.emit("session.restore_unavailable", map[string]any{
+					"agent":        agentName,
+					"session_id":   sessionID,
+					"capabilities": map[string]any{"load": capabilities.Load, "resume": capabilities.Resume},
+					"message":      fmt.Sprintf("%s does not support session restore; starting a new session", agentName),
+				}, nil)
+			}
+		} else {
+			return nil, false, fmt.Errorf("restore direct ACP session %q: %s", sessionID, strings.Join(restoreErrors, "; "))
 		}
-		return nil, false, fmt.Errorf("restore direct ACP session %q: %s", sessionID, strings.Join(restoreErrors, "; "))
 	}
 	raw, err := client.request(ctx, "session/new", map[string]any{
 		"cwd":        workspacePath,
@@ -706,7 +719,7 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 		}
 	}
 
-	prompt, promptErr := directACPPromptContent(client, task)
+	prompt, promptErr := directACPPromptContent(client, task, session.capabilities)
 	var err error
 	if promptErr != nil {
 		err = promptErr
@@ -750,13 +763,25 @@ func (d *Daemon) startDirectACPTask(parent context.Context, task protocol.TaskDi
 	emitter.emit("task.completed", map[string]any{"exit_code": 0}, nil)
 }
 
-func directACPPromptContent(client *directACPClient, task protocol.TaskDispatch) ([]map[string]any, error) {
+func directACPPromptContent(client *directACPClient, task protocol.TaskDispatch, capabilities directACPCapabilities) ([]map[string]any, error) {
 	const maxImageAttachmentSize = 20 << 20
+	supportsImage := capabilities.Image
 	prompt := make([]map[string]any, 0, 1+len(task.Attachments))
 	if text := strings.TrimSpace(task.Prompt); text != "" {
 		prompt = append(prompt, map[string]any{"type": "text", "text": task.Prompt})
 	}
+	var skippedImages []string
 	for _, attachment := range task.Attachments {
+		if attachment.Type != "" && attachment.Type != "image" {
+			return nil, fmt.Errorf("unsupported ACP attachment type %q", attachment.Type)
+		}
+		if !supportsImage {
+			// Agents with promptCapabilities.image=false (e.g. dsh's automation-only
+			// ACP) reject the WHOLE session/prompt when any image block is present,
+			// so drop the attachment and keep the text turn deliverable.
+			skippedImages = append(skippedImages, attachment.Path)
+			continue
+		}
 		if attachment.Type != "" && attachment.Type != "image" {
 			return nil, fmt.Errorf("unsupported ACP attachment type %q", attachment.Type)
 		}
@@ -797,7 +822,18 @@ func directACPPromptContent(client *directACPClient, task protocol.TaskDispatch)
 		})
 	}
 	if len(prompt) == 0 {
+		if len(skippedImages) > 0 {
+			return nil, fmt.Errorf("%s does not accept image attachments", normalizeAgentName(task.Agent))
+		}
 		return nil, errors.New("ACP prompt is empty")
+	}
+	if len(skippedImages) > 0 && client.emitter != nil {
+		client.emitter.emit("attachment.dropped", map[string]any{
+			"agent":   normalizeAgentName(task.Agent),
+			"reason":  "agent_does_not_support_images",
+			"paths":   skippedImages,
+			"task_id": task.TaskID,
+		}, nil)
 	}
 	return prompt, nil
 }
@@ -1666,10 +1702,17 @@ func directACPCapabilitiesFromInitialize(raw json.RawMessage) directACPCapabilit
 	if sessionCaps == nil {
 		sessionCaps, _ = caps["session_capabilities"].(map[string]any)
 	}
+	promptCaps, _ := caps["promptCapabilities"].(map[string]any)
+	if promptCaps == nil {
+		promptCaps, _ = caps["prompt_capabilities"].(map[string]any)
+	}
 	return directACPCapabilities{
 		List:   directACPCapabilityEnabled(sessionCaps["list"]),
 		Load:   directACPCapabilityEnabled(caps["loadSession"]) || directACPCapabilityEnabled(caps["load_session"]),
 		Resume: directACPCapabilityEnabled(sessionCaps["resume"]),
+		// Absent promptCapabilities means "unknown"; agents that did not opt in
+		// to the flag historically all accept images, so default to true.
+		Image: promptCaps == nil || directACPCapabilityEnabled(promptCaps["image"]),
 	}
 }
 

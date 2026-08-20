@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,7 +34,7 @@ type directAgentChatSubscriber struct {
 
 var directWebUpgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
-const directTerminalWriteTimeout = 2 * time.Second
+const directTerminalWriteTimeout = 10 * time.Second
 const directAgentChatWriteTimeout = 2 * time.Second
 
 func (d *Daemon) startDirectWebServer(ctx context.Context) (func(), error) {
@@ -109,6 +110,14 @@ func (d *Daemon) handleDirectTerminalWebSocket(w http.ResponseWriter, r *http.Re
 		workspacePath = customPath
 	}
 
+	// use_tmux=0 opts the terminal out of the tmux backend (plain PTY, needed
+	// for inline images). Absent means the daemon default (tmux enabled).
+	var useTmux *bool
+	if raw := strings.TrimSpace(r.URL.Query().Get("use_tmux")); raw != "" {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			useTmux = &parsed
+		}
+	}
 	start := protocol.TerminalStreamStart{
 		ProjectID:     projectID,
 		TerminalID:    terminalID,
@@ -118,6 +127,8 @@ func (d *Daemon) handleDirectTerminalWebSocket(w http.ResponseWriter, r *http.Re
 		InitialTitle:  initialTerminalTitle(r.URL.Query().Get("command"), ""),
 		Cols:          parseDirectTerminalDimension(r.URL.Query().Get("cols")),
 		Rows:          parseDirectTerminalDimension(r.URL.Query().Get("rows")),
+		UseTmux:       useTmux,
+		CustomAgentID:   strings.TrimSpace(r.URL.Query().Get("custom_agent_id")),
 	}
 	// A direct browser socket is only one subscriber. Do not bind the PTY/title
 	// watcher lifetime to this request context, otherwise a transient browser
@@ -296,11 +307,44 @@ func (d *Daemon) directEndpoint() *protocol.DirectEndpoint {
 
 func (d *Daemon) projectForDirectTerminal(projectID string) (protocol.Project, bool) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	if project, ok := d.projects[projectID]; ok {
+		d.mu.Unlock()
 		return project, true
 	}
-	return protocol.Project{}, false
+	d.mu.Unlock()
+	// The project ID may exist only in the workspace→ID mapping (e.g. a
+	// configured workspace that was never opened via ProjectCreate, but whose
+	// ID the server derived from the daemon hello and handed to the studio
+	// frontend). Resolve the ID back to a workspace path and synthesize the
+	// project so direct terminals still work without a ProjectCreate round
+	// trip.
+	path := d.workspacePathForProjectID(projectID)
+	if path == "" {
+		return protocol.Project{}, false
+	}
+	return protocol.Project{
+		ID:            projectID,
+		Name:          filepath.Base(path),
+		DeviceID:      d.cfg.Device.ID,
+		WorkspacePath: path,
+		AgentIDs:      []string{},
+		TmuxIDs:       []string{},
+		DirectMode:    true,
+	}, true
+}
+
+// workspacePathForProjectID reverses the persisted workspace→project-ID map.
+func (d *Daemon) workspacePathForProjectID(projectID string) string {
+	ids, err := loadWorkspaceProjectIDs()
+	if err != nil {
+		return ""
+	}
+	for path, id := range ids {
+		if id == projectID {
+			return path
+		}
+	}
+	return ""
 }
 
 func parseDirectTerminalDimension(value string) uint16 {

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "d73b9f9d-659c-4254-8677-1d6e5b072b12",
+  "title": "Recon the remote-agent codebase at /home/choco/Downloads/remote-agent. I need to add new 'skill.*...",
+  "objective": "Recon the remote-agent codebase at /home/choco/Downloads/remote-agent. I need to add new 'skill.*' request/response messages handled by the daemon and routed through two channels: (1) server hub envelope relay (internal/server/hub.go + internal/daemon/daemon.go), (2) daemon direct web websocket (internal/daemon/direct_web.go).\\nReport concisely:\\n1. How an existing CRUD-style request flows from Studio UI -> server hub -> daemon -> back to requesting client ONLY (not broadcast). Pick the workspace management or project CRUD message as the template. Exact function names, message type constants, envelope structure (internal/protocol/protocol.go Envelope type), request_id correlation pattern.\\n2. How the same request flows through direct_web.go (daemon direct websocket): message parsing, dispatch switch, response envelope, auth token check.\\n3. Where DaemonHello.Features is populated and how frontend gates UI on features.\\n4. How frontend sends such requests: find the WS client helper in studio-frontend/src that sends envelope messages and awaits responses by request_id (probably in App.tsx or a lib). Exact file/function.\\n5. The atomic file write helper in internal/daemon/atomic_file.go - signature and usage.\\n6. How startTerminalStream receives TerminalStreamStart and where req.Command is built for tmux (exact lines around daemon.go:4264-4300).\\n7. Any existing frontend 'settings'-like panel/page component that could host a new Skill Library UI tab - where settings UI lives (component file names).\\nReturn: file paths + line numbers + short code excerpts for each. No speculation.",
+  "status": "active",
+  "createdAt": "2026-08-17T09:52:54.102Z",
+  "updatedAt": "2026-08-17T09:52:54.143Z",
+  "runs": [
+    {
+      "runId": "8f5c9160-ad13-44e6-8344-17be3ab3072d",
+      "mode": "workflow",
+      "asyncDir": "/tmp/pi-subagents-uid-1000/async-subagent-runs/8f5c9160-ad13-44e6-8344-17be3ab3072d",
+      "status": "active",
+      "startedAt": "2026-08-17T09:52:54.105Z"
+    }
+  ],
+  "decisions": [],
+  "artifacts": [
+    {
+      "kind": "status",
+      "path": "/tmp/pi-subagents-uid-1000/async-subagent-runs/8f5c9160-ad13-44e6-8344-17be3ab3072d/status.json"
+    },
+    {
+      "kind": "other",
+      "path": "/tmp/pi-subagents-uid-1000/async-subagent-runs/8f5c9160-ad13-44e6-8344-17be3ab3072d/events.jsonl",
+      "description": "Lifecycle events"
+    }
+  ],
+  "receipts": [],
+  "cwd": "/home/choco/Downloads/remote-agent",
+  "ownerSessionId": "/home/choco/.pi/agent/sessions/--home-choco-Downloads-remote-agent--/2026-08-17T07-40-39-671Z_01a00eaa-5777-7c9e-910d-d4f4e98536db.jsonl"
+}

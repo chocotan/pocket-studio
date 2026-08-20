@@ -85,6 +85,17 @@ type SavedStudioState = {
   floatingPanels?: unknown;
 };
 
+export interface InitialTabIntent {
+  kind: "agent_chat" | "terminal" | "file_explorer";
+  agentKind?: string;
+  agentRuntime?: "direct_acp";
+  termType?: TerminalKind;
+  useTmux?: boolean;
+  resumeSessionId?: string;
+  title?: string;
+  customAgent?: { id: string; name: string };
+}
+
 interface UseWorkspaceLayoutProps {
   projectId: string;
   project: Project;
@@ -94,6 +105,8 @@ interface UseWorkspaceLayoutProps {
   notificationJumpTarget: NotificationJumpTarget | null;
   onNotificationJumpHandled: (nonce: number) => void;
   onNotificationTargetsChange: (hostProjectId: string, targets: NotificationHostTarget[]) => void;
+  initialTabIntent?: InitialTabIntent | null;
+  onInitialTabIntentHandled?: () => void;
 }
 
 export function useWorkspaceLayout({
@@ -105,6 +118,8 @@ export function useWorkspaceLayout({
   notificationJumpTarget,
   onNotificationJumpHandled,
   onNotificationTargetsChange,
+  initialTabIntent,
+  onInitialTabIntentHandled,
 }: UseWorkspaceLayoutProps) {
   const initialState = initialStudioState(project);
   const [layoutTree, setLayoutTree] = useState<LayoutNode | null>(initialState.layoutTree);
@@ -690,13 +705,17 @@ export function useWorkspaceLayout({
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleAddTab(panelId: string, kind: TerminalKind, tabProjectId?: string, filePath?: string) {
-    const tab = createTerminalTab(kind, tabProjectId, filePath);
+  function handleAddTab(panelId: string, kind: TerminalKind, tabProjectId?: string, filePath?: string, useTmux?: boolean, customAgent?: { id: string; name: string }) {
+    const tab = createTerminalTab(kind, tabProjectId, filePath, useTmux, customAgent);
     setLayoutTree((prev) => (prev ? addTabToPanel(prev, panelId, tab) : createTerminalPanel(kind, panelId, tabProjectId, filePath)));
     setFocusedId(panelId);
     setNewTerminalType(kind);
     setAddMenuPanelId(null);
     setLayoutVersion((value) => value + 1);
+  }
+
+  function handleAddCustomAgentTab(panelId: string, agent: { id: string; name: string; base_agent: string }, tabProjectId?: string, useTmux?: boolean) {
+    handleAddTab(panelId, agent.base_agent as TerminalKind, tabProjectId, undefined, useTmux, { id: agent.id, name: agent.name });
   }
 
   function handleAddFileExplorer(panelId: string, tabProjectId?: string, filePath?: string) {
@@ -864,8 +883,11 @@ export function useWorkspaceLayout({
     setLayoutTree((tree) => (tree ? updateTabTitleInTree(tree, tabId, nextTitle, nextCommand, nextSource) : tree));
   }
 
-  function handleCreateInitialPanel(kind: TerminalKind) {
-    const panel = createTerminalPanel(kind, undefined, projectId);
+  function handleCreateInitialPanel(kind: TerminalKind, useTmux?: boolean, customAgent?: { id: string; name: string }) {
+    const panel = createTerminalPanel(kind, undefined, projectId, undefined, useTmux);
+    if (customAgent && panel.tabs[0]) {
+      panel.tabs[0] = { ...panel.tabs[0], customAgentId: customAgent.id, customAgentName: customAgent.name, title: customAgent.name };
+    }
     setLayoutTree(panel);
     setFocusedId(panel.id);
     setNewTerminalType(kind);
@@ -887,6 +909,85 @@ export function useWorkspaceLayout({
     setAddMenuPanelId(null);
     setLayoutVersion((value) => value + 1);
   }
+
+  function handleCreateInitialAgentChat(agentKind: string, agentRuntime: StudioTab["agentRuntime"] = "direct_acp", resumeSessionId?: string, title?: string) {
+    const tab = createAgentChatTab(agentKind, undefined, title, agentRuntime, projectId, undefined, resumeSessionId);
+    const panel: TerminalPanel = {
+      type: "panel",
+      id: makeId("panel"),
+      tabs: [tab],
+      activeTabId: tab.id,
+      focus: true,
+    };
+    setLayoutTree(panel);
+    setFocusedId(panel.id);
+    setAddMenuPanelId(null);
+    setLayoutVersion((value) => value + 1);
+  }
+
+  function handleCreateInitialCustomAgent(agent: { id: string; name: string; base_agent: string }, useTmux?: boolean) {
+    handleCreateInitialPanel(agent.base_agent as TerminalKind, useTmux ?? true, { id: agent.id, name: agent.name });
+  }
+
+  useEffect(() => {
+    if (!stateLoaded || loadedProjectId !== projectId || !initialTabIntent) return;
+    const intent = initialTabIntent;
+    onInitialTabIntentHandled?.();
+
+    if (intent.kind === "agent_chat") {
+      const agentKind = intent.agentKind || "opencode";
+      const agentRuntime = intent.agentRuntime || "direct_acp";
+      setLayoutTree((prev) => {
+        if (!prev) {
+          const tab = createAgentChatTab(agentKind, undefined, intent.title, agentRuntime, projectId, undefined, intent.resumeSessionId);
+          return {
+            type: "panel",
+            id: makeId("panel"),
+            tabs: [tab],
+            activeTabId: tab.id,
+            focus: true,
+          };
+        }
+        const currentPanels = collectAllPanels(prev);
+        const targetId = focusedId || currentPanels[0]?.id || makeId("panel");
+        const tab = createAgentChatTab(agentKind, undefined, intent.title, agentRuntime, projectId, undefined, intent.resumeSessionId);
+        return addTabToPanel(prev, targetId, tab);
+      });
+      setLayoutVersion((value) => value + 1);
+    } else if (intent.kind === "file_explorer") {
+      setLayoutTree((prev) => {
+        if (!prev) {
+          const tab = createFileExplorerTab(projectId);
+          return {
+            type: "panel",
+            id: makeId("panel"),
+            tabs: [tab],
+            activeTabId: tab.id,
+            focus: true,
+          };
+        }
+        const currentPanels = collectAllPanels(prev);
+        const targetId = focusedId || currentPanels[0]?.id || makeId("panel");
+        const tab = createFileExplorerTab(projectId);
+        return addTabToPanel(prev, targetId, tab);
+      });
+      setLayoutVersion((value) => value + 1);
+    } else {
+      const termType = intent.termType || "bash";
+      const customAgent = intent.customAgent;
+      setLayoutTree((prev) => {
+        if (!prev) {
+          return createTerminalPanel(termType, undefined, projectId, undefined, intent.useTmux);
+        }
+        const currentPanels = collectAllPanels(prev);
+        const targetId = focusedId || currentPanels[0]?.id || makeId("panel");
+        const tab = createTerminalTab(termType, undefined, undefined, intent.useTmux, customAgent);
+        return addTabToPanel(prev, targetId, tab);
+      });
+      setNewTerminalType(termType);
+      setLayoutVersion((value) => value + 1);
+    }
+  }, [stateLoaded, loadedProjectId, projectId, initialTabIntent, focusedId, onInitialTabIntentHandled]);
 
 
 
@@ -943,8 +1044,8 @@ export function useWorkspaceLayout({
     setLayoutVersion((value) => value + 1);
   }
 
-  function handleCreateNewPanel(kind: TerminalKind, tabProjectId?: string, filePath?: string) {
-    const newTab = createTerminalTab(kind, tabProjectId, filePath);
+  function handleCreateNewPanel(kind: TerminalKind, tabProjectId?: string, filePath?: string, useTmux?: boolean, customAgent?: { id: string; name: string }) {
+    const newTab = createTerminalTab(kind, tabProjectId, filePath, useTmux, customAgent);
     const panelId = makeId("panel");
     insertNewPanel({
       type: "panel",
@@ -1005,6 +1106,7 @@ export function useWorkspaceLayout({
     handleSplit,
     handleClosePanel,
     handleAddTab,
+    handleAddCustomAgentTab,
     handleAddFileExplorer,
     handleAddAgentChat,
     handleUpdateTabProperties,
@@ -1019,7 +1121,9 @@ export function useWorkspaceLayout({
     handleTabDragEnd,
     handleTerminalTitle,
     handleCreateInitialPanel,
+    handleCreateInitialCustomAgent,
     handleCreateInitialFileExplorer,
+    handleCreateInitialAgentChat,
     handleCreateNewPanel,
     handleCreateNewFileExplorer,
     handleCreateNewAgentChat,

@@ -1,0 +1,1 @@
+No existing dsh or DeepSeek support — this confirms we need to add a new agent. Let me also check the protocol for session events and the related dispatcher:

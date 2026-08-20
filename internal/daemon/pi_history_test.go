@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"remote-agent/internal/protocol"
@@ -55,6 +56,59 @@ func TestLoadPiImportedHistoryPreservesToolCallsAndProviderTime(t *testing.T) {
 	}
 	if status := d.history["task-pi-history"].Status; status != "created" {
 		t.Fatalf("stored Pi history status = %q, want created", status)
+	}
+}
+
+func TestPiImportedHistoryStripsANSIFromThinking(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PI_CODING_AGENT_DIR", "")
+	const sessionID = "019f9d4f-536e-703f-8e61-ef812676d15f"
+	path := filepath.Join(home, ".pi", "agent", "sessions", "workspace", "history_"+sessionID+".jsonl")
+	writeHistoryFixture(t, path, "\n{\"type\":\"message\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"go\"}]}}\n{\"type\":\"message\",\"timestamp\":\"2026-01-01T00:00:05.250Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\\u001b[38;2;138;190;183mThinking:\\u001b[39m \\u001b[38;2;128;128;128mLet me look.\\u001b[39m\"},{\"type\":\"text\",\"text\":\"\\u001b[31mred reply\\u001b[39m\"}]}}\n")
+
+	events, err := loadPiImportedHistory(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		text := stringField(event.Data, "text")
+		if strings.ContainsRune(text, 0x1b) {
+			t.Fatalf("imported event %s still carries ANSI: %q", event.EventType, text)
+		}
+	}
+	wantThinking := "Thinking: Let me look."
+	if events[1].Data["text"] != wantThinking {
+		t.Fatalf("thinking text = %q, want %q", events[1].Data["text"], wantThinking)
+	}
+	if events[2].Data["text"] != "red reply" {
+		t.Fatalf("assistant text = %q, want %q", events[2].Data["text"], "red reply")
+	}
+}
+
+func TestExecuteToolCallWithTitleCommandSynthesizesInput(t *testing.T) {
+	d := New(Config{})
+	const taskID = "task-execute-title"
+	d.history[taskID] = protocol.TaskRecord{TaskID: taskID, AgentRuntime: "direct_acp"}
+	adapter := newAgentOutputAdapter(&taskEmitter{daemon: d, taskID: taskID}, 0, "")
+	// pi's bash adapter emits kind=execute with the full command in title
+	// and no rawInput at all.
+	adapter.handle(json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"call-exec-1","title":"git status --short && git log --oneline -3","kind":"execute","status":"completed"}}}`))
+
+	events := d.history[taskID].Events
+	if len(events) != 1 || events[0].EventType != "tool.call" {
+		t.Fatalf("execute tool events = %#v", events)
+	}
+	call := taskEventData(t, events[0])
+	input, _ := call["input"].(map[string]any)
+	if input["command"] != "git status --short && git log --oneline -3" {
+		t.Fatalf("synthesized execute input = %#v", call)
+	}
+	if call["kind"] != "execute" {
+		t.Fatalf("execute kind = %v, want execute", call["kind"])
+	}
+	if call["title"] != "git status --short && git log --oneline -3" {
+		t.Fatalf("execute title = %v", call["title"])
 	}
 }
 

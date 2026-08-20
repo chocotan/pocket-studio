@@ -27,6 +27,13 @@ export interface StudioTab {
   agentResumeSessionId?: string;
   agentImportHistory?: boolean;
   projectId?: string;
+  // Terminal backend: true (default) keeps sessions via tmux; false runs a
+  // plain PTY, required for inline image protocols (tmux filters them).
+  useTmux?: boolean;
+  // Daemon-managed custom agent definition (base CLI + skills + prompt) that
+  // overrides termType/command at launch. Empty keeps stock behavior.
+  customAgentId?: string;
+  customAgentName?: string;
 }
 
 export interface TerminalPanel {
@@ -53,17 +60,26 @@ export interface StudioState {
   newTerminalType: TerminalKind;
 }
 
-export function createTerminalTab(kind: TerminalKind, projectId?: string, filePath?: string): TerminalTab {
+export function createTerminalTab(
+  kind: TerminalKind,
+  projectId?: string,
+  filePath?: string,
+  useTmux?: boolean,
+  customAgent?: { id: string; name: string },
+): TerminalTab {
   const type = terminalType(kind);
   return {
     id: makeId("term"),
     kind: "terminal",
-    title: type.title,
+    title: customAgent?.name || type.title,
     termType: type.value,
     activeCommand: type.command,
     titleSource: "initial",
     projectId,
     filePath,
+    useTmux: useTmux ?? true,
+    customAgentId: customAgent?.id,
+    customAgentName: customAgent?.name,
   };
 }
 
@@ -123,8 +139,8 @@ export function createAgentChatTab(
   };
 }
 
-export function createTerminalPanel(kind: TerminalKind, id = makeId("panel"), projectId?: string, filePath?: string): TerminalPanel {
-  const tab = createTerminalTab(kind, projectId, filePath);
+export function createTerminalPanel(kind: TerminalKind, id = makeId("panel"), projectId?: string, filePath?: string, useTmux?: boolean): TerminalPanel {
+  const tab = createTerminalTab(kind, projectId, filePath, useTmux);
   return {
     type: "panel",
     id,
@@ -315,7 +331,9 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): StudioTab | nul
         ? (typeof tab.title === "string" && tab.title ? tab.title : basename(filePath) || "文件")
       : tabKind === "agent_chat"
         ? normalizeAgentChatTitle(tab.title, tab.agentKind)
-      : cleanTerminalTitle(typeof tab.title === "string" ? tab.title : "", type.title, kind),
+      : (typeof tab.customAgentName === "string" && tab.customAgentName
+          ? tab.customAgentName
+          : cleanTerminalTitle(typeof tab.title === "string" ? tab.title : "", type.title, kind)),
     termType: kind,
     activeCommand: typeof tab.activeCommand === "string" ? tab.activeCommand : "",
     titleSource: tab.titleSource === "tmux" ? tab.titleSource : "initial",
@@ -329,6 +347,8 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): StudioTab | nul
     agentResumeSessionId: typeof tab.agentResumeSessionId === "string" ? tab.agentResumeSessionId : undefined,
     agentImportHistory: tab.agentImportHistory === true,
     projectId: typeof tab.projectId === "string" ? tab.projectId : undefined,
+    customAgentId: typeof tab.customAgentId === "string" && tab.customAgentId ? tab.customAgentId : undefined,
+    customAgentName: typeof tab.customAgentName === "string" && tab.customAgentName ? tab.customAgentName : undefined,
   };
 }
 
@@ -362,6 +382,9 @@ function cleanTitleForTab(tab: StudioTab): string {
   if (tab.kind === "file_explorer") return "文件";
   if (tab.kind === "file_viewer") return tab.title;
   if (tab.kind === "agent_chat") return tab.title;
+  // Custom-agent tabs are titled by their agent name; keep it stable across
+  // saves so the restore path (sanitizeTab) sees the right title.
+  if (tab.kind === "terminal" && tab.customAgentName) return tab.customAgentName;
   return cleanTerminalTitle(tab.title, terminalType(tab.termType).title, tab.termType);
 }
 

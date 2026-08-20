@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { StudioDashboard, type Project } from "./components/studio/studio-dashboard";
 import { StudioWorkspace } from "./components/studio/studio-workspace";
+import { DeviceAgentsPage } from "./components/studio/device-agents-page";
 import type { NotificationHostTarget, NotificationJumpTarget, TerminalAlertEvent, TerminalNotification } from "./components/studio/terminal-notifications";
 import type { Device } from "./lib/types";
 import { getJSON, postJSON, loadClientConfig } from "./lib/api";
@@ -17,21 +18,25 @@ import {
   webNotificationPermission,
 } from "./lib/web-notifications";
 import { createStudioWebTransport, type StudioWebTransport, type StudioEnvelope } from "./components/studio/web-transport";
+import type { CreateSessionSpec } from "./components/studio/new-session-dialog";
+import type { InitialTabIntent } from "./components/studio/hooks/useWorkspaceLayout";
 
 const FAVORITES_KEY = "pocket-studio-favorites";
 const MAX_TERMINAL_NOTIFICATIONS = 100;
 
 export default function App() {
   const initialProjectId = projectIdFromPath();
-  const [view, setView] = useState<"studio_dashboard" | "studio_workspace">(
+  const [view, setView] = useState<"studio_dashboard" | "studio_workspace" | "device_agents">(
     initialProjectId ? "studio_workspace" : "studio_dashboard"
   );
+  const [agentsDeviceId, setAgentsDeviceId] = useState<string>("");
   const [devices, setDevices] = useState<Device[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [favorites, setFavorites] = useState<string[]>(() => loadFavorites());
   const [selectedProjectId, setSelectedProjectId] = useState<string>(initialProjectId);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
   const [pageZoom, setPageZoom] = useState<PageZoom>(() => loadZoom());
+  const [initialTabIntent, setInitialTabIntent] = useState<InitialTabIntent | null>(null);
   const [terminalNotifications, setTerminalNotifications] = useState<TerminalNotification[]>([]);
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
   const [notificationJumpTarget, setNotificationJumpTarget] = useState<NotificationJumpTarget | null>(null);
@@ -226,6 +231,44 @@ export default function App() {
     pushPath(studioPath(`/projects/${encodeURIComponent(projectId)}`));
   }
 
+  async function handleCreateSession(spec: CreateSessionSpec) {
+    let targetProject = projects.find(
+      (p) => p.device_id === spec.deviceId && p.workspace_path === spec.workspacePath
+    );
+
+    if (!targetProject) {
+      try {
+        const response = await postJSON<Project>("/api/project/create", {
+          name: spec.projectName?.trim() || deriveProjectName(spec.workspacePath),
+          device_id: spec.deviceId,
+          workspace_path: spec.workspacePath,
+        });
+        if (response && response.id) {
+          targetProject = response;
+          setProjects((current) => [...current, response]);
+        }
+      } catch (err) {
+        console.error("failed to auto-create project for session:", err);
+        throw err;
+      }
+    }
+
+    if (!targetProject) {
+      throw new Error("未能创建或找到对应的工作区项目");
+    }
+
+    setInitialTabIntent({
+      kind: spec.kind,
+      agentKind: spec.agentKind,
+      agentRuntime: spec.agentRuntime,
+      termType: spec.termType,
+      useTmux: spec.useTmux,
+      customAgent: spec.customAgent,
+    });
+
+    handleSelectProject(targetProject.id);
+  }
+
   async function handleDeleteProject(projectId: string) {
     try {
       const response = await postJSON<unknown>("/api/project/delete", {
@@ -414,9 +457,20 @@ export default function App() {
 
   const activeProject = orderedProjects.find((p) => p.id === selectedProjectId);
   const showWorkspace = view === "studio_workspace" && activeProject;
+  const showDeviceAgents = view === "device_agents";
   return (
     <div className="h-full w-full">
-      {!showWorkspace ? (
+      {showDeviceAgents ? (
+        <DeviceAgentsPage
+          deviceId={agentsDeviceId || selectedDeviceId || orderedDevices[0]?.id || ""}
+          devices={orderedDevices}
+          onSwitchDevice={setAgentsDeviceId}
+          onBack={() => {
+            refreshAll();
+            setView("studio_dashboard");
+          }}
+        />
+      ) : !showWorkspace ? (
         <StudioDashboard
           devices={orderedDevices}
           projects={orderedProjects}
@@ -439,6 +493,12 @@ export default function App() {
           onToggleWebNotifications={handleToggleWebNotifications}
           selectedDeviceId={selectedDeviceId}
           onSelectDevice={setSelectedDeviceId}
+          onCreateSession={handleCreateSession}
+          onManageDeviceAgents={(deviceId) => {
+            setAgentsDeviceId(deviceId);
+            setView("device_agents");
+            pushPath(studioPath("/"));
+          }}
         />
       ) : (
           <StudioWorkspace
@@ -454,6 +514,9 @@ export default function App() {
             pageZoom={pageZoom}
             onPageZoomChange={setPageZoom}
             onSelectProject={handleSelectProject}
+            onCreateSession={handleCreateSession}
+            initialTabIntent={initialTabIntent}
+            onInitialTabIntentHandled={() => setInitialTabIntent(null)}
             onTerminalFocused={handleTerminalFocused}
             notificationJumpTarget={notificationJumpTarget}
             onNotificationJumpHandled={handleNotificationJumpHandled}
@@ -479,6 +542,13 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function deriveProjectName(path: string) {
+  const normalized = (path || "").trim().replace(/[/\\]+$/, "");
+  if (!normalized || normalized === "~") return "workspace";
+  const parts = normalized.split(/[/\\]/);
+  return parts[parts.length - 1] || "workspace";
 }
 
 function projectIdFromPath() {
@@ -583,6 +653,7 @@ function terminalKindFromAgent(agent: unknown): TerminalKind | "" {
   if (normalized === "github-copilot") return "copilot";
   if (normalized === "cursor-agent") return "cursor";
   if (normalized === "open-claw") return "openclaw";
+  if (normalized === "deepseek" || normalized === "deepseek-harness" || normalized === "dsh-tui") return "dsh";
   return isTerminalKind(normalized) ? normalized : "";
 }
 

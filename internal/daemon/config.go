@@ -177,6 +177,12 @@ func normalizeDirectACPAgents(agents map[string]DirectACPAgentConfig) map[string
 		if normalized == "kilo" {
 			value = migrateLegacyKiloACPConfig(value)
 		}
+		if normalized == "dsh" || normalized == "deepseek" {
+			value = normalizeDshACPConfig(value)
+			if normalized == "deepseek" {
+				normalized = "dsh"
+			}
+		}
 		out[normalized] = value
 	}
 	if _, ok := out["codex"]; !ok {
@@ -221,7 +227,52 @@ func normalizeDirectACPAgents(agents map[string]DirectACPAgentConfig) map[string
 			out["kilo"] = DirectACPAgentConfig{Command: "kilo", Args: []string{"acp", "--pure"}}
 		}
 	}
+	if _, ok := out["dsh"]; !ok {
+		out["dsh"] = defaultDshACPConfig()
+	}
 	return out
+}
+
+// dshACPPluginVersion pins the @deepseek-ai rc line. dsh is a developer
+// preview with promised breaking changes; the ACP demo tree must stay on one
+// tested version until a qualification run passes on the next one.
+const dshACPPluginVersion = "0.1.0-rc.6"
+
+// dshACPCordisPath is the generated plugin-tree config consumed by the
+// dsh-acp-demo bin via --config.
+func dshACPCordisPath() string {
+	return filepath.Join(userConfigDir(), "pocket-studio", "dsh", "cordis.yml")
+}
+
+func defaultDshACPConfig() DirectACPAgentConfig {
+	if path, err := exec.LookPath("dsh-acp-demo"); err == nil {
+		return DirectACPAgentConfig{Command: path, Args: []string{"--config", dshACPCordisPath()}}
+	}
+	return DirectACPAgentConfig{
+		Command: "npx",
+		Args:    []string{"-y", "@deepseek-ai/dsh-acp-demo@" + dshACPPluginVersion, "--config", dshACPCordisPath()},
+	}
+}
+
+// normalizeDshACPConfig repairs a stale default entry (e.g. an unpinned
+// @latest or an old rc version from a previous daemon generation) while
+// leaving deliberate user overrides (custom command or cordis path) alone.
+func normalizeDshACPConfig(cfg DirectACPAgentConfig) DirectACPAgentConfig {
+	command := normalizedCommandBase(cfg.Command)
+	if command != "npx" && command != "npx.cmd" {
+		return cfg
+	}
+	if len(cfg.Args) < 2 || (cfg.Args[0] != "-y" && cfg.Args[0] != "--yes") {
+		return cfg
+	}
+	packageIndex := 1
+	packageRef := cfg.Args[packageIndex]
+	if packageRef != "@deepseek-ai/dsh-acp-demo@latest" && !strings.HasPrefix(packageRef, "@deepseek-ai/dsh-acp-demo@0.") {
+		return cfg
+	}
+	updated := defaultDshACPConfig()
+	updated.Env = cfg.Env
+	return updated
 }
 
 func migrateLegacyCodexACPConfig(cfg DirectACPAgentConfig) DirectACPAgentConfig {

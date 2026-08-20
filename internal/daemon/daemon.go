@@ -141,6 +141,7 @@ type directACPSession struct {
 	modelConfigID string
 	configIDs     map[string]string
 	client        *directACPClient
+	capabilities  directACPCapabilities
 	persisted     bool
 	promptMu      sync.Mutex
 	resetting     bool
@@ -194,6 +195,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	if _, err := ensurePocketStudioTmuxConfig(); err != nil {
 		log.Printf("ensure tmux config: %v", err)
+	}
+	if _, ok := d.cfg.DirectACP.Agents["dsh"]; ok {
+		if err := ensureDshACPCordisConfig(); err != nil {
+			log.Printf("ensure dsh cordis config: %v", err)
+		}
 	}
 	if err := d.loadProjectStore(); err != nil {
 		log.Printf("load daemon projects: %v", err)
@@ -1048,6 +1054,8 @@ func agentDisplayName(agent string) string {
 		return "Qwen Code"
 	case "opencode":
 		return "OpenCode"
+	case "dsh", "deepseek":
+		return "DeepSeek"
 	case "iflow":
 		return "iFlow"
 	case "kilocode":
@@ -1219,6 +1227,111 @@ func (d *Daemon) handleEnvelope(ctx context.Context, env protocol.Envelope) {
 		if err == nil {
 			d.exitTerminalStream(request)
 		}
+	case protocol.TypeSkillCatalogList:
+		request, err := protocol.DecodePayload[protocol.SkillCatalogListRequest](env)
+		if err != nil {
+			d.sendSkillCatalogResult(protocol.SkillCatalogResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillCatalogList(request)
+	case protocol.TypeCustomAgentList:
+		request, err := protocol.DecodePayload[protocol.CustomAgentListRequest](env)
+		if err != nil {
+			d.sendCustomAgentResult(protocol.CustomAgentResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleCustomAgentList(request)
+	case protocol.TypeCustomAgentSave:
+		request, err := protocol.DecodePayload[protocol.CustomAgentSaveRequest](env)
+		if err != nil {
+			d.sendCustomAgentResult(protocol.CustomAgentResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleCustomAgentSave(request)
+	case protocol.TypeCustomAgentDelete:
+		request, err := protocol.DecodePayload[protocol.CustomAgentDeleteRequest](env)
+		if err != nil {
+			d.sendCustomAgentResult(protocol.CustomAgentResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleCustomAgentDelete(request)
+	case protocol.TypeSkillStoreInstall:
+		request, err := protocol.DecodePayload[protocol.SkillStoreInstallRequest](env)
+		if err != nil {
+			d.sendSkillStoreResult(protocol.SkillStoreResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillStoreInstall(request)
+	case protocol.TypeSkillStoreRemove:
+		request, err := protocol.DecodePayload[protocol.SkillStoreRemoveRequest](env)
+		if err != nil {
+			d.sendSkillStoreResult(protocol.SkillStoreResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillStoreRemove(request)
+	case protocol.TypeSkillStoreUpgrade:
+		request, err := protocol.DecodePayload[protocol.SkillStoreUpgradeRequest](env)
+		if err != nil {
+			d.sendSkillStoreResult(protocol.SkillStoreResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillStoreUpgrade(request)
+	case protocol.TypeSkillCreate:
+		request, err := protocol.DecodePayload[protocol.SkillCreateRequest](env)
+		if err != nil {
+			d.sendSkillStoreResult(protocol.SkillStoreResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillCreate(request)
+	case protocol.TypeSkillFileTree:
+		request, err := protocol.DecodePayload[protocol.SkillFileTreeRequest](env)
+		if err != nil {
+			d.sendSkillFileTreeResult(protocol.SkillFileTreeResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillFileTree(request)
+	case protocol.TypeSkillFileRead:
+		request, err := protocol.DecodePayload[protocol.SkillFileReadRequest](env)
+		if err != nil {
+			d.sendSkillFileContent(protocol.SkillFileContent{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillFileRead(request)
+	case protocol.TypeSkillFileWrite:
+		request, err := protocol.DecodePayload[protocol.SkillFileWriteRequest](env)
+		if err != nil {
+			d.sendSkillFileOpResult(protocol.SkillFileOperationResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillFileWrite(request)
+	case protocol.TypeSkillFileCreate:
+		request, err := protocol.DecodePayload[protocol.SkillFileCreateRequest](env)
+		if err != nil {
+			d.sendSkillFileOpResult(protocol.SkillFileOperationResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillFileCreate(request)
+	case protocol.TypeSkillFileRename:
+		request, err := protocol.DecodePayload[protocol.SkillFileRenameRequest](env)
+		if err != nil {
+			d.sendSkillFileOpResult(protocol.SkillFileOperationResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillFileRename(request)
+	case protocol.TypeSkillFileDelete:
+		request, err := protocol.DecodePayload[protocol.SkillFileDeleteRequest](env)
+		if err != nil {
+			d.sendSkillFileOpResult(protocol.SkillFileOperationResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillFileDelete(request)
+	case protocol.TypeSkillValidate:
+		request, err := protocol.DecodePayload[protocol.SkillValidateRequest](env)
+		if err != nil {
+			d.sendSkillFileOpResult(protocol.SkillFileOperationResult{RequestID: requestIDFromEnvelope(env), Error: err.Error()})
+			return
+		}
+		go d.handleSkillValidate(request)
 	}
 }
 
@@ -1574,8 +1687,37 @@ type toolUpdateState struct {
 	kind        string
 	status      string
 	input       any
+	title       string
 	streamID    string
 	callEmitted bool
+}
+
+// toolCallInput returns the recorded tool input. Some ACP agents (pi's bash
+// adapter) omit rawInput and carry the full command in the tool title; in
+// that case synthesize an input record so downstream UIs can render the
+// command.
+func toolCallInput(state toolUpdateState, update map[string]any) any {
+	if inputMap, ok := state.input.(map[string]any); ok && len(inputMap) > 0 {
+		return state.input
+	}
+	if state.input != nil {
+		return state.input
+	}
+	if isExecuteToolKind(state.kind) {
+		if command := stringField(update, "title"); command != "" {
+			return map[string]any{"command": command}
+		}
+	}
+	return nil
+}
+
+func isExecuteToolKind(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "execute", "exec", "bash", "exec_command", "terminal":
+		return true
+	default:
+		return false
+	}
 }
 
 func newAgentOutputAdapter(emitter *taskEmitter, historyUserPrompts int, targetPrompt string) *agentOutputAdapter {
@@ -2083,6 +2225,9 @@ func (a *agentOutputAdapter) emitRawToolUpdate(update map[string]any, raw json.R
 	if input, ok := firstNonNilPresentValue(update, "rawInput", "raw_input", "input"); ok {
 		state.input = input
 	}
+	if title := stringField(update, "title"); title != "" {
+		state.title = title
+	}
 	if streamID := stringField(update, "streamId", "stream_id", "outputStreamId", "output_stream_id"); streamID != "" {
 		state.streamID = streamID
 	}
@@ -2119,11 +2264,14 @@ func (a *agentOutputAdapter) emitRawToolUpdate(update map[string]any, raw json.R
 		"tool_use_id": id,
 		"name":        state.name,
 		"status":      state.status,
-		"input":       state.input,
+		"input":       toolCallInput(state, update),
 		"output":      output,
 	}
 	if state.kind != "" {
 		data["kind"] = state.kind
+	}
+	if state.title != "" {
+		data["title"] = state.title
 	}
 	if state.streamID != "" {
 		data["stream_id"] = state.streamID
@@ -3078,7 +3226,7 @@ func (d *Daemon) helloEnvelope() protocol.Envelope {
 		AgentLabel:     d.agentLabel(),
 		Agents:         d.agentCapabilities(),
 		Workspaces:     d.workspacesSnapshot(),
-		Features:       []string{protocol.FeatureTerminalBinaryV1, protocol.FeatureDirectTerminalV1},
+		Features:       []string{protocol.FeatureTerminalBinaryV1, protocol.FeatureDirectTerminalV1, protocol.FeatureCustomAgentsV1, protocol.FeatureSkillEditorV1},
 		DirectEndpoint: d.directEndpoint(),
 	})
 }
@@ -4235,15 +4383,49 @@ func (d *Daemon) startTerminalStream(parent context.Context, req protocol.Termin
 	terminalCommand := d.normalizeTerminalCommand(req.Command)
 	initialTitle := initialTerminalTitle(terminalCommand, req.InitialTitle)
 	agentName := agentTerminalCommand(terminalCommand)
-	agentHooks := d.prepareTerminalAgentHooks(workspace.Path, req.ProjectID, req.TerminalID, agentName)
-	command := terminalAgentCommandWithHooks(terminalCommand, agentName, agentHooks.env)
-	cmd, err := tmuxNewSessionCommand(sessionName, initialTitle, workspace.Path, command, agentHooks.env)
-	if err != nil {
-		log.Printf("daemon failed to prepare tmux config: %v. falling back to user shell.", err)
-		cmd = nil
+	// Skill profile translation happens before hook preparation so that
+	// profile env (e.g. KILO_CONFIG_CONTENT, CLAUDE_CONFIG_DIR) merges into
+	// hook env afterwards, and claude hook files can target the profile
+	// sandbox when CLAUDE_CONFIG_DIR is overridden by the profile.
+	var customAgentEnv []string
+	if strings.TrimSpace(req.CustomAgentID) != "" {
+		var agentEnv []string
+		var agentErr error
+		terminalCommand, agentEnv, agentName, agentErr = applyCustomAgentToTerminalCommand(terminalCommand, req.CustomAgentID, nil)
+		if agentErr != nil {
+			log.Printf("terminal stream custom agent %q: %v", req.CustomAgentID, agentErr)
+		} else {
+			customAgentEnv = agentEnv
+		}
 	}
-	if cmd != nil {
-		cmd.Env = tmuxProcessEnv(agentHooks.env...)
+	agentHooks := d.prepareTerminalAgentHooks(workspace.Path, req.ProjectID, req.TerminalID, agentName)
+	for _, kv := range customAgentEnv {
+		k, v, _ := strings.Cut(kv, "=")
+		if k == skillKiloConfigContentEnv {
+			if merged, err := mergeKiloConfigContentEnv(agentHooks.env, v); err == nil {
+				agentHooks.env = replaceEnv(agentHooks.env, k, merged)
+			}
+			continue
+		}
+		agentHooks.env = replaceEnv(agentHooks.env, k, v)
+	}
+	command := terminalAgentCommandWithHooks(terminalCommand, agentName, agentHooks.env)
+	var cmd *exec.Cmd
+	// The web client can opt a terminal out of tmux (UseTmux=false): inline
+	// image protocols (iTerm2 OSC 1337 / Kitty) cannot pass through tmux, which
+	// filters them, so terminals that need images must run on a plain PTY.
+	// Session persistence is lost in this mode. The POCKET_STUDIO_DISABLE_TMUX
+	// env var remains as a blanket fallback for older clients.
+	useTmux := req.UseTmux == nil || *req.UseTmux
+	if useTmux && os.Getenv("POCKET_STUDIO_DISABLE_TMUX") != "1" {
+		cmd, err = tmuxNewSessionCommand(sessionName, initialTitle, workspace.Path, command, agentHooks.env)
+		if err != nil {
+			log.Printf("daemon failed to prepare tmux config: %v. falling back to user shell.", err)
+			cmd = nil
+		}
+		if cmd != nil {
+			cmd.Env = tmuxProcessEnv(agentHooks.env...)
+		}
 	}
 
 	var ptyFile *os.File
@@ -4721,7 +4903,7 @@ func pocketStudioTmuxConfig(shell string) string {
 	}
 	b.WriteString(`set-option -g status off
 set-option -g set-titles on
-set-option -g default-terminal "tmux-256color"
+set-option -g default-terminal "xterm-256color"
 set-option -g terminal-overrides ",xterm-256color:RGB,tmux-256color:RGB,*-256color:RGB"
 set-option -ga terminal-features ",xterm-256color:RGB:clipboard,tmux-256color:RGB:clipboard,*-256color:RGB:clipboard"
 set-option -g xterm-keys on
@@ -4740,6 +4922,7 @@ set-environment -g COLORTERM truecolor
 set-environment -g CLICOLOR 1
 set-environment -g CLICOLOR_FORCE 1
 set-environment -g FORCE_COLOR 1
+set-environment -g ITERM_SESSION_ID pocket-studio
 set-window-option -g allow-rename on
 set-window-option -g automatic-rename off
 set-window-option -g mode-keys vi
@@ -4795,6 +4978,7 @@ func terminalEnv(extra ...string) []string {
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 		"TERM_PROGRAM=PocketStudio",
+		"ITERM_SESSION_ID=pocket-studio",
 		"CLICOLOR=1",
 		"CLICOLOR_FORCE=1",
 		"FORCE_COLOR=1",
@@ -4945,6 +5129,8 @@ func writeAgentHookPlugin(agent string) error {
 			piPocketStudioExtensionPath(),
 			pocketStudioPiExtension(),
 		)
+	case "dsh", "deepseek":
+		return writeDshHookIntegration()
 	default:
 		return nil
 	}
@@ -5015,6 +5201,184 @@ func writeClaudeHookIntegration() error {
 	}
 	raw = append(raw, '\n')
 	return writeFileIfChanged(settingsPath, string(raw))
+}
+
+func dshHomeDir() string {
+	if dir := strings.TrimSpace(os.Getenv("DSH_HOME")); dir != "" {
+		return dir
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".dsh")
+	}
+	return ".dsh"
+}
+
+func dshProfilePatchPath(profile string) string {
+	return filepath.Join(dshHomeDir(), "profiles", profile, "cordis.patch.yml")
+}
+
+// dshHooksConfigPath returns the Claude-Code-dialect hooks.json consumed by
+// the @deepseek-ai/dsh-hooks-claude-code bridge mounted in the tui profile.
+func dshHooksConfigPath() string {
+	return filepath.Join(userConfigDir(), "pocket-studio", "hooks", "dsh-hooks.json")
+}
+
+// ensureDshACPCordisConfig writes the plugin tree for the dsh-acp-demo
+// Direct ACP entry point. The tree mirrors the upstream example
+// (examples/acp-agent/cordis.yml) trimmed to the automation surface: DeepSeek
+// adapter + sandbox/exec stack + the ACP bridge. persistenceRoot is stored
+// next to the config so sessions survive independent of the launch cwd.
+func ensureDshACPCordisConfig() error {
+	configPath := dshACPCordisPath()
+	persistenceRoot := filepath.Join(filepath.Dir(configPath), "sessions")
+	persona := strings.Join([]string{
+		"You are a coding assistant powered by the {{model}} model.",
+		"Your working directory is {{cwd}}. Your bash tool runs under a file sandbox",
+		"\u2014 a `[sandbox: file access denied \u2026]` result is policy, not a command bug.",
+		"",
+		"Verify your work by running the code or tests. Keep answers brief and factual.",
+		"",
+	}, "\n")
+	lines := []string{
+		"# Managed by Pocket Studio: plugin tree for the DeepSeek Harness (dsh) ACP automation server.",
+		"# Regenerated when missing or when the pinned plugin version changes.",
+		"# Reference: https://github.com/deepseek-ai/deepseek-harness examples/acp-agent/cordis.yml",
+		"- id: llm-deepseek",
+		"  name: '@deepseek-ai/dsh-llm-deepseek'",
+		"  config:",
+		"    thinking: enabled",
+		"    reasoningEffort: max",
+		"    models:",
+		"      - id: deepseek-v4-flash",
+		"      - id: deepseek-v4-pro",
+		"- id: sandbox",
+		"  name: '@deepseek-ai/dsh-sandbox-local'",
+		"- id: sandbox-policy",
+		"  name: '@deepseek-ai/dsh-sandbox-policy'",
+		"  config:",
+		"    mode: !!js \"process.env.DSH_PERMISSION_MODE ?? 'workspace-write'\"",
+		"    workspaceRoot: !!js process.cwd()",
+		"- id: subprocess",
+		"  name: '@deepseek-ai/dsh-subprocess-local'",
+		"- id: bash",
+		"  name: '@deepseek-ai/dsh-bash-sandbox'",
+		"  config:",
+		"    timeoutMs: 60000",
+		"- id: approval",
+		"  name: '@deepseek-ai/dsh-user-approval'",
+		"  config:",
+		"    policy: !!js \"(process.env.DSH_PERMISSION_MODE ?? 'workspace-write') === 'danger-full-access' ? 'never' : 'ask'\"",
+		"- id: acp-agent",
+		"  name: '@deepseek-ai/dsh-acp-demo'",
+		"  config:",
+		"    provider: deepseek-official",
+		"    model: deepseek-v4-pro",
+		"    persistenceRoot: '" + persistenceRoot + "'",
+		"    workspaceContext:",
+		"      maxBytes: 65536",
+		"    persona: |",
+	}
+	for _, line := range strings.Split(persona, "\n") {
+		lines = append(lines, "      "+line)
+	}
+	return writeFileIfChanged(configPath, strings.Join(lines, "\n"))
+}
+
+// writeDshHookIntegration installs the Pocket Studio Stop notification as a
+// Claude Code dialect hooks.json and mounts dsh-hooks-claude-code on the dsh
+// "tui" profile so terminal completion alerts fire. The hook itself reuses
+// the same notify script as the Claude Code integration.
+func writeDshHookIntegration() error {
+	scriptPath := pocketStudioHookScriptPath("claude-stop.js")
+	if err := writeFileIfChanged(scriptPath, pocketStudioTerminalNotifyScript(nil)); err != nil {
+		return err
+	}
+	hooksConfig := map[string]any{
+		"hooks": map[string]any{
+			"Stop": []any{
+				map[string]any{
+					"hooks": []any{
+						map[string]any{
+							"type":    "command",
+							"command": shellCommand([]string{nodeCommand(), scriptPath}),
+							"timeout": float64(10),
+						},
+					},
+				},
+			},
+		},
+	}
+	raw, err := json.MarshalIndent(hooksConfig, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	if err := writeFileIfChanged(dshHooksConfigPath(), string(raw)); err != nil {
+		return err
+	}
+	return upsertDshProfileHookPatch(dshProfilePatchPath("tui"), dshProfileHookPatch(dshHooksConfigPath()))
+}
+
+// dshProfileHookPatch renders the profile patch row that inserts the Claude
+// Code hooks bridge. The row id keeps re-renders idempotent.
+func dshProfileHookPatch(hooksPath string) string {
+	return "# Managed by Pocket Studio: Claude Code dialect hook bridge for terminal notifications.\n" +
+		"# Requires: dsh plugin --profile tui add @deepseek-ai/dsh-hooks-claude-code@<dsh-version>\n" +
+		"# Remove the insert below to disable alerts.\n" +
+		"- insert:\n" +
+		"    - id: pocket-studio-hooks\n" +
+		"      name: '@deepseek-ai/dsh-hooks-claude-code'\n" +
+		"      config:\n" +
+		"        configPath: " + hooksPath + "\n"
+}
+
+const dshProfileHookMarker = "id: pocket-studio-hooks"
+
+// upsertDshProfileHookPatch preserves foreign rows in the user's dsh profile
+// patch and replaces only the Pocket Studio hook-bridge insert block, which
+// runs from the "# Managed by Pocket Studio" header through the following
+// blank line after the block.
+func upsertDshProfileHookPatch(path string, patch string) error {
+	existing := ""
+	if raw, err := os.ReadFile(path); err == nil {
+		existing = string(raw)
+	}
+	lines := strings.Split(existing, "\n")
+	var kept []string
+	for i := 0; i < len(lines); {
+		if strings.Contains(lines[i], "# Managed by Pocket Studio") {
+			// skip our managed block: header comments + the - insert list that follows
+			j := i
+			for j < len(lines) && (strings.HasPrefix(strings.TrimSpace(lines[j]), "#") || strings.TrimSpace(lines[j]) == "") {
+				j++
+			}
+			for j < len(lines) {
+				trim := strings.TrimSpace(lines[j])
+				if trim == "" || strings.HasPrefix(trim, "#") {
+					break
+				}
+				if strings.HasPrefix(trim, "-") && j > i && strings.Contains(strings.Join(lines[i:min(j+4, len(lines))], "\n"), dshProfileHookMarker) {
+					j++
+					continue
+				}
+				if strings.HasPrefix(trim, "id:") || strings.HasPrefix(trim, "name:") || strings.HasPrefix(trim, "config:") || strings.HasPrefix(trim, "configPath:") || strings.HasPrefix(trim, "- id:") {
+					j++
+					continue
+				}
+				break
+			}
+			i = j
+			continue
+		}
+		kept = append(kept, lines[i])
+		i++
+	}
+	content := strings.TrimRight(strings.Join(kept, "\n"), "\n")
+	if content != "" {
+		content += "\n\n"
+	}
+	content += patch
+	return writeFileIfChanged(path, content)
 }
 
 func antigravitySettingsPath() string {
@@ -5578,7 +5942,7 @@ main().catch(() => {})
 
 func supportsPluginTerminalAgent(agent string) bool {
 	switch agent {
-	case "claude", "claude_code", "claude-code", "codex", "opencode", "kilo", "kilocode", "pi", "agy", "antigravity":
+	case "claude", "claude_code", "claude-code", "codex", "opencode", "kilo", "kilocode", "pi", "agy", "antigravity", "dsh", "deepseek":
 		return true
 	default:
 		return false
@@ -5621,9 +5985,12 @@ func agentTerminalCommand(command string) string {
 		base = filepath.Base(fields[0])
 	}
 	switch base {
-	case "claude", "codex", "opencode", "kilo", "kilocode", "pi", "agy", "antigravity", "qwen", "kimi", "copilot", "cursor-agent", "cursor", "openclaw":
+	case "claude", "codex", "opencode", "kilo", "kilocode", "pi", "agy", "antigravity", "qwen", "kimi", "copilot", "cursor-agent", "cursor", "openclaw", "dsh", "dsh-tui":
 		if base == "cursor-agent" {
 			return "cursor"
+		}
+		if base == "dsh-tui" {
+			return "dsh"
 		}
 		return base
 	}
@@ -5650,6 +6017,8 @@ func agentTerminalCommand(command string) string {
 		return "kimi"
 	case strings.Contains(command, "antigravity"):
 		return "antigravity"
+	case strings.Contains(command, "dsh"):
+		return "dsh"
 	default:
 		return ""
 	}

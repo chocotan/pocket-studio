@@ -10,7 +10,7 @@ import {
   ChevronUp,
   X
 } from "lucide-react";
-import { Antigravity, ClaudeCode, Codex, Cursor, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
+import { Antigravity, ClaudeCode, Codex, Cursor, DeepSeek, GithubCopilot, KiloCode, Kimi, OpenClaw, OpenCode, Qwen } from "@lobehub/icons/es/icons";
 import { agentNameForRuntime, makeId, terminalKindFromAgentKind } from "../terminal-types";
 import { type StudioTab } from "../studio-layout";
 import type { Project } from "../studio-dashboard";
@@ -26,6 +26,7 @@ import {
   mergeTaskEvents,
   modelListFromTaskEvents,
   shouldUpdateTransientErrorFromTaskEvent,
+  slashCommandsFromTaskEvents,
   taskRunTimingMatchesAwaitedTurn,
 } from "./event-model";
 import {
@@ -37,6 +38,7 @@ import { buildDirectACPDispatchPayload } from "./dispatch-payload";
 import {
   CollapsibleSection,
   Markdown,
+  SlashCommandMenu,
   SubagentEntry,
   TodoWidget,
   ToolCallCard,
@@ -104,6 +106,9 @@ export function AgentChatTab({
   const sessionId = tab.agentSessionId;
   const sessionName = tab.agentSessionName || sessionId;
   const agentKind = tab.agentKind || "opencode";
+  // Agents whose ACP surface rejects image blocks entirely (dsh advertises
+  // promptCapabilities.image=false; an image would fail the whole prompt).
+  const agentAcceptsImages = !["dsh", "deepseek", "dsh-tui"].includes(agentKind);
   const agentRuntime = "direct_acp" as const;
   const supportsModelSelection = true;
   const projectId = project.id;
@@ -168,6 +173,41 @@ export function AgentChatTab({
   const pendingSessionRejectRef = useRef<((error: Error) => void) | null>(null);
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const slashCommands = useMemo(() => slashCommandsFromTaskEvents(events), [events]);
+  const [slashMenuOpen, setSlashMenuOpen] = useState(false);
+  const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+
+  const slashQuery = useMemo(() => {
+    if (!slashMenuOpen) return "";
+    const trimmed = input.trimStart();
+    if (!trimmed.startsWith("/")) return "";
+    const spaceIndex = trimmed.indexOf(" ");
+    return spaceIndex === -1 ? trimmed.slice(1).toLowerCase() : null;
+  }, [input, slashMenuOpen]);
+
+  const slashMatches = useMemo(() => {
+    if (slashQuery === null) return [];
+    if (!slashQuery) return slashCommands.slice(0, 30);
+    return slashCommands
+      .filter((command) => command.name.toLowerCase().includes(slashQuery))
+      .slice(0, 30);
+  }, [slashCommands, slashQuery]);
+
+  useEffect(() => {
+    if (slashActiveIndex >= slashMatches.length) {
+      setSlashActiveIndex(Math.max(0, slashMatches.length - 1));
+    }
+  }, [slashActiveIndex, slashMatches.length]);
+
+  const applySlashCommand = useCallback((command: { name: string }) => {
+    // Insert the command followed by a space so args can be typed right away.
+    setInput(`/${command.name} `);
+    setSlashMenuOpen(false);
+    requestAnimationFrame(() => {
+      const textarea = document.querySelector<HTMLTextAreaElement>('textarea[data-testid="agent-input"]');
+      textarea?.focus();
+    });
+  }, []);
 
 
 
@@ -552,6 +592,8 @@ export function AgentChatTab({
         return <Cursor width={16} height={16} />;
       case "openclaw":
         return <OpenClaw width={16} height={16} />;
+      case "dsh":
+        return <DeepSeek size={16} />;
       default:
         return <Cpu className="h-4 w-4" />;
     }
@@ -1417,6 +1459,14 @@ export function AgentChatTab({
           }}
           className="relative border border-border bg-card rounded-xl shadow-sm focus-within:ring-1 focus-within:ring-primary focus-within:border-primary transition-all p-2 flex flex-col gap-1.5"
         >
+          {slashMenuOpen && slashCommands.length > 0 && (
+            <SlashCommandMenu
+              commands={slashMatches}
+              activeIndex={slashActiveIndex}
+              onHover={setSlashActiveIndex}
+              onSelect={applySlashCommand}
+            />
+          )}
           {attachments.length > 0 && (
             <div className="flex max-w-full gap-2 overflow-x-auto px-1 pt-0.5">
               {attachments.map((attachment, index) => (
@@ -1432,15 +1482,52 @@ export function AgentChatTab({
           <textarea
             data-testid="agent-input"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              const trimmed = e.target.value.trimStart();
+              setSlashMenuOpen(trimmed.startsWith("/") && !trimmed.includes(" "));
+              if (trimmed.startsWith("/")) setSlashActiveIndex(0);
+            }}
+            onBlur={() => {
+              // Delay so menu clicks can land before the blur closes it.
+              window.setTimeout(() => setSlashMenuOpen(false), 150);
+            }}
+            onFocus={() => {
+              const trimmed = input.trimStart();
+              setSlashMenuOpen(trimmed.startsWith("/") && !trimmed.includes(" "));
+            }}
             onPaste={(event) => {
-              const files = imageFilesFromClipboard(event.clipboardData);
+              const files = agentAcceptsImages ? imageFilesFromClipboard(event.clipboardData) : [];
               if (files.length > 0) {
                 event.preventDefault();
                 void uploadImages(files);
               }
             }}
             onKeyDown={(e) => {
+              if (slashMenuOpen && slashMatches.length > 0) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setSlashActiveIndex((slashActiveIndex + 1) % slashMatches.length);
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setSlashActiveIndex((slashActiveIndex - 1 + slashMatches.length) % slashMatches.length);
+                  return;
+                }
+                if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+                  e.preventDefault();
+                  applySlashCommand(slashMatches[slashActiveIndex] ?? slashMatches[0]);
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setSlashMenuOpen(false);
+                  return;
+                }
+              } else if (e.key === "Escape") {
+                setSlashMenuOpen(false);
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 startConversation(input);
@@ -1455,27 +1542,31 @@ export function AgentChatTab({
               <span>对话 / {agentKind}</span>
             </span>
             <div className="flex items-center gap-1.5">
-              <input
-                ref={attachmentInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={(event) => {
-                  void uploadImages(Array.from(event.target.files || []));
-                  event.target.value = "";
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => attachmentInputRef.current?.click()}
-                disabled={attachmentUploading}
-                title="选择图片"
-                aria-label="选择图片"
-                className="flex h-7 w-7 items-center justify-center rounded-lg border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50 disabled:opacity-45"
-              >
-                {attachmentUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />}
-              </button>
+              {agentAcceptsImages && (
+                <>
+                  <input
+                    ref={attachmentInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={(event) => {
+                      void uploadImages(Array.from(event.target.files || []));
+                      event.target.value = "";
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => attachmentInputRef.current?.click()}
+                    disabled={attachmentUploading}
+                    title="选择图片"
+                    aria-label="选择图片"
+                    className="flex h-7 w-7 items-center justify-center rounded-lg border border-border bg-muted/30 text-muted-foreground hover:bg-muted/50 disabled:opacity-45"
+                  >
+                    {attachmentUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />}
+                  </button>
+                </>
+              )}
               {showDirectACPConfigOptions && configOptions.map((option) => (
                 <select
                   key={option.id}

@@ -64,7 +64,7 @@ func loadPiImportedHistory(sessionID string) ([]piImportedHistoryEvent, error) {
 				part, _ := value.(map[string]any)
 				switch stringField(part, "type") {
 				case "thinking":
-					if text := strings.TrimSpace(stringField(part, "thinking", "text")); text != "" {
+					if text := strings.TrimSpace(stripANSIControlSequences(stringField(part, "thinking", "text"))); text != "" {
 						events = append(events, piImportedHistoryEvent{
 							EventType: "assistant.thinking",
 							Data: map[string]any{
@@ -76,7 +76,7 @@ func loadPiImportedHistory(sessionID string) ([]piImportedHistoryEvent, error) {
 						})
 					}
 				case "text":
-					if text := strings.TrimSpace(stringField(part, "text")); text != "" {
+					if text := strings.TrimSpace(stripANSIControlSequences(stringField(part, "text"))); text != "" {
 						events = append(events, piImportedHistoryEvent{
 							EventType: "assistant.message",
 							Data: map[string]any{

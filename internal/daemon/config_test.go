@@ -170,6 +170,30 @@ func TestNormalizeDirectACPAgentsLocalFallback(t *testing.T) {
 	if !ok {
 		t.Fatalf("DefaultConfig() direct ACP agents missing 'qwen'")
 	}
+	dshAgent, ok := cfg.DirectACP.Agents["dsh"]
+	if !ok {
+		t.Fatalf("DefaultConfig() direct ACP agents missing 'dsh'")
+	}
+	if _, ok := cfg.DirectACP.Agents["deepseek"]; ok {
+		t.Fatalf("DefaultConfig() direct ACP agents should normalize 'deepseek' to 'dsh'")
+	}
+
+	if path, err := exec.LookPath("dsh-acp-demo"); err == nil {
+		if dshAgent.Command != path {
+			t.Errorf("dsh Agent Command = %q, want resolved path %q", dshAgent.Command, path)
+		}
+	} else {
+		if dshAgent.Command != "npx" {
+			t.Errorf("dsh Agent Command = %q, want \"npx\"", dshAgent.Command)
+		}
+		joined := strings.Join(dshAgent.Args, " ")
+		if !strings.Contains(joined, "@deepseek-ai/dsh-acp-demo@") || strings.Contains(joined, "@latest") {
+			t.Errorf("dsh Agent Args = %v, want pinned dsh-acp-demo version", dshAgent.Args)
+		}
+	}
+	if !strings.Contains(strings.Join(dshAgent.Args, " "), dshACPCordisPath()) {
+		t.Errorf("dsh Agent Args = %v, want generated cordis.yml path", dshAgent.Args)
+	}
 
 	if path, err := exec.LookPath("opencode"); err == nil {
 		if opencodeAgent.Command != path {
