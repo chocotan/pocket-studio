@@ -429,7 +429,12 @@ const terminalConnectionOwners = new Map<string, TerminalConnectionOwner>();
 
 async function refreshDirectEndpoint(projectId: string): Promise<{ terminal_ws_url: string; token?: string } | undefined> {
   try {
-    const projectData = await getJSON<unknown>("/api/project/list");
+    // Bound the wait: a hung server must not stall the reconnect chain forever.
+    const projectData = await Promise.race([
+      getJSON<unknown>("/api/project/list"),
+      new Promise<undefined>((resolve) => setTimeout(resolve, 8000)),
+    ]);
+    if (projectData === undefined) return undefined; // refresh request timed out
     const projects = Array.isArray(projectData)
       ? projectData
       : projectData && typeof projectData === "object" && Array.isArray((projectData as { projects?: unknown }).projects)
@@ -648,6 +653,7 @@ export function XtermInstance({
     let cancelPasteHandler: (() => void) | null = null;
     let cancelFocusHandler: (() => void) | null = null;
     let cancelImeCompositionTracking: (() => void) | null = null;
+    let cancelOnlineHandler: (() => void) | null = null;
     let osc52Disposable: { dispose: () => void } | null = null;
     let dataDisposable: { dispose: () => void } | null = null;
     const handleTerminalKeyDownCapture = (event: KeyboardEvent) => {
@@ -1056,7 +1062,8 @@ export function XtermInstance({
 
       let consecutiveFailures = 0;
       let connectedOnce = false;
-      // Circuit breaker: past this many consecutive failed attempts the failure
+      let manualRetryArmed = false;
+      // Circuit breaker: at this many consecutive failed attempts the failure
       // is very likely permanent (expired auth, unreachable endpoint), so stop
       // auto-reconnecting and wait for explicit user input instead of retrying
       // forever.
@@ -1073,9 +1080,19 @@ export function XtermInstance({
         }, delay);
       };
 
+      const backoffDelay = () => {
+        const backoff = Math.min(MAX_RECONNECT_DELAY_MS, 500 * 2 ** Math.min(Math.max(consecutiveFailures - 1, 0), 6));
+        return Math.round(backoff * (0.7 + Math.random() * 0.6));
+      };
+
       const armManualRetry = (reason: string) => {
         const t = term;
         if (!t) return;
+        // Keystrokes typed into a dead pane have no local echo and must not be
+        // blindly replayed into the shell whenever a later reconnect succeeds.
+        inputBuf.current = [];
+        if (manualRetryArmed) return;
+        manualRetryArmed = true;
         t.write(`\r\n\x1b[31m[${reason}]\x1b[0m`);
         t.write("\r\n\x1b[33m[自动重连已停止，按任意键重试。]\x1b[0m\r\n");
         const retryDisposable = t.onData(() => {
@@ -1087,8 +1104,21 @@ export function XtermInstance({
           }, 0);
           if (!isCurrentEffect()) return;
           consecutiveFailures = 0;
+          manualRetryArmed = false;
           scheduleReconnect(0);
         });
+      };
+
+      // Every failed attempt counts; only the trip reason differs. Transient
+      // conditions (daemon still starting, endpoint not yet reported) keep
+      // backing off and self-heal; persistent ones trip the breaker.
+      const handleFailedAttempt = (tripReason: string) => {
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          armManualRetry(tripReason);
+          return;
+        }
+        scheduleReconnect(backoffDelay());
       };
 
       const connect = async () => {
@@ -1102,7 +1132,7 @@ export function XtermInstance({
         }
         if (!isCurrentEffect()) return;
         if (!wsUrl) {
-          armManualRetry(directMode
+          handleFailedAttempt(directMode
             ? "直连模式已开启，但 daemon 尚未上报可用直连端点；请检查 daemon 内网地址或关闭直连。"
             : "WebSocket connection failed: missing terminal endpoint");
           return;
@@ -1111,7 +1141,7 @@ export function XtermInstance({
         try {
           socket = new WebSocket(wsUrl);
         } catch {
-          armManualRetry(`WebSocket connection failed: invalid endpoint ${lastResolvedWsUrl}`);
+          handleFailedAttempt(`WebSocket connection failed: invalid endpoint ${lastResolvedWsUrl}`);
           return;
         }
         const socketGeneration = generation;
@@ -1134,6 +1164,7 @@ export function XtermInstance({
           }
           connectedOnce = true;
           consecutiveFailures = 0;
+          manualRetryArmed = false;
           for (const chunk of inputBuf.current) {
             socket.send(chunk);
           }
@@ -1199,24 +1230,20 @@ export function XtermInstance({
           if (normalExitRef.current || kickedRef.current) {
             return;
           }
-          consecutiveFailures += 1;
-          if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
-            armManualRetry(connectedOnce
-              ? (directMode
-                ? "多次重连失败：直连 daemon 不可达，或直连授权已过期。"
-                : "多次重连失败：服务器不可达，或登录态已过期。")
-              : `WebSocket connection failed: ${lastResolvedWsUrl}`);
-            return;
-          }
-          if (connectedOnce) {
+          // Skip the notice when this failure is about to trip the breaker
+          // (the breaker writes its own message instead).
+          if (connectedOnce && consecutiveFailures + 1 < MAX_CONSECUTIVE_FAILURES) {
             term!.write(directMode
               ? "\r\n\x1b[33m[直连 daemon 连接断开，正在重连直连端点...]\x1b[0m\r\n"
               : "\r\n\x1b[33m[Connection closed, reconnecting...]\x1b[0m\r\n");
           }
-          // Exponential backoff with jitter; each attempt re-resolves the URL
-          // so expired direct tokens / rotated credentials self-heal.
-          const backoff = Math.min(MAX_RECONNECT_DELAY_MS, 500 * 2 ** Math.min(consecutiveFailures - 1, 6));
-          scheduleReconnect(Math.round(backoff * (0.7 + Math.random() * 0.6)));
+          // Each attempt re-resolves the URL so expired direct tokens /
+          // rotated credentials self-heal.
+          handleFailedAttempt(connectedOnce
+            ? (directMode
+              ? "多次重连失败：直连 daemon 不可达，或直连授权已过期。"
+              : "多次重连失败：服务器不可达，或登录态已过期。")
+            : `WebSocket connection failed: ${lastResolvedWsUrl}`);
         };
 
       };
@@ -1229,9 +1256,30 @@ export function XtermInstance({
 
       /* ── 3. User input → WS ── */
       dataDisposable = term.onData((data) => {
-        if (!isCurrentEffect()) return;
+        // While the circuit breaker waits for a manual retry, drop input
+        // instead of buffering it for a blind replay on the next connection.
+        if (!isCurrentEffect() || manualRetryArmed) return;
         sendInputData(data);
       });
+
+      // Sleep/wake and network roaming often leave the socket half-open (no
+      // onclose fires and OS TCP keepalive takes ages to notice). When the
+      // browser reports connectivity (back), cycle the connection immediately
+      // instead of waiting for the OS.
+      const handleOnline = () => {
+        if (!isCurrentEffect()) return;
+        const socket = wsRef.current;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          // Its onclose schedules a reconnect with a freshly resolved URL.
+          socket.close();
+        } else if (!manualRetryArmed && reconnectTimerRef.current === null) {
+          scheduleReconnect(0);
+        }
+      };
+      window.addEventListener("online", handleOnline);
+      cancelOnlineHandler = () => {
+        window.removeEventListener("online", handleOnline);
+      };
     };
 
     // Check size immediately to see if we can initialize right away
@@ -1277,6 +1325,7 @@ export function XtermInstance({
       if (cancelPasteHandler) cancelPasteHandler();
       if (cancelFocusHandler) cancelFocusHandler();
       if (cancelImeCompositionTracking) cancelImeCompositionTracking();
+      if (cancelOnlineHandler) cancelOnlineHandler();
       if (cancelInitialFit) cancelInitialFit();
       if (cancelFontFit) cancelFontFit();
       window.removeEventListener("resize", handleWinResize);
