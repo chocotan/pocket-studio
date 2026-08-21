@@ -4961,6 +4961,14 @@ func terminalEnv(extra ...string) []string {
 			continue
 		}
 		switch key {
+		// Host-terminal fingerprints (KITTY_WINDOW_ID etc.) leak into daemon
+		// PTY children when the daemon is launched from a GUI terminal (kitty,
+		// ghostty, wezterm). CLIs like pi sniff them to pick a graphics protocol
+		// (kitty APC instead of iTerm2 OSC 1337) which the web xterm renderer
+		// cannot display, so strip them: ITERM_SESSION_ID below selects the
+		// protocol the web client actually supports.
+		case "KITTY_WINDOW_ID", "WEZTERM_PANE", "GHOSTTY_RESOURCES_DIR", "TMUX", "TMUX_PANE", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "ITERM_SESSION_ID":
+			continue
 		case "NO_COLOR", "TERM", "COLORTERM", "CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR", "SHELL":
 			continue
 		default:

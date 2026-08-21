@@ -1030,29 +1030,38 @@ export function XtermInstance({
         wsParams.set("cols", String(initialSize.cols));
         wsParams.set("rows", String(initialSize.rows));
       }
-      const relayWsUrl = directMode ? "" : websocketURL("/ws/terminal", wsParams);
-      let currentDirectEndpoint = directEndpointRef.current;
-      if (directMode && !currentDirectEndpoint?.terminal_ws_url) {
-        const refreshedEndpoint = await refreshDirectEndpoint(projectId);
-        if (!isCurrentEffect()) return;
-        if (refreshedEndpoint) currentDirectEndpoint = refreshedEndpoint;
-      }
-      if (!isCurrentEffect()) return;
-      const directWsUrl = currentDirectEndpoint?.terminal_ws_url
-        ? directWebsocketURL(currentDirectEndpoint.terminal_ws_url, wsParams, currentDirectEndpoint.token)
-        : "";
-      if (directMode && !directWsUrl) {
-        term!.write("\r\n\x1b[31m[直连模式已开启，但 daemon 尚未上报可用直连端点；请检查 daemon 内网地址或关闭直连。]\x1b[0m\r\n");
-        return;
-      }
-      const activeWsUrl = directMode ? directWsUrl : relayWsUrl;
-      let connectAttempts = 0;
-      let connectedOnce = false;
+      // Rebuild the WS URL on every connect attempt: relay URLs embed the
+      // current access token, and direct-mode tokens expire ~15 minutes after
+      // the project list is served. Reusing a URL captured at mount time meant
+      // a long-lived tab could never reconnect after any transient drop.
+      let lastResolvedWsUrl = "";
+      const resolveWsUrl = async (refreshEndpoint: boolean) => {
+        if (!directMode) {
+          lastResolvedWsUrl = websocketURL("/ws/terminal", wsParams);
+          return lastResolvedWsUrl;
+        }
+        let endpoint = directEndpointRef.current;
+        if (refreshEndpoint || !endpoint?.terminal_ws_url) {
+          const refreshed = await refreshDirectEndpoint(projectId);
+          if (refreshed) {
+            endpoint = refreshed;
+            directEndpointRef.current = refreshed;
+          }
+        }
+        lastResolvedWsUrl = endpoint?.terminal_ws_url
+          ? directWebsocketURL(endpoint.terminal_ws_url, wsParams, endpoint.token)
+          : "";
+        return lastResolvedWsUrl;
+      };
 
-      if (!activeWsUrl) {
-        term!.write("\r\n\x1b[31m[WebSocket connection failed: missing terminal endpoint]\x1b[0m\r\n");
-        return;
-      }
+      let consecutiveFailures = 0;
+      let connectedOnce = false;
+      // Circuit breaker: past this many consecutive failed attempts the failure
+      // is very likely permanent (expired auth, unreachable endpoint), so stop
+      // auto-reconnecting and wait for explicit user input instead of retrying
+      // forever.
+      const MAX_CONSECUTIVE_FAILURES = 8;
+      const MAX_RECONNECT_DELAY_MS = 30000;
 
       const scheduleReconnect = (delay: number) => {
         if (reconnectTimerRef.current !== null) {
@@ -1060,14 +1069,51 @@ export function XtermInstance({
         }
         reconnectTimerRef.current = window.setTimeout(() => {
           reconnectTimerRef.current = null;
-          if (isCurrentEffect()) connect();
+          if (isCurrentEffect()) void connect();
         }, delay);
       };
 
-      const connect = () => {
+      const armManualRetry = (reason: string) => {
+        const t = term;
+        if (!t) return;
+        t.write(`\r\n\x1b[31m[${reason}]\x1b[0m`);
+        t.write("\r\n\x1b[33m[自动重连已停止，按任意键重试。]\x1b[0m\r\n");
+        const retryDisposable = t.onData(() => {
+          retryDisposable.dispose();
+          // Drop the retry keystroke itself so it is not delivered to the
+          // shell once the new connection opens.
+          window.setTimeout(() => {
+            inputBuf.current = [];
+          }, 0);
+          if (!isCurrentEffect()) return;
+          consecutiveFailures = 0;
+          scheduleReconnect(0);
+        });
+      };
+
+      const connect = async () => {
         if (!isCurrentEffect()) return;
-        connectAttempts += 1;
-        const socket = new WebSocket(activeWsUrl);
+        let wsUrl = "";
+        try {
+          // Refresh the direct endpoint (and its short-lived token) on retries.
+          wsUrl = await resolveWsUrl(consecutiveFailures > 0);
+        } catch {
+          wsUrl = "";
+        }
+        if (!isCurrentEffect()) return;
+        if (!wsUrl) {
+          armManualRetry(directMode
+            ? "直连模式已开启，但 daemon 尚未上报可用直连端点；请检查 daemon 内网地址或关闭直连。"
+            : "WebSocket connection failed: missing terminal endpoint");
+          return;
+        }
+        let socket: WebSocket;
+        try {
+          socket = new WebSocket(wsUrl);
+        } catch {
+          armManualRetry(`WebSocket connection failed: invalid endpoint ${lastResolvedWsUrl}`);
+          return;
+        }
         const socketGeneration = generation;
         if (wsRef.current && wsRef.current !== socket && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
           wsRef.current.close();
@@ -1087,7 +1133,7 @@ export function XtermInstance({
             return;
           }
           connectedOnce = true;
-          connectAttempts = 0;
+          consecutiveFailures = 0;
           for (const chunk of inputBuf.current) {
             socket.send(chunk);
           }
@@ -1095,9 +1141,12 @@ export function XtermInstance({
           lastSentSizeRef.current = null;
           fitAndResize(true);
           scheduleFitBurst({ notify: true });
+          // Non-forced follow-ups: they only transmit when the fitted size
+          // actually changed, avoiding a resize -> tmux redraw storm on every
+          // reconnect.
           [500, 2000].forEach((delay) => {
             postOpenResizeTimers.push(window.setTimeout(() => {
-              fitAndResize(true);
+              fitAndResize();
             }, delay));
           });
 
@@ -1150,22 +1199,33 @@ export function XtermInstance({
           if (normalExitRef.current || kickedRef.current) {
             return;
           }
-          if (!connectedOnce && connectAttempts >= 3) {
-            term!.write(`\r\n\x1b[31m[WebSocket connection failed: ${activeWsUrl}]\x1b[0m\r\n`);
-          } else if (connectedOnce) {
+          consecutiveFailures += 1;
+          if (consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
+            armManualRetry(connectedOnce
+              ? (directMode
+                ? "多次重连失败：直连 daemon 不可达，或直连授权已过期。"
+                : "多次重连失败：服务器不可达，或登录态已过期。")
+              : `WebSocket connection failed: ${lastResolvedWsUrl}`);
+            return;
+          }
+          if (connectedOnce) {
             term!.write(directMode
               ? "\r\n\x1b[33m[直连 daemon 连接断开，正在重连直连端点...]\x1b[0m\r\n"
               : "\r\n\x1b[33m[Connection closed, reconnecting...]\x1b[0m\r\n");
           }
-          const delay = Math.min(5000, 300 * connectAttempts);
-          scheduleReconnect(delay);
+          // Exponential backoff with jitter; each attempt re-resolves the URL
+          // so expired direct tokens / rotated credentials self-heal.
+          const backoff = Math.min(MAX_RECONNECT_DELAY_MS, 500 * 2 ** Math.min(consecutiveFailures - 1, 6));
+          scheduleReconnect(Math.round(backoff * (0.7 + Math.random() * 0.6)));
         };
 
       };
 
       normalExitRef.current = false;
       kickedRef.current = false;
-      connectFrame = window.requestAnimationFrame(connect);
+      connectFrame = window.requestAnimationFrame(() => {
+        void connect();
+      });
 
       /* ── 3. User input → WS ── */
       dataDisposable = term.onData((data) => {
