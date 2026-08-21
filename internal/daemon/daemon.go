@@ -4708,10 +4708,65 @@ func terminalTitleFromPaneInfo(paneTitle string, currentPath string, command str
 	} else if tmuxTitleLooksInitialPlaceholder(title, command) {
 		title = terminalTitleFromCommand(command)
 	}
+	// tmux does not understand the kitty graphics protocol (APC
+	// "\x1b_G<control>;<base64 payload>\x1b\\") and leaks the final chunk's
+	// control trailer into pane_title (e.g. "Gm=0;iVBORw0KGgo..."), so a pane
+	// that displayed an inline image reports a meaningless base64 fragment as
+	// its title. Drop those and fall back to the working directory instead of
+	// poisoning the UI with random characters.
+	if terminalTitleLooksLikeImageFragment(title) {
+		if currentPath != "" {
+			title = compactPathTitle(currentPath)
+		} else {
+			title = terminalTitleFromCommand(command)
+		}
+	}
 	if currentPath != "" && tmuxTitleLooksShortenedPath(title) {
 		title = compactPathTitle(currentPath)
 	}
 	return title
+}
+
+// terminalTitleLooksLikeImageFragment reports whether a pane title is really
+// the tail of a kitty graphics protocol image chunk that tmux misparsed into
+// pane_title, e.g. "Gm=0;iVBORw0KGgo..." or "m=1;QUJD...". tmux keeps the
+// chunk's control data (the "m=0"/"m=1" continuation flag, sometimes with a
+// leading "_G"/"G" remnant of the APC introducer) followed by pure base64.
+// Legitimate titles are short and virtually never match that shape.
+func terminalTitleLooksLikeImageFragment(title string) bool {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return false
+	}
+	// Backstop: real titles are far shorter than this; image chunks are
+	// typically thousands of bytes.
+	if len(title) > 512 {
+		return true
+	}
+	rest := title
+	if trimmed, ok := strings.CutPrefix(rest, "_G"); ok {
+		rest = trimmed
+	} else if trimmed, ok := strings.CutPrefix(rest, "G"); ok {
+		rest = trimmed
+	}
+	payload := ""
+	for _, prefix := range []string{"m=0;", "m=1;"} {
+		if strings.HasPrefix(rest, prefix) {
+			payload = strings.TrimPrefix(rest, prefix)
+			break
+		}
+	}
+	if payload == "" {
+		return false
+	}
+	for _, r := range payload {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '+', r == '/', r == '=':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func terminalTitleFromCommand(command string) string {
@@ -4781,7 +4836,7 @@ func fullTerminalTitle(title string, paneTitle string, currentPath string) strin
 	if currentPath != "" && tmuxTitleLooksShortenedPath(title) {
 		return currentPath
 	}
-	if paneTitle != "" && paneTitle != title {
+	if paneTitle != "" && paneTitle != title && !terminalTitleLooksLikeImageFragment(paneTitle) {
 		return paneTitle
 	}
 	return title

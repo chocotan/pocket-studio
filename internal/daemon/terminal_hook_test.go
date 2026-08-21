@@ -521,6 +521,44 @@ func TestTerminalTitleFromPaneInfoUsesRuntimePaneFields(t *testing.T) {
 	}
 }
 
+func TestTerminalTitleFromPaneInfoDropsImageFragments(t *testing.T) {
+	// kitty graphics protocol (APC) chunk trailers that tmux leaks into
+	// pane_title after a pane displays an inline image.
+	for _, fragment := range []string{
+		"Gm=0;SElKS0xNTg==",
+		"_Gm=1;QUJDREVGRw==",
+		"m=0;iVBORw0KGgoAAAANSUhEUgAAAAEI",
+		"Gm=0;x3/GE574FAB++dd+m1/59d/mFV7upXjVV34FXvu1XoPtnR1KBNM0sh4GVqsVq+WKo6MjfvO3f5cHms963vWd34Hf/K3f5gd/+KdYrQee23d/zw/w4R/6gbzve78n95umkW/79u9i99I+z209jDzQYt7zzu/0dvzFX/4VX/HV34xtHmhv74BP+rTP4Qs+59OICO4XJVgu13zN138zmcn9Dg8Peb8P+mimaeL5+cSP+wh2tjf5t3qt13hlPugD3hcA2zzhCU/ENs/PfecuACDBu7zTW/NyL/dyfP4Xfil/83dP4Pn5wR/5Sf7iL/6KT/yEj+bo8IgXRoJXfPmX5Zd++dd493d5O17/9V+P3/nd3+Nbv/37aJk86SlP5w/+6M/5/M/5FD75Ez+Gb/yW7+B3fvePeKDVeuBjPv7TeVH97M//Mq//uq/NxsYczvMcbrj+Gl73dV6LL/qSr+Cv/uZx/Ev+9M//hk/+1M/mCz//M3nlV3gZfuXXf4f7vcorvwJPeerTuHBxD4Av/6pv5NGPfCif9Akfw2/+5m/z72Yue5VXfjmuvfYafuVXfoN/jfl8xi0PuoWP+4RP4/Y77+GBMpNXesVX4Oabb0KCYRj5wR/6Ee665z5ekMPDJX/yp3/Kt3/nD3C/O++6l0/79M/habfeQcvk+RmGgbd+y7fgJ3/ml2itAWCbz/uirwTgumtP8dmf8Yns7e3xkz/9cwDcdvtdfMpnfAEv9thH8TM/+wv88I/9DP9WtnluAr7ha7+U7e1tWmscHBzwQEfLNZ/+WZ/Px3zUh3Di+Am+7wd+iD/4o7/gqquuuuqqFwgAPfrFX8H8FyslOHP6NPfdd5a0AYgIdna2WR4tWQ8DL4qQ2N7eYhhHhmGgteRFUWul6yqr1RrbPNCs71gPIy+IAIVwGvMve/AtN3H+wkX2Dw55YW684ToigmEYWa3X7O3tYfMculppmWQm/xHm8xk7Ozus12v29vaxzX+ma86c5vDwkMOjJf9Ruq4yjhP/FqUUsGmZ/FtJwjYvyJnTp5ha4+LFXV5Ux48fA5vdS3v8W21vbXJweIRtXpgH3Xwj4zSxWg/s7u6Saf41JLD5dyulgE3L5N9KErZ5Qc6cPsXUGhcv7vIfQQIpENAyeX4kMZ/PWC5XvChOnjjOOI7sHxzyLzl+bIe02dvbB2B7a5P9g0MeaDbrOXH8OPfedxbbPLeIIDN5QSQRIQBssI1t/iNFCCFaJs9NEiHRMnlBJAFgm3/JxsYCgKOjJS/MiePHkMSFi7v8TyGJa645w7lz52mt8R9BEvP5jOVyxb9F11XGceLfIyTS5gW59poz7F66xHo9cNV/nptvup6j5Yrz5y/y7yGJ48d2uLh7iRdmPp9x3TVnWA0Dq9WKS5f2sc2/hg==",
+	} {
+		if got := terminalTitleFromPaneInfo(fragment, "/repo", "pi"); got != "/repo" {
+			t.Fatalf("terminalTitleFromPaneInfo(image fragment %.24q...) = %q, want path fallback /repo", fragment, got)
+		}
+	}
+	// Overlong titles are fragments even without a recognizable trailer.
+	if got := terminalTitleFromPaneInfo(strings.Repeat("a", 600), "/repo", "pi"); got != "/repo" {
+		t.Fatalf("terminalTitleFromPaneInfo(overlong title) = %q, want path fallback /repo", got)
+	}
+	// No path available: fall back to the command-derived title.
+	if got := terminalTitleFromPaneInfo("Gm=0;SElKS0xNTg==", "", "pi"); got != "Pi" {
+		t.Fatalf("terminalTitleFromPaneInfo(fragment, no path) = %q, want Pi", got)
+	}
+	// fullTitle must not leak the fragment either.
+	if got := fullTerminalTitle("/repo", "Gm=0;SElKS0xNTg==", "/repo"); got == "Gm=0;SElKS0xNTg==" {
+		t.Fatalf("fullTerminalTitle() leaked image fragment into full title")
+	}
+	// Legitimate titles that merely resemble fragments must survive.
+	for _, legit := range []string{
+		"m=0;",             // trailer without payload
+		"gm=0; notes",      // lowercase flag and a space
+		"π - remote-agent", // normal pi title
+		"choco@xps9500: ~/Downloads/remote-agent", // zsh path title
+	} {
+		if got := terminalTitleFromPaneInfo(legit, "/repo", "pi"); got != legit {
+			t.Fatalf("terminalTitleFromPaneInfo(legit %q) = %q, want unchanged", legit, got)
+		}
+	}
+}
+
 func TestTmuxNewSessionCommandInjectsHookEnv(t *testing.T) {
 	cmd, err := tmuxNewSessionCommand("session", "OpenCode", t.TempDir(), "opencode", []string{
 		"POCKET_STUDIO_HOOK_URL=http://127.0.0.1:1/terminal-event",
