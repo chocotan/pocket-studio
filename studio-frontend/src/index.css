@@ -1,6 +1,19 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Nerd Font symbols (powerline / devicon glyphs) for xterm powerline prompts.
+   Covers all PUA icon ranges + the few BMP symbols used by powerline themes.
+   Loaded with font-display: swap so terminal text renders immediately. */
+@font-face {
+  font-family: 'Symbols Nerd Font Mono';
+  src: url('/fonts/symbols-nerd-font-mono.woff2') format('woff2');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+  /* Only used as fallback after JetBrains Mono misses a glyph */
+  unicode-range: U+E000-F8FF, U+F0000-FFFFD, U+100000-10FFFD, U+23FB-23FE, U+2630, U+2665, U+26A1, U+276C-2771, U+2B58, U+2649;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 /* ─────────────────────────────────────────────

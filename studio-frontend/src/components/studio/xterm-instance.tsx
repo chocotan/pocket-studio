@@ -688,13 +688,27 @@ export function XtermInstance({
       terminalReadyRef.current = false;
       incomingBuf.current = [];
 
+      // Preload Nerd Font symbol glyphs (powerline / devicons) before xterm
+      // measures font metrics, otherwise the atlas bakes tofu boxes for the
+      // PUA ranges and never re-renders after the webfont arrives.
+      try {
+        if (document.fonts?.load) {
+          await Promise.race([
+            document.fonts.load(`12px 'Symbols Nerd Font Mono'`, '\ue0b0\ue725\uf489'),
+            new Promise((resolve) => setTimeout(resolve, 1500)),
+          ]);
+        }
+      } catch {
+        // Font preload is best-effort; terminal still works without glyphs.
+      }
+
       /* ── 1. Create xterm.js instance ── */
       const terminalTheme = getXtermTheme(theme);
       term = new XTerminal({
         cursorBlink:   true,
         cursorStyle:   "bar",
         fontSize:      BASE_FONT_SIZE * scaleRef.current,
-        fontFamily:    "JetBrains Mono, Menlo, Monaco, Consolas, monospace",
+        fontFamily:    "JetBrains Mono, Menlo, Monaco, Consolas, 'Symbols Nerd Font Mono', monospace",
         lineHeight:    1.2,
         scrollback:    5000,
         scrollSensitivity: 1,
@@ -982,6 +996,16 @@ export function XtermInstance({
             fitAddon.fit();
           } catch {
             // Later resize events will retry if font metrics are not ready.
+          }
+        }
+        // If the Nerd Font webfont landed after xterm baked its glyph atlas
+        // (measured against fallback metrics), rebuild it so powerline glyphs
+        // render correctly without remounting the terminal.
+        if (isCurrentEffect() && term) {
+          try {
+            (term as unknown as { clearTextureAtlas?: () => void }).clearTextureAtlas?.();
+          } catch {
+            // Renderer without texture atlas support; ignore.
           }
         }
       });
