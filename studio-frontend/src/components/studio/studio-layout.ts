@@ -347,6 +347,7 @@ function sanitizeTab(value: unknown, tracker?: LayoutIDTracker): StudioTab | nul
     agentResumeSessionId: typeof tab.agentResumeSessionId === "string" ? tab.agentResumeSessionId : undefined,
     agentImportHistory: tab.agentImportHistory === true,
     projectId: typeof tab.projectId === "string" ? tab.projectId : undefined,
+    useTmux: tabKind === "terminal" ? tab.useTmux !== false : undefined,
     customAgentId: typeof tab.customAgentId === "string" && tab.customAgentId ? tab.customAgentId : undefined,
     customAgentName: typeof tab.customAgentName === "string" && tab.customAgentName ? tab.customAgentName : undefined,
   };

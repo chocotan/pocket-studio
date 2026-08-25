@@ -10,6 +10,7 @@
     "test:clipboard-images": "node scripts/test-clipboard-images.mjs",
     "test:event-model": "node scripts/test-agent-event-model.mjs",
     "test:terminal-image-paste": "node scripts/test-terminal-image-paste.mjs",
+    "test:terminal-image-output": "node scripts/test-terminal-image-output.mjs",
     "test:terminal-ime": "node scripts/test-terminal-ime-input.mjs",
     "test:terminal-keyboard": "node scripts/test-terminal-keyboard-input.mjs",
     "test:workspace-state-cache": "node scripts/test-workspace-state-cache.mjs",

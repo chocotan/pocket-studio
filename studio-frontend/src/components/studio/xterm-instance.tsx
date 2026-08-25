@@ -9,6 +9,7 @@ import { pocketElectronAPI } from "@/lib/electron-api";
 import { projectDirectMode } from "@/lib/direct-mode";
 import { createTerminalImeCompositionGuard } from "./terminal-ime-input";
 import { terminalImagePasteText } from "./terminal-image-paste";
+import { createTerminalImageOutputNormalizer } from "./terminal-image-output";
 import { handleRemoteControlV } from "./terminal-keyboard-input";
 
 export function getXtermTheme(theme: StudioTheme) {
@@ -1154,6 +1155,17 @@ export function XtermInstance({
           ownedSockets.delete(socket);
         }, { once: true });
         socket.binaryType = "arraybuffer";
+        const imageSizeNormalizer = createTerminalImageOutputNormalizer(useTmux);
+
+        const writeSocketTerminalData = (data: string | Uint8Array) => {
+          if (!imageSizeNormalizer) {
+            writeTerminalData(data);
+            return;
+          }
+          for (const chunk of imageSizeNormalizer.push(data)) {
+            writeTerminalData(chunk);
+          }
+        };
 
         let pingInterval: number | null = null;
 
@@ -1192,7 +1204,7 @@ export function XtermInstance({
         socket.onmessage = (event) => {
           if (!isCurrentEffect() || socketGeneration !== connectionGenerationRef.current || wsRef.current !== socket) return;
           if (event.data instanceof ArrayBuffer) {
-            writeTerminalData(new Uint8Array(event.data));
+            writeSocketTerminalData(new Uint8Array(event.data));
           } else if (typeof event.data === "string") {
             try {
               const message = JSON.parse(event.data) as { type?: string; title?: string; full_title?: string; command?: string };
@@ -1213,7 +1225,7 @@ export function XtermInstance({
             } catch {
               // Plain terminal text
             }
-            writeTerminalData(event.data);
+            writeSocketTerminalData(event.data);
           }
         };
 
@@ -1222,6 +1234,7 @@ export function XtermInstance({
         };
 
         socket.onclose = () => {
+          imageSizeNormalizer?.reset();
           if (pingInterval !== null) {
             window.clearInterval(pingInterval);
             pingInterval = null;
